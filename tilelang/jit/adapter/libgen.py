@@ -10,7 +10,7 @@ import os
 import tempfile
 import subprocess
 import logging
-from tilelang.env import TILELANG_TEMPLATE_PATH, CUTLASS_INCLUDE_DIR
+from tilelang.env import TILELANG_TEMPLATE_PATH, CUTLASS_INCLUDE_DIR, NVSHMEM_INCLUDE_DIR, NVSHMEM_LIB_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +84,9 @@ class LibraryGenerator(object):
                 "-I" + CUTLASS_INCLUDE_DIR,
             ]
             command += ["-diag-suppress=20013"]
+            command += ["-rdc=true"]
+        if os.environ.get("NVSHMEM_PATH", None) is not None:
+            command += ["-I" + NVSHMEM_INCLUDE_DIR, "-L" + NVSHMEM_LIB_PATH, "-lnvshmem_host -lnvshmem_device"]
         command += ["-o", libpath]
 
         src.write(self.lib_code)

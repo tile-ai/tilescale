@@ -39,6 +39,12 @@ TVM_PYTHON_PATH: str = os.environ.get("TVM_IMPORT_PYTHON_PATH", None)
 TVM_LIBRARY_PATH: str = os.environ.get("TVM_LIBRARY_PATH", None)
 TILELANG_TEMPLATE_PATH: str = os.environ.get("TL_TEMPLATE_PATH", None)
 TILELANG_PACKAGE_PATH: str = pathlib.Path(__file__).resolve().parents[0]
+if os.environ.get("NVSHMEM_PATH", None) is not None:
+    NVSHMEM_INCLUDE_DIR: str = os.environ.get("NVSHMEM_PATH") + "/build/src/include"
+    NVSHMEM_LIB_PATH: str = os.environ.get("NVSHMEM_PATH") + "/build/src/lib"
+else:
+    NVSHMEM_INCLUDE_DIR: str = ""
+    NVSHMEM_LIB_PATH: str = ""
 
 # SETUP ENVIRONMENT VARIABLES
 CUTLASS_NOT_FOUND_MESSAGE = ("CUTLASS is not installed or found in the expected path")

@@ -88,3 +88,6 @@ tilelang/lib
 
 # cython
 tilelang/jit/adapter/cython/.cycache
+
+# nvshmem
+3rdparty/nvshmem

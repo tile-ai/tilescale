@@ -63,6 +63,9 @@ def tilelang_callback_cuda_compile(code, target):
         cutlass_path = os.environ["TL_CUTLASS_PATH"]
     else:
         cutlass_path = osp.abspath(osp.join(project_root, "3rdparty/cutlass/include"))
+    if os.environ.get("NVSHMEM_PATH", None) is not None:
+        nvshmem_include_path = os.environ["NVSHMEM_PATH"] + "/build/src/include"
+        nvshmem_lib_path = os.environ["NVSHMEM_PATH"] + "/build/src/lib"
     compute_version = "".join(nvcc.get_target_compute_version(target).split("."))
 
     # special handle for Hopper
@@ -75,17 +78,25 @@ def tilelang_callback_cuda_compile(code, target):
 
     # printing out number of registers
     debug_option = "--ptxas-options=--verbose,--register-usage-level=10,--warn-on-local-memory-usage"
+    options = [
+        "-std=c++17",
+        debug_option,
+        "--use_fast_math",
+        "-I" + tl_template_path,
+        "-I" + cutlass_path,
+    ]
+    if os.environ.get("NVSHMEM_PATH", None) is not None:
+        options += [
+            "-I" + nvshmem_include_path,
+            "-L" + nvshmem_lib_path,
+            "-lnvshmem_host -lnvshmem_device"
+            "-rdc=true",
+        ]
     ptx = nvcc.compile_cuda(
         code,
         format,
         arch,
-        options=[
-            "-std=c++17",
-            debug_option,
-            "--use_fast_math",
-            "-I" + tl_template_path,
-            "-I" + cutlass_path,
-        ],
+        options=options,
         verbose=False,
     )
 
