@@ -546,9 +546,9 @@ TL_DEVICE void gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
                                              A_type, B_type, C_type>;
     MMA::body<wg_wait>(pA, pB, accum);
   } else {
-    using MMA =
-        cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                                   trans_B, clear_accum, A_type, B_type, C_type>;
+    using MMA = cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n,
+                                           trans_A, trans_B, clear_accum,
+                                           A_type, B_type, C_type>;
     MMA::body(pA, pB, accum);
   }
 }
@@ -563,9 +563,9 @@ TL_DEVICE void gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
                                              A_type, B_type, C_type>;
     MMA::body_rs<wg_wait>(pA, pB, accum);
   } else {
-    using MMA =
-        cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                                   trans_B, clear_accum, A_type, B_type, C_type>;
+    using MMA = cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n,
+                                           trans_A, trans_B, clear_accum,
+                                           A_type, B_type, C_type>;
     MMA::body_rs(pA, pB, accum);
   }
 }
