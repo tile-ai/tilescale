@@ -184,7 +184,7 @@ struct OperandTraits<64, N, K, false,
 };
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, bool zero_init, typename A_type_raw,
+          bool trans_B, bool clear_accum, typename A_type_raw,
           typename B_type_raw, typename C_type_raw>
 class GemmTensorOp {
 public:
@@ -251,7 +251,7 @@ public:
         make_tensor(make_rmem_ptr(reinterpret_cast<C_type *>(pC)),
                     partition_shape_C(tiled_mma, Shape<Int<M>, Int<N>>{}));
 
-    if constexpr (zero_init) {
+    if constexpr (clear_accum) {
       clear(acc);
     }
     // when layout is KxN and n_warp is 1, there seem to be a bug, use this as a
@@ -288,7 +288,7 @@ public:
         make_tensor(make_rmem_ptr(reinterpret_cast<A_type *>(pA)),
                     partition_shape_A(tiled_mma, Shape<Int<M>, Int<K>>{}));
 
-    if constexpr (zero_init) {
+    if constexpr (clear_accum) {
       clear(acc);
     }
     auto tCrB_view = make_tensor(tCrB.data(), remove_swizzle(tCrB.layout()));
@@ -324,7 +324,7 @@ public:
         make_tensor(make_rmem_ptr(reinterpret_cast<B_type *>(pB)),
                     partition_shape_B(tiled_mma, Shape<Int<N>, Int<K>>{}));
 
-    if constexpr (zero_init) {
+    if constexpr (clear_accum) {
       clear(acc);
     }
     auto tCrA_view = make_tensor(tCrA.data(), remove_swizzle(tCrA.layout()));
@@ -344,29 +344,29 @@ public:
 namespace tl {
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, bool zero_init, typename A_type, typename B_type,
+          bool trans_B, bool clear_accum, typename A_type, typename B_type,
           typename C_type>
 CUTLASS_DEVICE void gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
   using MMA = cute::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                                 trans_B, zero_init, A_type, B_type, C_type>;
+                                 trans_B, clear_accum, A_type, B_type, C_type>;
   MMA::body(pA, pB, accum);
 }
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, bool zero_init, typename A_type, typename B_type,
+          bool trans_B, bool clear_accum, typename A_type, typename B_type,
           typename C_type>
 CUTLASS_DEVICE void gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
   using MMA = cute::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                                 trans_B, zero_init, A_type, B_type, C_type>;
+                                 trans_B, clear_accum, A_type, B_type, C_type>;
   MMA::body_rs(pA, pB, accum);
 }
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, bool zero_init, typename A_type, typename B_type,
+          bool trans_B, bool clear_accum, typename A_type, typename B_type,
           typename C_type>
 CUTLASS_DEVICE void gemm_sr(A_type *pA, B_type *pB, C_type *accum) {
   using MMA = cute::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                                 trans_B, zero_init, A_type, B_type, C_type>;
+                                 trans_B, clear_accum, A_type, B_type, C_type>;
   MMA::body_sr(pA, pB, accum);
 }
 

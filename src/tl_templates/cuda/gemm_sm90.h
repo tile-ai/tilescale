@@ -20,7 +20,7 @@ namespace tl_wgmma {
 using namespace cutlass::gemm::collective::detail; // ss_smem_selector
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, bool zero_init, typename A_type_raw,
+          bool trans_B, bool clear_accum, typename A_type_raw,
           typename B_type_raw, typename C_type_raw>
 class GemmTensorOp {
 public:
@@ -79,7 +79,7 @@ public:
 
     warpgroup_fence_operand(acc);
     warpgroup_arrive();
-    if constexpr (zero_init) {
+    if constexpr (clear_accum) {
       tiled_mma.accumulate_ = GMMA::ScaleOut::Zero;
     }
     CUTLASS_PRAGMA_UNROLL
@@ -135,7 +135,7 @@ public:
     warpgroup_fence_operand(tCrA);
     warpgroup_fence_operand(acc);
     warpgroup_arrive();
-    if constexpr (zero_init) {
+    if constexpr (clear_accum) {
       tiled_mma.accumulate_ = GMMA::ScaleOut::Zero;
     }
     CUTLASS_PRAGMA_UNROLL
@@ -341,7 +341,7 @@ struct OperandTraits<64, N, K, false,
 };
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, bool zero_init, typename A_type_raw,
+          bool trans_B, bool clear_accum, typename A_type_raw,
           typename B_type_raw, typename C_type_raw>
 class GemmTensorOp {
 public:
@@ -412,7 +412,7 @@ public:
     // workaround
     auto tCrA_view = make_tensor(tCrA.data(), remove_swizzle(tCrA.layout()));
     auto tCrB_view = make_tensor(tCrB.data(), remove_swizzle(tCrB.layout()));
-    if constexpr (zero_init) {
+    if constexpr (clear_accum) {
       tiled_mma.accumulate_ = GMMA::ScaleOut::Zero;
     }
     CUTE_UNROLL
@@ -446,7 +446,7 @@ public:
                     partition_shape_A(tiled_mma, Shape<Int<M>, Int<K>>{}));
 
     auto tCrB_view = make_tensor(tCrB.data(), remove_swizzle(tCrB.layout()));
-    if constexpr (zero_init) {
+    if constexpr (clear_accum) {
       tiled_mma.accumulate_ = GMMA::ScaleOut::Zero;
     }
     copy(tiled_copy_B, tCsB(_, _, 0), tCrB_copy_view(_, _, 0));
@@ -482,7 +482,7 @@ public:
                     partition_shape_B(tiled_mma, Shape<Int<N>, Int<K>>{}));
 
     auto tCrA_view = make_tensor(tCrA.data(), remove_swizzle(tCrA.layout()));
-    if constexpr (zero_init) {
+    if constexpr (clear_accum) {
       tiled_mma.accumulate_ = GMMA::ScaleOut::Zero;
     }
     copy(tiled_copy_A, tCsA(_, _, 0), tCrA_copy_view(_, _, 0));
@@ -505,67 +505,67 @@ namespace tl {
 namespace tl_mma {
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, bool zero_init, typename A_type, typename B_type,
+          bool trans_B, bool clear_accum, typename A_type, typename B_type,
           typename C_type>
 CUTLASS_DEVICE void gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
   using MMA =
       cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                                 trans_B, zero_init, A_type, B_type, C_type>;
+                                 trans_B, clear_accum, A_type, B_type, C_type>;
   MMA::body(pA, pB, accum);
 }
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, bool zero_init, typename A_type, typename B_type,
+          bool trans_B, bool clear_accum, typename A_type, typename B_type,
           typename C_type>
 CUTLASS_DEVICE void gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
   using MMA =
       cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                                 trans_B, zero_init, A_type, B_type, C_type>;
+                                 trans_B, clear_accum, A_type, B_type, C_type>;
   MMA::body_rs(pA, pB, accum);
 }
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, bool zero_init, typename A_type, typename B_type,
+          bool trans_B, bool clear_accum, typename A_type, typename B_type,
           typename C_type>
 CUTLASS_DEVICE void gemm_sr(A_type *pA, B_type *pB, C_type *accum) {
   using MMA =
       cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                                 trans_B, zero_init, A_type, B_type, C_type>;
+                                 trans_B, clear_accum, A_type, B_type, C_type>;
   MMA::body_sr(pA, pB, accum);
 }
 
 } // namespace tl_mma
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, bool zero_init = false, bool use_wgmma = true,
+          bool trans_B, bool clear_accum = false, bool use_wgmma = true,
           int wg_wait = 0, typename A_type, typename B_type, typename C_type>
 TL_DEVICE void gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
   if constexpr (use_wgmma) {
     using MMA = cute::tl_wgmma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n,
-                                             trans_A, trans_B, zero_init,
+                                             trans_A, trans_B, clear_accum,
                                              A_type, B_type, C_type>;
     MMA::body<wg_wait>(pA, pB, accum);
   } else {
     using MMA =
         cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                                   trans_B, zero_init, A_type, B_type, C_type>;
+                                   trans_B, clear_accum, A_type, B_type, C_type>;
     MMA::body(pA, pB, accum);
   }
 }
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, bool zero_init = false, bool use_wgmma = true,
+          bool trans_B, bool clear_accum = false, bool use_wgmma = true,
           int wg_wait = 0, typename A_type, typename B_type, typename C_type>
 TL_DEVICE void gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
   if constexpr (use_wgmma) {
     using MMA = cute::tl_wgmma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n,
-                                             trans_A, trans_B, zero_init,
+                                             trans_A, trans_B, clear_accum,
                                              A_type, B_type, C_type>;
     MMA::body_rs<wg_wait>(pA, pB, accum);
   } else {
     using MMA =
         cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                                   trans_B, zero_init, A_type, B_type, C_type>;
+                                   trans_B, clear_accum, A_type, B_type, C_type>;
     MMA::body_rs(pA, pB, accum);
   }
 }

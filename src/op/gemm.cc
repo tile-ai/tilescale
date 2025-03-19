@@ -46,7 +46,7 @@ Gemm::Gemm(Array<PrimExpr> args, BufferMap vmap) {
   N = args[6].as<IntImm>().value()->value;
   K = args[7].as<IntImm>().value()->value;
   policy = static_cast<GemmWarpPolicy>(args[8].as<IntImm>().value()->value);
-  zero_init = args[9].as<Bool>().value();
+  clear_accum = args[9].as<Bool>().value();
   if (args.size() > 10) {
     kPack = args[10].as<IntImm>().value()->value;
     if (kPack != 1 && kPack != 2) {
@@ -133,7 +133,7 @@ Stmt Gemm::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   ss << op_name << "<" << M << ", " << N << ", " << K << ", ";
   ss << warp_m << ", " << warp_n << ", ";
   ss << trans_A << ", " << trans_B;
-  ss << ", " << zero_init;
+  ss << ", " << clear_accum;
   if (TargetIsCDNA(T.target)) {
     // for cdna gemm, we need to specify kPack
     ss << ", " << kPack;
