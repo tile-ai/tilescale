@@ -8,8 +8,8 @@ import tvm
 
 @tvm.register_func("tilelang_callback_cuda_postproc", override=True)
 def tilelang_callback_cuda_postproc(code, _):
-    from code_replace import rc
-    return rc
+    # from code_replace import rc
+    # return rc
     return code
 
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):

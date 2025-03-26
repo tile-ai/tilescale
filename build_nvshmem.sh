@@ -75,4 +75,9 @@ if [ ! -f CMakeCache.txt ] || [ -z ${FLUX_BUILD_SKIP_CMAKE} ]; then
 fi
 # -DNVSHMEM_TRACE=ON
 make VERBOSE=1 -j${JOBS}
+
+echo "Start to build hydra"
+cd ${PROJECT_ROOT}/3rdparty/nvshmem/scripts/
+mkdir -p build
+./install_hydra.sh src_dir build
 popd
