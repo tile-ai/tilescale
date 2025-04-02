@@ -1,6 +1,5 @@
 # distutils: language = c++
 # cython: language_level=3
-# distutils: define_macros=MPICH_SKIP_MPICXX=1,OMPI_SKIP_MPICXX=1
 
 import cython
 from cython.operator cimport dereference as deref
@@ -64,6 +63,7 @@ cdef extern from "<cuda_runtime.h>":
     const char* cudaGetErrorString(cudaError_t)
     cudaError_t cudaMemset(void* devPtr, int value, size_t count) nogil
     cudaError_t cudaFree(void* devPtr) nogil
+    cudaError_t cudaSetDevice(int device) nogil
 
 cdef inline void CUDA_CHECK(cudaError_t status) nogil:
     if status != cudaSuccess:
@@ -71,6 +71,7 @@ cdef inline void CUDA_CHECK(cudaError_t status) nogil:
             raise RuntimeError(f"CUDA error: {cudaGetErrorString(status)}")
 
 cdef extern from "<nvshmemx.h>":
+    void nvshmem_finalize() nogil
     void* nvshmem_malloc(size_t size) nogil
     void nvshmem_free(void* ptr) nogil
     int nvshmem_my_pe() nogil
@@ -116,88 +117,32 @@ cdef extern from "<nvshmemx.h>":
     void nvshmemx_init_attr(int type, nvshmemx_init_attr_t *attr) nogil
     int NVSHMEMX_INIT_WITH_UNIQUEID
 
-cdef void check_nvshmem_init() nogil:
-    cdef int status = nvshmemx_init_status()
-    if status < NVSHMEM_STATUS_IS_INITIALIZED:
-        with gil:
-            raise RuntimeError(f"nvshmem not initialized: status {status}")
-
-cdef extern from "<mpi.h>":
-    ctypedef struct MPI_Comm:
-        pass
-    ctypedef struct MPI_Datatype:
-        pass
-    ctypedef struct MPI_Status:
-        pass
-    
-    int MPI_Init(int* argc, char*** argv) nogil
-    int MPI_Comm_rank(MPI_Comm comm, int* rank) nogil
-    int MPI_Comm_size(MPI_Comm comm, int* size) nogil
-    int MPI_Bcast(void* buffer, int count, MPI_Datatype datatype, int root, MPI_Comm comm) nogil
-    MPI_Comm MPI_COMM_WORLD
-    MPI_Datatype MPI_UINT8_T
-
-
+cdef extern from "nvshmem_utils_impl.cuh":
+    void nvshmem_init_impl() noexcept
+    void* nvshmem_create_tensor_impl(
+        const vector[int64_t]& shape,
+        ScalarType dtype,
+        int device_index,
+        Tensor& result
+    ) except +
 
 @cython.embedsignature(True)
 def init_nvshmem():
-    cdef int argc = 0
-    cdef char** argv = NULL
-    cdef int rank, nranks
-    
-    MPI_Init(&argc, &argv)
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank)
-    MPI_Comm_size(MPI_COMM_WORLD, &nranks)
+    nvshmem_init_impl()
 
-    cdef nvshmemx_uniqueid_t id
-    if rank == 0:
-        nvshmemx_get_uniqueid(&id)
-    
-    MPI_Bcast(&id, sizeof(nvshmemx_uniqueid_t), MPI_UINT8_T, 0, MPI_COMM_WORLD);
-
-    cdef nvshmemx_init_attr_t init_attr
-    nvshmemx_set_attr_uniqueid_args(rank, nranks, &id, &init_attr)
-    nvshmemx_init_attr(NVSHMEMX_INIT_WITH_UNIQUEID, &init_attr)
-    
-    cdef int mype = nvshmem_my_pe()
-    if rank != mype:
-        raise RuntimeError("NVShmem init: rank does not match PE!")
 
 @cython.embedsignature(True)
 def nvshmem_create_tensor(vector[int64_t] shape, ScalarType dtype):
-    """
-    Create a PyTorch tensor managed by NVSHMEM
-    
-    Args:
-        shape: tensor shape
-        dtype: tensor data type
-    
-    Returns:
-        PyTorch tensor
-    """
     cdef Tensor result
-    
-    check_nvshmem_init()
     cdef int current_dev = current_device()
-    cdef TensorOptions option_gpu = TensorOptions().dtype(dtype).device(kCUDA).device_index(current_dev)
-    cdef int64_t element_size = elementSize(dtype)
-    cdef int64_t size = element_size * reduce(operator.mul, shape, 1)
     
-    assert size != 0
-    
-    device_synchronize()
-    cdef void* ptr = nvshmem_malloc(size)
-    assert ptr != NULL
-    
-    CUDA_CHECK(cudaMemset(ptr, 0, size))
-    
-    result = from_blob(
-        ptr,
+    cdef void* ptr = nvshmem_create_tensor_impl(
         shape,
-        tensor_deleter,
-        option_gpu
+        dtype,
+        current_dev,
+        result
     )
-
+    
     return THPVariable_Wrap(result)
     
 
