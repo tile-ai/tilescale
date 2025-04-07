@@ -36,6 +36,7 @@ from .customize import (
     view,  # noqa: F401
 )
 from .builtin import *  # noqa: F401
+from .distributed import *  # noqa: F401
 
 
 def symbolic(name: str, dtype: str = "int32"):

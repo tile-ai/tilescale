@@ -168,8 +168,10 @@ class TLCUDASourceWrapper(object):
         # TODO: Pass ptr created by nvshmem_malloc and stream to kernel
         _call_str = """"""
         _call_str += "\tcudaStream_t stream_;\n"
+        # TODO: check the impl of TileLink
         if self.use_nvshmem:
             _call_str += "\tint mype_node;\n"
+            _call_str += "\tnvshmem_init();\n"
             _call_str += "\tmype_node = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);\n"
             _call_str += "\tcudaSetDevice(mype_node);\n"
         _call_str += "\tcudaStreamCreate(&stream_);\n"
@@ -204,6 +206,8 @@ class TLCUDASourceWrapper(object):
 
         _call_str = self.generate_tma_descriptor_args(desc_name_map) + _call_str
         _call_str += "\tcudaStreamSynchronize(stream_);\n"
+        if self.use_nvshmem:
+            _call_str += "\tnvshmem_finalize();\n"
         _call_str += "\tcudaStreamDestroy(stream_);\n"
 
         # Wrap the kernel dispatch logic in an external C function

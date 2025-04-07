@@ -18,6 +18,7 @@
 
 #include "../op/builtin.h"
 #include "../op/bulk_copy.h"
+#include "../op/distributed.h"
 #include "target/source/ptx.h"
 
 namespace tvm {
@@ -1230,6 +1231,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     stream << ": \"l\"((void*)(" << global_buffer << "+" << global_addr
            << ")), \"r\"((int)" << guard << ")\n";
     stream << ");\n";
+  } else if (op->op.same_as(tl::GetPE())) {
+    os << "nvshmem_my_pe()";
   } else {
     CodeGenC::VisitExpr_(op, os);
   }
