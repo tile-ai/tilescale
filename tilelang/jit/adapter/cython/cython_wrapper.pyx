@@ -9,6 +9,8 @@ from libc.stdint cimport int64_t, uintptr_t
 from libc.stdlib cimport malloc, free
 from tvm import tir
 from tilelang.utils.tensor import map_torch_type
+from tilelang import use_distributed
+import pynvshmem
 
 cdef class CythonKernelWrapper:
     # Class attributes to store kernel configuration and library reference
@@ -93,7 +95,10 @@ cdef class CythonKernelWrapper:
                     else:  # Already converted to Python int during initialization
                         shape.append(s)
                 device = inputs[0].device if len(inputs) > 0 else torch.cuda.current_device()
-                tensor = torch.empty(*shape, dtype=dtype, device=device)
+                if use_distributed:
+                    tensor = pynvshmem.nvshmem_create_tensor(shape, dtype)
+                else:
+                    tensor = torch.empty(*shape, dtype=dtype, device=device)
             else:
                 tensor = inputs[ins_idx]
                 ins_idx += 1

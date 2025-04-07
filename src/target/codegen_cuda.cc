@@ -1233,6 +1233,16 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     stream << ");\n";
   } else if (op->op.same_as(tl::GetPE())) {
     os << "nvshmem_my_pe()";
+  } else if (op->op.same_as(tl::GetPENum())) {
+    os << "nvshmem_n_pes()";
+  } else if (op->op.same_as(tl::IntPE())) {
+    os << "nvshmem_int_p(";
+    this->PrintExpr(op->args[0], os);
+    os << ", ";
+    this->PrintExpr(op->args[1], os);
+    os << ", ";
+    this->PrintExpr(op->args[2], os);
+    os << ")";
   } else {
     CodeGenC::VisitExpr_(op, os);
   }

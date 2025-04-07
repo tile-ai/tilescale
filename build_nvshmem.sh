@@ -79,5 +79,5 @@ make VERBOSE=1 -j${JOBS}
 echo "Start to build hydra"
 cd ${PROJECT_ROOT}/3rdparty/nvshmem/scripts/
 mkdir -p build
-./install_hydra.sh src_dir build
+./install_hydra.sh src_dir ${PROJECT_ROOT}/3rdparty/nvshmem/scripts/build
 popd

@@ -5,6 +5,6 @@ nvcc -shared -rdc=true -Xcompiler -fPIC test_nvshmem_example.cu -o libnvshmem_ex
     -I/home/aiscuser/miniconda3/envs/tilelang/include \
     -I/home/aiscuser/cy/tilelang/3rdparty/nvshmem//build/src/include \
     -L/home/aiscuser/cy/tilelang/3rdparty/nvshmem//build/src/lib \
-    -lnvshmem_host -lnvshmem_device -lmpi -lopen-pal -lopen-rte
+    -lnvshmem_host -lnvshmem_device
 
 /home/aiscuser/cy/tilelang/3rdparty/nvshmem/scripts/build/bin/nvshmrun -n 8 python test_nvshmem_example.py
