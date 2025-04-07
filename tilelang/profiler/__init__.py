@@ -17,6 +17,17 @@ from tilelang.utils.tensor import (
 from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter import BaseKernelAdapter
 from tilelang.profiler.bench import do_bench
+from tilelang import use_distributed
+
+import logging
+
+logger = logging.getLogger(__name__)
+
+if use_distributed:
+    import pynvshmem
+    logger.info("Using distributed profiler")
+else:
+    logger.info("Not using distributed profiler")
 
 
 @dataclass
@@ -61,11 +72,40 @@ class Profiler:
         self.adapter = adapter
         return self
 
+    def init_distributed(self):
+        import os
+        import datetime
+
+        WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
+        RANK = int(os.environ.get("RANK", 0))
+        LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
+
+        torch.cuda.set_device(LOCAL_RANK)
+        torch.distributed.init_process_group(
+            backend="nccl",
+            world_size=WORLD_SIZE,
+            rank=RANK,
+            timeout=datetime.timedelta(seconds=1800),
+        )
+        assert torch.distributed.is_initialized()
+        TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
+
+        torch.cuda.synchronize()
+        pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
+
     def _get_inputs(self, with_output=False):
         ins = []
         for i in range(len(self.params)):
             if with_output or i not in self.result_idx:
                 ins.append(self.supply(self.params[i]))
+        return ins
+
+    def _get_distributed_inputs(self, with_output=False):
+        ins = []
+        for i in range(len(self.params)):
+            if with_output or i not in self.result_idx:
+                shape = list(map(int, self.params[i].shape))
+                ins.append(pynvshmem.nvshmem_create_tensor(shape, self.params[i].dtype))
         return ins
 
     def assert_allclose(
@@ -83,7 +123,11 @@ class Profiler:
             rtol: Relative tolerance for comparison
             max_mismatched_ratio: Maximum allowed ratio of mismatched elements
         """
-        ins = self._get_inputs()
+        if use_distributed:
+            self.init_distributed()
+            ins = self._get_distributed_inputs()
+        else:
+            ins = self._get_inputs()
         ref_outs = reference_program(*ins)
         torch.cuda.synchronize()
         lib_outs = self.func(*ins)
@@ -117,7 +161,11 @@ class Profiler:
             repeat: Number of times to repeat the consistency check
         """
         # Used to check no race condition inside the kernel
-        ins = self._get_inputs()
+        if use_distributed:
+            self.init_distributed()
+            ins = self._get_distributed_inputs()
+        else:
+            ins = self._get_inputs()
         ref_outs = self.func(*ins)
 
         for _ in range(repeat):
@@ -130,7 +178,11 @@ class Profiler:
                 ]
 
     def run_once(self, func: Optional[Callable] = None):
-        ins = self._get_inputs()
+        if use_distributed:
+            self.init_distributed()
+            ins = self._get_distributed_inputs()
+        else:
+            ins = self._get_inputs()
         if not func:
             func = self.__call__
         return func(*ins)
@@ -183,7 +235,11 @@ class Profiler:
             if func is None:
                 assert self.adapter is not None, "benchmarking function should be provided"
                 func = self.adapter
-            ins = self._get_inputs() if input_tensors is None else input_tensors
+            if use_distributed:
+                self.init_distributed()
+                ins = self._get_distributed_inputs() if input_tensors is None else input_tensors
+            else:
+                ins = self._get_inputs() if input_tensors is None else input_tensors
             bench_func = partial(func, *ins)
             return do_bench(
                 bench_func,
@@ -196,8 +252,12 @@ class Profiler:
             assert func is not None, "func should not be None"
             assert isinstance(
                 func, tvm.runtime.Module), f"func should be a TVM module, but got {type(func)}"
-
-            ins = (self._get_inputs(with_output=True) if input_tensors is None else input_tensors)
+            if use_distributed:
+                self.init_distributed()
+                ins = self._get_distributed_inputs(
+                    with_output=True) if input_tensors is None else input_tensors
+            else:
+                ins = self._get_inputs(with_output=True) if input_tensors is None else input_tensors
             target = "cuda"
 
             with suppress(Exception):

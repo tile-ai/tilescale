@@ -109,7 +109,10 @@ def setup_pytorch_extension() -> setuptools.Extension:
         libraries=libraries,
         dlink=True,
         dlink_libraries=["nvshmem_device", "cudart_static"],
-        extra_compile_args={"cxx": cxx_flags, "nvcc": ["-rdc=true"]},
+        extra_compile_args={
+            "cxx": cxx_flags,
+            "nvcc": ["-rdc=true"]
+        },
         extra_link_args=ld_flags,
     )
 
@@ -134,7 +137,7 @@ def main():
         setup_requires=["cmake", "packaging"],
         install_requires=[],
         extras_require={"test": ["numpy"]},
-        license_files=("LICENSE", ),
+        license_files=("LICENSE",),
         package_data={
             "python/pynvshmem/lib": ["*.so"],
         },  # only works for bdist_wheel under package

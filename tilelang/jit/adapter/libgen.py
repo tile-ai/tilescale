@@ -86,7 +86,10 @@ class LibraryGenerator(object):
             command += ["-diag-suppress=20013"]
             command += ["-rdc=true"]
         if os.environ.get("NVSHMEM_PATH", None) is not None:
-            command += ["-I" + NVSHMEM_INCLUDE_DIR, "-L" + NVSHMEM_LIB_PATH, "-lnvshmem_host -lnvshmem_device"]
+            command += [
+                "-I" + NVSHMEM_INCLUDE_DIR, "-L" + NVSHMEM_LIB_PATH,
+                "-lnvshmem_host -lnvshmem_device"
+            ]
         command += ["-o", libpath]
 
         src.write(self.lib_code)

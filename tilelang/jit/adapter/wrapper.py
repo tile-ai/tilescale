@@ -3,6 +3,7 @@
 
 from abc import ABC, abstractmethod
 from tilelang import tvm as tvm
+from tilelang import use_distributed
 from typing import Optional, List, Dict, Union, Any
 from tvm import IRModule
 from tvm.target import Target
@@ -10,13 +11,6 @@ from .utils import match_declare_kernel, match_declare_kernel_cpu, is_cuda_targe
 import re
 import logging
 import textwrap
-
-INIT_NVSHMEM = """
-    int mype_node;
-	nvshmem_init();
-	mype_node = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
-	cudaSetDevice(mype_node);
-"""
 
 PREDEF_ARRTIBUTE_SET_DYNAMIC_MEMORY = """
     cudaFuncSetAttribute({}, cudaFuncAttributeMaxDynamicSharedMemorySize, {});
@@ -102,7 +96,7 @@ class TLCUDASourceWrapper(object):
         self.block_info: Union[List[int], Dict] = [1, 1, 1]
         self.grid_info: Union[List[int], Dict] = [1, 1, 1]
         self.tma_descriptor_args: Optional[Dict] = None
-        self.use_nvshmem = True
+        self.use_nvshmem = use_distributed
         self.parse_source_information()
         self.srcpath: Optional[str] = None
         self.libpath: Optional[str] = None
@@ -176,7 +170,6 @@ class TLCUDASourceWrapper(object):
         _call_str += "\tcudaStream_t stream_;\n"
         if self.use_nvshmem:
             _call_str += "\tint mype_node;\n"
-            _call_str += "\tnvshmem_init();\n"
             _call_str += "\tmype_node = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);\n"
             _call_str += "\tcudaSetDevice(mype_node);\n"
         _call_str += "\tcudaStreamCreate(&stream_);\n"
@@ -204,16 +197,13 @@ class TLCUDASourceWrapper(object):
             grid_str = "dim3({}, {}, {})".format(
                 legalize_c(grid_info[0]), legalize_c(grid_info[1]), legalize_c(grid_info[2]))
             smem_str = 0 if dynamic_smem_buf is None else dynamic_smem_buf
-            _call_str += "\t{}<<<{}, {}, {}, stream_>>>({});\n".format(function_name, grid_str,
-                                                                      block_str, smem_str,
-                                                                      call_args)
+            _call_str += "\t{}<<<{}, {}, {}, stream_>>>({});\n".format(
+                function_name, grid_str, block_str, smem_str, call_args)
             if self.use_nvshmem:
                 _call_str += "\tnvshmemx_barrier_all_on_stream(stream_);\n"
 
         _call_str = self.generate_tma_descriptor_args(desc_name_map) + _call_str
         _call_str += "\tcudaStreamSynchronize(stream_);\n"
-        if self.use_nvshmem:
-            _call_str += "\tnvshmem_finalize();\n"
         _call_str += "\tcudaStreamDestroy(stream_);\n"
 
         # Wrap the kernel dispatch logic in an external C function
@@ -343,8 +333,6 @@ class TLCUDASourceWrapper(object):
         call_str = """"""
         # If dynamic shared memory buffer is specified, prepare the cudaFuncSetAttribute call
         for function_name, dynamic_smem_buf in self.dynamic_smem_buf.items():
-            if self.use_nvshmem:
-                call_str += INIT_NVSHMEM
             if dynamic_smem_buf is not None:
                 # Format the cudaFuncSetAttribute call for dynamic shared memory
                 call_str += PREDEF_ARRTIBUTE_SET_DYNAMIC_MEMORY.format(

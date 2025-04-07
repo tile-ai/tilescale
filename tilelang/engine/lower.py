@@ -16,6 +16,7 @@ from tilelang.engine.phase import (
     LowerAndLegalize,
     OptimizeForTarget,
 )
+from tilelang import use_distributed
 
 
 def is_cpu_device_backend(target: Target):
@@ -63,7 +64,7 @@ def tilelang_callback_cuda_compile(code, target):
         cutlass_path = os.environ["TL_CUTLASS_PATH"]
     else:
         cutlass_path = osp.abspath(osp.join(project_root, "3rdparty/cutlass/include"))
-    if os.environ.get("NVSHMEM_PATH", None) is not None:
+    if os.environ.get("NVSHMEM_PATH", None) is not None and use_distributed:
         nvshmem_include_path = os.environ["NVSHMEM_PATH"] + "/build/src/include"
         nvshmem_lib_path = os.environ["NVSHMEM_PATH"] + "/build/src/lib"
     compute_version = "".join(nvcc.get_target_compute_version(target).split("."))
@@ -85,7 +86,7 @@ def tilelang_callback_cuda_compile(code, target):
         "-I" + tl_template_path,
         "-I" + cutlass_path,
     ]
-    if os.environ.get("NVSHMEM_PATH", None) is not None:
+    if os.environ.get("NVSHMEM_PATH", None) is not None and use_distributed:
         options += [
             "-I" + nvshmem_include_path,
             "-L" + nvshmem_lib_path,

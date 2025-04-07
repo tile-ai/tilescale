@@ -70,5 +70,6 @@ def nvshmem_create_tensor(shape: Sequence[int], dtype: torch.dtype) -> torch.Ten
     ...
 
 
-def nvshmem_create_tensor_list_intra_node(shape: Sequence[int], dtype: torch.dtype) -> List[torch.Tensor]:
+def nvshmem_create_tensor_list_intra_node(shape: Sequence[int],
+                                          dtype: torch.dtype) -> List[torch.Tensor]:
     ...
