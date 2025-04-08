@@ -105,7 +105,35 @@ class Profiler:
         for i in range(len(self.params)):
             if with_output or i not in self.result_idx:
                 shape = list(map(int, self.params[i].shape))
-                ins.append(pynvshmem.nvshmem_create_tensor(shape, self.params[i].dtype))
+                tensor = pynvshmem.nvshmem_create_tensor(shape, self.params[i].dtype)
+                if self.supply_type == TensorSupplyType.Integer:
+                    is_unsigned = self.params[i].is_unsigned()
+                    is_float8 = self.params[i].is_float8()
+                    if is_unsigned:
+                        tensor[:] = torch.randint(
+                            low=0, high=3, size=shape, device=tensor.device, dtype=tensor.dtype)
+                    elif is_float8:
+                        tensor[:] = torch.randint(
+                            low=-128, high=128, size=shape, device=tensor.device,
+                            dtype=torch.int8).to(dtype=tensor.dtype)
+                    else:
+                        tensor[:] = torch.randint(
+                            low=-2, high=3, size=shape, device=tensor.device, dtype=tensor.dtype)
+                elif self.supply_type == TensorSupplyType.Uniform:
+                    tensor[:] = torch.empty(
+                        *shape, device=tensor.device, dtype=tensor.dtype).uniform_(-1.0, 1.0)
+                elif self.supply_type == TensorSupplyType.Normal:
+                    tensor[:] = torch.empty(
+                        *shape, device=tensor.device, dtype=tensor.dtype).normal_(-1.0, 1.0)
+                elif self.supply_type == TensorSupplyType.Randn:
+                    tensor[:] = torch.randn(*shape, device=tensor.device).to(dtype=tensor.dtype)
+                elif self.supply_type == TensorSupplyType.Zero:
+                    tensor[:] = torch.zeros(*shape, device=tensor.device, dtype=tensor.dtype)
+                elif self.supply_type == TensorSupplyType.One:
+                    tensor[:] = torch.ones(*shape, device=tensor.device, dtype=tensor.dtype)
+                else:
+                    raise ValueError(f"Unknown supply type: {self.supply_type}")
+                ins.append(tensor)
         return ins
 
     def assert_allclose(
