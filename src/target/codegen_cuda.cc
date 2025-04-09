@@ -1253,6 +1253,24 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     os << ", ";
     this->PrintExpr(op->args[3], os);
     os << ")";
+  } else if (op->op.same_as(tl::PutmemSignalNbiBlock())) {
+    os << "nvshmemx_putmem_signal_nbi_block(";
+    for (int i = 0; i < op->args.size(); i++) {
+      this->PrintExpr(op->args[i], os);
+      if (i != op->args.size() - 1) {
+        os << ", ";
+      }
+    }
+    os << ")";
+  } else if (op->op.same_as(tl::SignalWaitUntil())) {
+    os << "nvshmem_signal_wait_until(";
+    for (int i = 0; i < op->args.size(); i++) {
+      this->PrintExpr(op->args[i], os);
+      if (i != op->args.size() - 1) {
+        os << ", ";
+      }
+    }
+    os << ")";
   } else if (op->op.same_as(tl::SyncAll())) {
     os << "nvshmem_sync_all()";
   } else {

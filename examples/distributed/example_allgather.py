@@ -10,6 +10,7 @@ from tilelang.profiler import TensorSupplyType
 
 PE_num = 8
 
+
 def allgather(M, N, block_M, block_N, dtype="float16"):
 
     @T.prim_func
@@ -30,7 +31,8 @@ def allgather(M, N, block_M, block_N, dtype="float16"):
             for k in T.serial(PE_num - 1):
                 peer[0] = (mype[0] + 1 + k) % npes[0]
                 T.putmem_nbi_block(
-                    T.address_of(B[mype[0] * M, 0]), T.address_of(A[0, 0]), block_M * block_N * 2, peer[0])
+                    T.address_of(B[mype[0] * M, 0]), T.address_of(A[0, 0]), block_M * block_N * 2,
+                    peer[0])
 
     return main
 
@@ -45,7 +47,7 @@ func = allgather(M, N, block_M, block_N)
 kernel = tilelang.compile(func, out_idx=-1)
 
 # Get CUDA Source
-if RANK == 0:   
+if RANK == 0:
     print(kernel.get_kernel_source())
 
 profiler = kernel.get_profiler(tensor_supply_type=TensorSupplyType.Randn)
@@ -60,7 +62,6 @@ print("ag_buffer:", ag_buffer)
 
 out = kernel(ag_buffer)
 print("out:", out)
-
 
 ref_cpu = ref_tensor.cpu()
 for i in range(PE_num):
