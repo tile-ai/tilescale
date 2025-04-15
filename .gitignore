@@ -52,6 +52,7 @@ doc/doxygen/html/*
 
 # python egg
 *.egg-info
+.eggs/
 
 # Macos
 **/.DS_Store
@@ -91,3 +92,6 @@ tilelang/jit/adapter/cython/.cycache
 
 # nvshmem
 3rdparty/nvshmem
+
+# .so
+*.so
