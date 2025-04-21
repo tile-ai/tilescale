@@ -20,6 +20,10 @@ namespace tvm {
 namespace tl {
 
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableTMALower, Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION(kDisableWarpSpecialized, Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION(kConfigIndexBitwidth, Integer);
+TVM_REGISTER_PASS_CONFIG_OPTION(kDisableDynamicTailSplit, Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION(kDynamicAlignment, Integer);
 
 #define TIR_DEFINE_TL_BUILTIN(OpName)                                          \
   const Op &OpName() {                                                         \
@@ -103,6 +107,11 @@ TIR_DEFINE_TL_BUILTIN(TMAStoreWait)
                                Integer(CallEffectKind::kOpaque));
 TIR_DEFINE_TL_BUILTIN(SetMaxNReg)
     .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(NoSetMaxNReg)
+    .set_num_inputs(0)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 

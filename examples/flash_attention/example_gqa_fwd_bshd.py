@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
 import torch
@@ -72,10 +72,10 @@ def flashattn(batch, heads, seq_len, dim, is_causal, tune=False, groups=1):
 
         @T.macro
         def MMA0(
-            K: T.Buffer(kv_shape, dtype),
-            Q_shared: T.Buffer([block_M, dim], dtype),
-            K_shared: T.Buffer([block_N, dim], dtype),
-            acc_s: T.Buffer([block_M, block_N], accum_dtype),
+            K: T.Tensor(kv_shape, dtype),
+            Q_shared: T.SharedBuffer([block_M, dim], dtype),
+            K_shared: T.SharedBuffer([block_N, dim], dtype),
+            acc_s: T.FragmentBuffer([block_M, block_N], accum_dtype),
             k: T.int32,
             bx: T.int32,
             by: T.int32,
@@ -92,26 +92,26 @@ def flashattn(batch, heads, seq_len, dim, is_causal, tune=False, groups=1):
 
         @T.macro
         def MMA1(
-                V: T.Buffer(kv_shape, dtype),
-                V_shared: T.Buffer([block_M, dim], dtype),
-                acc_s_cast: T.Buffer([block_M, block_N], dtype),
-                acc_o: T.Buffer([block_M, dim], accum_dtype),
-                k: T.int32,
-                by: T.int32,
-                bz: T.int32,
+            V: T.Tensor(kv_shape, dtype),
+            V_shared: T.SharedBuffer([block_M, dim], dtype),
+            acc_s_cast: T.FragmentBuffer([block_M, block_N], dtype),
+            acc_o: T.FragmentBuffer([block_M, dim], accum_dtype),
+            k: T.int32,
+            by: T.int32,
+            bz: T.int32,
         ):
             T.copy(V[bz, k * block_N:(k + 1) * block_N, by // groups, :], V_shared)
             T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
 
         @T.macro
         def Softmax(
-                acc_s: T.Buffer([block_M, block_N], accum_dtype),
-                acc_s_cast: T.Buffer([block_M, block_N], dtype),
-                scores_max: T.Buffer([block_M], accum_dtype),
-                scores_max_prev: T.Buffer([block_M], accum_dtype),
-                scores_scale: T.Buffer([block_M], accum_dtype),
-                scores_sum: T.Buffer([block_M], accum_dtype),
-                logsum: T.Buffer([block_M], accum_dtype),
+                acc_s: T.FragmentBuffer([block_M, block_N], accum_dtype),
+                acc_s_cast: T.FragmentBuffer([block_M, block_N], dtype),
+                scores_max: T.FragmentBuffer([block_M], accum_dtype),
+                scores_max_prev: T.FragmentBuffer([block_M], accum_dtype),
+                scores_scale: T.FragmentBuffer([block_M], accum_dtype),
+                scores_sum: T.FragmentBuffer([block_M], accum_dtype),
+                logsum: T.FragmentBuffer([block_M], accum_dtype),
         ):
             T.copy(scores_max, scores_max_prev)
             T.fill(scores_max, -T.infinity(accum_dtype))
@@ -135,18 +135,18 @@ def flashattn(batch, heads, seq_len, dim, is_causal, tune=False, groups=1):
 
         @T.macro
         def Rescale(
-                acc_o: T.Buffer([block_M, dim], accum_dtype),
-                scores_scale: T.Buffer([block_M], accum_dtype),
+                acc_o: T.FragmentBuffer([block_M, dim], accum_dtype),
+                scores_scale: T.FragmentBuffer([block_M], accum_dtype),
         ):
             for i, j in T.Parallel(block_M, dim):
                 acc_o[i, j] *= scores_scale[i]
 
         @T.prim_func
         def main(
-                Q: T.Buffer(q_shape, dtype),
-                K: T.Buffer(kv_shape, dtype),
-                V: T.Buffer(kv_shape, dtype),
-                Output: T.Buffer(q_shape, dtype),
+                Q: T.Tensor(q_shape, dtype),
+                K: T.Tensor(kv_shape, dtype),
+                V: T.Tensor(kv_shape, dtype),
+                Output: T.Tensor(q_shape, dtype),
         ):
             with T.Kernel(
                     T.ceildiv(seq_len, block_M), heads, batch, threads=threads) as (bx, by, bz):
@@ -192,11 +192,7 @@ def flashattn(batch, heads, seq_len, dim, is_causal, tune=False, groups=1):
             keys=["block_M", "block_N", "num_stages", "threads"],
             warmup=10,
             rep=10)
-        @jit(
-            out_idx=[3],
-            supply_type=tilelang.TensorSupplyType.Integer,
-            ref_prog=None,
-            profiler="auto")
+        @jit(out_idx=[3], supply_type=tilelang.TensorSupplyType.Integer, ref_prog=None)
         def kernel(block_M=None, block_N=None, num_stages=None, threads=None):
             return kernel_func(block_M, block_N, num_stages, threads)
 
@@ -266,8 +262,10 @@ if __name__ == "__main__":
         print("Tile-lang: {:.2f} ms".format(latency))
         print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
     else:
-        best_latency, best_config, _ = flashattn(
-            batch, heads, seq_len, dim, is_causal, tune=args.tune)
+        best_result = flashattn(batch, heads, seq_len, dim, is_causal, tune=args.tune)
+        best_latency = best_result.latency
+        best_config = best_result.config
+        ref_latency = best_result.ref_latency
         print(f"Best latency: {best_latency}")
         print(f"Best TFlops: {total_flops / best_latency * 1e-9}")
         print(f"Best config: {best_config}")

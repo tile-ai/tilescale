@@ -1,4 +1,4 @@
-// Copyright (c) Microsoft Corporation.
+// Copyright (c) Tile-AI Corporation.
 // Licensed under the MIT License.
 
 /*!
@@ -18,6 +18,7 @@
 
 #include "../op/builtin.h"
 #include "../op/bulk_copy.h"
+#include "arith/pattern_match.h"
 #include "../op/distributed.h"
 #include "target/source/ptx.h"
 
@@ -42,9 +43,9 @@ static std::string GetFP8Type(DataType type) {
     LOG(FATAL) << "Only support scalar and vector types of width (2, 4, 8, 16) "
                   "for FP8";
   }
-  if (type.code() == DataType::kE4M3Float) {
+  if (type.code() == DataType::kFloat8_e4m3fn) {
     stream << "fp8_e4" << vec << "_t";
-  } else if (type.code() == DataType::kE5M2Float) {
+  } else if (type.code() == DataType::kFloat8_e5m2) {
     stream << "fp8_e5" << vec << "_t";
   } else {
     LOG(FATAL) << "Unsupported FP8 type in CUDA codegen";
@@ -99,7 +100,7 @@ void CodeGenTileLangCUDA::PrintExtraAttrs(const PrimFunc &f) {
       // return
       return;
     }
-    stream << " __launch_bounds__(" << threadIdx_ext_int->value << ")";
+    stream << " __launch_bounds__(" << threadIdx_ext_int->value << ", 1)";
   }
 }
 
@@ -741,7 +742,13 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
     temp << "(" << ptr_cast(buffer_element_dtype) << vid << ")";
     buffer_str = temp.str();
   }
-
+  if (scope.empty()) {
+    scope = GetPtrStorageScope(buffer->data);
+  }
+  if (scope == "local.var") {
+    os << vid;
+    return os.str();
+  }
   std::string index_str = PrintExpr(index);
   if (t.bits() == 4 || (t.bits() == 1 && t.is_int())) {
     // This is a special case, because CodegenCUDA::PrintType()
@@ -1322,7 +1329,6 @@ void CodeGenTileLangCUDA::VisitStmt_(const AttrStmtNode *op) {
 void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
   ICHECK(!is_zero(op->condition));
   std::string vid = AllocVarID(op->buffer_var.get());
-
   this->PrintIndent();
   std::string scope = GetPtrStorageScope(op->buffer_var);
   const VarNode *buffer = op->buffer_var.as<VarNode>();
@@ -1360,7 +1366,16 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
         scope == "shared") {
       constant_size = constant_size / (32 / op->dtype.bits());
     }
-    stream << ' ' << vid << '[' << constant_size << "];\n";
+    if (scope == "shared") {
+      stream << ' ' << vid << '[' << constant_size << "];\n";
+    } else if (scope == "local") {
+      stream << ' ' << vid << '[' << constant_size << "];\n";
+    } else if (scope == "local.var") {
+      stream << ' ' << vid << " = " << PrintExpr(tir::make_const(op->dtype, 0))
+             << ";\n";
+    } else {
+      ICHECK(false) << "Unsupported scope: " << scope;
+    }
   }
 
   RegisterHandleType(op->buffer_var.get(), op->dtype);
@@ -1369,7 +1384,8 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
 
 void CodeGenTileLangCUDA::VisitExpr_(const RampNode *op, std::ostream &os) {
   int lanes = static_cast<int>(Downcast<IntImm>(op->lanes)->value);
-  CHECK_LE(lanes, 4) << "ValueError: Ramp of more than 4 lanes is not allowed.";
+  CHECK_LE(lanes, 4) << "Translate Ramp Node " << GetRef<Ramp>(op) << " with "
+                     << lanes << " lanes is not allowed.";
   os << "(make_";
   PrintType(op->dtype, os);
   os << "(";
@@ -1507,6 +1523,12 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
     os << '(' << std::scientific << op->value << 'f' << ')';
     return;
   }
+  // Type code is kFloat8_e5m2 or kE4M4Float
+  if (op->dtype.is_float8() || op->dtype.is_float4()) {
+    p->PrintType(op->dtype, os);
+    os << '(' << std::scientific << op->value << 'f' << ')';
+    return;
+  }
   // Type code is kFloat
   switch (op->dtype.bits()) {
   case 64:
@@ -1517,8 +1539,10 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
         temp << "-";
       }
       temp << ((op->dtype.bits() == 32) ? "CUDART_INF_F" : "CUDART_INF");
+      p->need_math_constants_h_ = true;
     } else if (std::isnan(op->value)) {
       temp << ((op->dtype.bits() == 32) ? "CUDART_NAN_F" : "CUDART_NAN");
+      p->need_math_constants_h_ = true;
     } else {
       temp << std::scientific << op->value;
       if (op->dtype.bits() == 32)

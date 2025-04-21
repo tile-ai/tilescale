@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 from typing import Optional
 from .utils import is_cuda_target, is_hip_target, is_cpu_target
@@ -10,7 +10,8 @@ import os
 import tempfile
 import subprocess
 import logging
-from tilelang.env import TILELANG_TEMPLATE_PATH, CUTLASS_INCLUDE_DIR, NVSHMEM_INCLUDE_DIR, NVSHMEM_LIB_PATH
+from tilelang.env import TILELANG_TEMPLATE_PATH
+from tilelang.contrib.rocm import find_rocm_path, get_rocm_arch, NVSHMEM_INCLUDE_DIR, NVSHMEM_LIB_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -27,12 +28,15 @@ class LibraryGenerator(object):
         self.lib_code = lib_code
 
     # Assume currently we only support CUDA compilation
-    def load_lib(self):
-        return ctypes.CDLL(self.libpath)
+    def load_lib(self, lib_path: Optional[str] = None):
+        if lib_path is None:
+            lib_path = self.libpath
+        return ctypes.CDLL(lib_path)
 
-    def compile_lib(self, timeout: float = None, with_tl: bool = True):
+    def compile_lib(self, timeout: float = None):
         target = self.target
         if is_cuda_target(target):
+            from tilelang.env import CUTLASS_INCLUDE_DIR
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)
             compute_version = "".join(get_target_compute_version(target).split("."))
             if compute_version == "90":
@@ -54,24 +58,33 @@ class LibraryGenerator(object):
                 "-gencode",
                 f"arch=compute_{compute_version},code=sm_{compute_version}",
             ]
+            command += [
+                "-I" + CUTLASS_INCLUDE_DIR,
+            ]
 
         elif is_hip_target(target):
+            from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)
             libpath = src.name.replace(".cpp", ".so")
-
+            rocm_path = find_rocm_path()
+            arch = get_rocm_arch(rocm_path)
             command = [
                 "hipcc",
                 "-std=c++17",
                 "-fPIC",
+                f"--offload-arch={arch}",
                 "--shared",
                 src.name,
             ]
+            command += [
+                "-I" + COMPOSABLE_KERNEL_INCLUDE_DIR,
+            ]
         elif is_cpu_target(target):
+            from tilelang.contrib.cc import get_cplus_compiler
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)
             libpath = src.name.replace(".cpp", ".so")
 
-            command = ["g++", "-std=c++17", "-fPIC", "-shared", src.name]
-            with_tl = False
+            command = [get_cplus_compiler(), "-std=c++17", "-fPIC", "-shared", src.name]
             command += [
                 "-I" + TILELANG_TEMPLATE_PATH,
             ]
@@ -96,12 +109,12 @@ class LibraryGenerator(object):
         src.flush()
         try:
             ret = subprocess.run(command, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            logger.warning(f"Compilation Timeout! {command}")
-            return None
+        except Exception as e:
+            raise RuntimeError(f"Compile kernel failed because of {e}") from e
+
         if ret.returncode != 0:
-            logger.warning(f"Compilation Failed! {command}")
-            return None
+            raise RuntimeError(f"Compilation Failed! {command}")
+
         self.srcpath = src.name
         self.libpath = libpath
 

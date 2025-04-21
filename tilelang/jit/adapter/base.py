@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 """The profiler and convert to torch utils"""
 
@@ -25,11 +25,20 @@ class BaseKernelAdapter(ABC):
         elif isinstance(result_idx, int):
             if result_idx > len(params) or result_idx < -len(params):
                 raise ValueError(
-                    f"result_idx should be an integer between {-len(params)} and {len(params) - 1}")
+                    f"result_idx should be an integer between {-len(params) - 1} and {len(params) - 1}"
+                )
             if result_idx < 0:
                 result_idx = len(params) + result_idx
             result_idx = [result_idx]
-        elif not isinstance(result_idx, list):
+        elif isinstance(result_idx, list):
+            for i, idx in enumerate(result_idx):
+                if idx >= len(params) or idx <= -len(params):
+                    raise ValueError(
+                        f"result_idx should be an integer between {-len(params) - 1} and {len(params) - 1}"
+                    )
+                if idx < 0:
+                    result_idx[i] = len(params) + idx
+        else:
             raise ValueError("result_idx should be a list of integers")
 
         return result_idx

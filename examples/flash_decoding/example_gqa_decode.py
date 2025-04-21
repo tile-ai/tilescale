@@ -7,6 +7,8 @@ from einops import rearrange, einsum
 import argparse
 import itertools
 
+torch.random.manual_seed(0)
+
 
 def get_configs():
     block_N = [64, 128]
@@ -42,11 +44,11 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, tune=False):
 
         @T.macro
         def flash_attn(
-                Q: T.Buffer(shape_q, dtype),
-                K: T.Buffer(shape_k, dtype),
-                V: T.Buffer(shape_v, dtype),
-                mask: T.Buffer([batch, seqlen_kv, groups], "uint8"),
-                Output: T.Buffer([batch, heads, dim], dtype),
+                Q: T.Tensor(shape_q, dtype),
+                K: T.Tensor(shape_k, dtype),
+                V: T.Tensor(shape_v, dtype),
+                mask: T.Tensor([batch, seqlen_kv, groups], "uint8"),
+                Output: T.Tensor([batch, heads, dim], dtype),
         ):
             with T.Kernel(
                     batch, heads // valid_block_H, num_split, threads=threads) as (bx, by, bz):
@@ -111,12 +113,12 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, tune=False):
 
         @T.macro
         def flash_attn_split(
-                Q: T.Buffer(shape_q, dtype),
-                K: T.Buffer(shape_k, dtype),
-                V: T.Buffer(shape_v, dtype),
-                mask: T.Buffer([batch, seqlen_kv, groups], "uint8"),
-                glse: T.Buffer([batch, heads, num_split], dtype),
-                Output_partial: T.Buffer(part_shape, dtype),
+                Q: T.Tensor(shape_q, dtype),
+                K: T.Tensor(shape_k, dtype),
+                V: T.Tensor(shape_v, dtype),
+                mask: T.Tensor([batch, seqlen_kv, groups], "uint8"),
+                glse: T.Tensor([batch, heads, num_split], dtype),
+                Output_partial: T.Tensor(part_shape, dtype),
         ):
             with T.Kernel(
                     batch, heads // valid_block_H, num_split, threads=threads) as (bx, by, bz):
@@ -195,9 +197,9 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, tune=False):
 
         @T.macro
         def combine(
-                glse: T.Buffer([batch, heads, num_split], dtype),
-                Output_partial: T.Buffer(part_shape, dtype),
-                Output: T.Buffer(shape_o, dtype),
+                glse: T.Tensor([batch, heads, num_split], dtype),
+                Output_partial: T.Tensor(part_shape, dtype),
+                Output: T.Tensor(shape_o, dtype),
         ):
             with T.Kernel(heads, batch, threads=128) as (by, bz):
                 po_local = T.alloc_fragment([dim], dtype)
@@ -213,14 +215,15 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, tune=False):
                         T.Fragment(lse_logsum_local.shape, forward_thread_fn=lambda i: i),
                     lse_max_local:
                         T.Fragment(lse_max_local.shape, forward_thread_fn=lambda i: i),
+                    # lse_local: (local_id, thread_id)
                     lse_local:
-                        T.Fragment(lse_local.shape, forward_thread_fn=lambda i, j: j),
+                        T.Fragment(lse_local.shape, forward_fn=lambda i, j: (j, i)),
                 })
 
                 T.clear(lse_logsum_local)
                 T.clear(o_accum_local)
-                for k in T.Parallel(num_split):
-                    lse_local[k, 0] = glse[bz, by, k]
+                for k, j in T.Parallel(num_split, 128):
+                    lse_local[k, j] = glse[bz, by, k]
                 T.reduce_max(lse_local, lse_max_local, dim=0, clear=True)
                 for k in T.Pipelined(num_split, num_stages=1):
                     lse_local_split[0] = glse[bz, by, k]
@@ -238,26 +241,26 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, tune=False):
 
         @T.prim_func
         def main_split(
-                Q: T.Buffer(shape_q, dtype),
-                K: T.Buffer(shape_k, dtype),
-                V: T.Buffer(shape_v, dtype),
-                mask: T.Buffer([batch, seqlen_kv, groups], "uint8"),
-                glse: T.Buffer([batch, heads, num_split], dtype),
-                Output_partial: T.Buffer(part_shape, dtype),
-                Output: T.Buffer(shape_o, dtype),
+                Q: T.Tensor(shape_q, dtype),
+                K: T.Tensor(shape_k, dtype),
+                V: T.Tensor(shape_v, dtype),
+                mask: T.Tensor([batch, seqlen_kv, groups], "uint8"),
+                glse: T.Tensor([batch, heads, num_split], dtype),
+                Output_partial: T.Tensor(part_shape, dtype),
+                Output: T.Tensor(shape_o, dtype),
         ):
             flash_attn_split(Q, K, V, mask, glse, Output_partial)
             combine(glse, Output_partial, Output)
 
         @T.prim_func
         def main_no_split(
-                Q: T.Buffer(shape_q, dtype),
-                K: T.Buffer(shape_k, dtype),
-                V: T.Buffer(shape_v, dtype),
-                mask: T.Buffer([batch, seqlen_kv, groups], "uint8"),
-                glse: T.Buffer([batch, heads, num_split], dtype),
-                Output_partial: T.Buffer(part_shape, dtype),
-                Output: T.Buffer(shape_o, dtype),
+                Q: T.Tensor(shape_q, dtype),
+                K: T.Tensor(shape_k, dtype),
+                V: T.Tensor(shape_v, dtype),
+                mask: T.Tensor([batch, seqlen_kv, groups], "uint8"),
+                glse: T.Tensor([batch, heads, num_split], dtype),
+                Output_partial: T.Tensor(part_shape, dtype),
+                Output: T.Tensor(shape_o, dtype),
         ):
             flash_attn(Q, K, V, mask, Output)
 
@@ -277,8 +280,7 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, tune=False):
             out_idx=[6],
             supply_type=tilelang.TensorSupplyType.Auto,
             ref_prog=ref_program,
-            max_mismatched_ratio=0.05,
-            profiler="auto")
+            max_mismatched_ratio=0.05)
         def kernel(block_N=None, block_H=None, num_split=None, num_stages=None, threads=None):
             return kernel_func(block_N, block_H, num_split, num_stages, threads)
 
@@ -428,9 +430,34 @@ if __name__ == "__main__":
     total_flops = qk_flops + pv_flops
 
     if (not args.tune):
-        program = flashattn(
-            batch, heads, groups, kv_seqlen, dim, tune=args.tune)(
-                block_N=128, block_H=64, num_split=8, num_stages=2, threads=128)
+
+        def get_heuristic_config() -> dict:
+            # Get CUDA device properties
+            if not torch.cuda.is_available():
+                raise RuntimeError("CUDA is not available")
+            device = torch.cuda.current_device()
+            sm_major, sm_minor = torch.cuda.get_device_capability(device)
+            sm_version = sm_major * 10 + sm_minor
+            print(f"CUDA device capability: {sm_version}")
+            if sm_version == 89:
+                return {
+                    "block_N": 128,
+                    "block_H": 64,
+                    "num_split": 8,
+                    "num_stages": 0,
+                    "threads": 128
+                }
+            else:
+                return {
+                    "block_N": 128,
+                    "block_H": 64,
+                    "num_split": 8,
+                    "num_stages": 2,
+                    "threads": 128
+                }
+
+        config = get_heuristic_config()
+        program = flashattn(batch, heads, groups, kv_seqlen, dim, tune=args.tune)(**config)
         kernel = tilelang.compile(program, out_idx=[6])
         profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Auto)
         profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
@@ -438,12 +465,14 @@ if __name__ == "__main__":
         latency = profiler.do_bench(ref_program, warmup=500)
         print("Ref: {:.2f} ms".format(latency))
         print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
-        latency = profiler.do_bench(kernel.rt_module, warmup=500, profiler="auto")
+        latency = profiler.do_bench(warmup=500)
         print("Tile-lang: {:.2f} ms".format(latency))
         print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
     else:
-        best_latency, best_config, _ = flashattn(
-            batch, heads, groups, kv_seqlen, dim, tune=args.tune)
+        best_result = flashattn(batch, heads, groups, kv_seqlen, dim, tune=args.tune)
+        best_latency = best_result.latency
+        best_config = best_result.config
+        ref_latency = best_result.ref_latency
         print(f"Best latency: {best_latency}")
         print(f"Best TFlops: {total_flops / best_latency * 1e-9}")
         print(f"Best config: {best_config}")

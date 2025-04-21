@@ -1,4 +1,4 @@
-// Copyright (c) Microsoft Corporation.
+// Copyright (c) Tile-AI Corporation.
 // Licensed under the MIT License.
 
 /*!
@@ -90,14 +90,17 @@ std::pair<int, int> Gemm::ComputeWarpPartition(int num_warps, Target target,
       bool M_divisible = (this->M % (factor * m_warp)) == 0;
       bool N_divisible = (this->N % (factor * n_warp)) == 0;
       if (M_divisible && N_divisible) {
-        if (this->M / m_warp >= this->N / n_warp)
-          m_warp *= factor;
-        else
+        // put N dimension first
+        // because usually n in mma
+        // is more smaller than m
+        if (this->N / n_warp >= this->M / m_warp)
           n_warp *= factor;
-      } else if (M_divisible) {
-        m_warp *= factor;
+        else
+          m_warp *= factor;
       } else if (N_divisible) {
         n_warp *= factor;
+      } else if (M_divisible) {
+        m_warp *= factor;
       } else {
         ICHECK(0) << "Cannot compute warp partition for shape" << M << " " << N
                   << " with num_warps " << num_warps;
@@ -106,7 +109,6 @@ std::pair<int, int> Gemm::ComputeWarpPartition(int num_warps, Target target,
   } else {
     ICHECK(0) << "Unknown GemmWarpPolicy";
   }
-  // TODO: perform more checks here
   return {m_warp, n_warp};
 }
 
@@ -256,8 +258,6 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       ICHECK(0) << "WGMMA only support B in shared.";
     }
   } else if (TargetIsCDNA(T.target)) {
-    ICHECK(trans_B == true) << "Currently only support Transpose B for CDNA";
-
     const int warp_size = 64;
     auto [warp_m, warp_n] =
         ComputeWarpPartition(T.block_size / warp_size, T.target);
@@ -280,8 +280,8 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
                                                 A->dtype.bits(), kPack);
       results.Set(A, shared_layout);
     } else if (A.scope() == "local.fragment") {
-      results.Set(
-          A, makeGemmFragmentACDNA(M, N, K, M / warp_m, N / warp_n, trans_A));
+      results.Set(A, makeGemmFragmentACDNA(M, N, K, M / warp_m, N / warp_n,
+                                           A->dtype.bits(), trans_A));
     } else {
       ICHECK(0);
     }

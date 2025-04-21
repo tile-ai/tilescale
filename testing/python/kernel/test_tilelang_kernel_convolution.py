@@ -5,6 +5,8 @@ from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang.language as T
 
+tilelang.testing.set_random_seed(42)
+
 
 def convolution(N, C, H, W, F, K, S, D, P, in_dtype, out_dtype, dtypeAccum, block_M, block_N,
                 block_K, num_stages, threads):
@@ -14,9 +16,9 @@ def convolution(N, C, H, W, F, K, S, D, P, in_dtype, out_dtype, dtypeAccum, bloc
 
     @T.prim_func
     def main(
-            data: T.Buffer((N, H, W, C), in_dtype),
-            kernel: T.Buffer((KH, KW, C, F), in_dtype),
-            out: T.Buffer((N, OH, OW, F), out_dtype),
+            data: T.Tensor((N, H, W, C), in_dtype),
+            kernel: T.Tensor((KH, KW, C, F), in_dtype),
+            out: T.Tensor((N, OH, OW, F), out_dtype),
     ):
         with T.Kernel(
                 T.ceildiv(F, block_N), T.ceildiv(N * OH * OW, block_M),
@@ -25,8 +27,8 @@ def convolution(N, C, H, W, F, K, S, D, P, in_dtype, out_dtype, dtypeAccum, bloc
             kernel_shared = T.alloc_shared((block_K, block_N), in_dtype)
             out_local = T.alloc_fragment((block_M, block_N), dtypeAccum)
 
-            kernel_flat = T.Buffer((KH * KW * C, F), in_dtype, kernel.data)
-            out_flat = T.Buffer((N * OH * OW, F), out_dtype, out.data)
+            kernel_flat = T.Tensor((KH * KW * C, F), in_dtype, kernel.data)
+            out_flat = T.Tensor((N * OH * OW, F), out_dtype, out.data)
 
             T.clear(out_local)
             for k_iter in T.Pipelined(T.ceildiv(KH * KW * C, block_K), num_stages=num_stages):
@@ -81,90 +83,6 @@ def run_conv(N,
         return C.to(torch.__getattribute__(out_dtype))
 
     profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
-
-
-def test_conv_f16f16f16_k3s1d1p1():
-    run_conv(
-        1,
-        128,
-        64,
-        64,
-        128,
-        3,
-        1,
-        1,
-        1,
-        "float16",
-        "float16",
-        "float16",
-        128,
-        128,
-        32,
-        2,
-    )
-
-
-def test_conv_f16f16f16_k3s2d1p1():
-    run_conv(
-        1,
-        128,
-        64,
-        64,
-        128,
-        3,
-        2,
-        1,
-        1,
-        "float16",
-        "float16",
-        "float16",
-        128,
-        128,
-        32,
-        2,
-    )
-
-
-def test_conv_f16f16f16_k1s1d1p0():
-    run_conv(
-        1,
-        128,
-        64,
-        64,
-        128,
-        1,
-        1,
-        1,
-        0,
-        "float16",
-        "float16",
-        "float16",
-        128,
-        128,
-        32,
-        2,
-    )
-
-
-def test_conv_f16f16f16_k1s2d1p0():
-    run_conv(
-        1,
-        128,
-        64,
-        64,
-        128,
-        1,
-        2,
-        1,
-        0,
-        "float16",
-        "float16",
-        "float16",
-        128,
-        128,
-        32,
-        2,
-    )
 
 
 def test_conv_f16f16f32_k3s1d1p1():

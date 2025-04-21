@@ -47,13 +47,14 @@ class CtypesKernelAdapter(BaseKernelAdapter):
                  result_idx: List[int],
                  target: str,
                  func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
+                 host_mod: Optional[tvm.IRModule] = None,
+                 device_mod: Optional[tvm.IRModule] = None,
                  kernel_global_source: Optional[str] = None,
                  verbose: bool = False,
                  pass_configs: Optional[Dict[str, Any]] = None):
         """Initialize the adapter with the given TIR function or module.
         
         Args:
-            rt_mod: Runtime module
             params: List of tensor types for inputs/outputs
             result_idx: Indices of output tensors
             target: Target platform (e.g., 'cuda')
@@ -92,6 +93,8 @@ class CtypesKernelAdapter(BaseKernelAdapter):
 
         self.wrapper.assign_optimized_module(self.ir_module)
         self.wrapper.assign_pass_configs(pass_configs)
+        self.wrapper.assign_host_module(host_mod)
+        self.wrapper.assign_device_module(device_mod)
         self.wrapped_source = self.wrapper.wrap(self.get_kernel_source(kernel_only=True))
 
         self.lib_generator.update_lib_code(self.wrapped_source)
@@ -100,6 +103,52 @@ class CtypesKernelAdapter(BaseKernelAdapter):
         self.lib.init()
 
         self._post_init()
+
+    @classmethod
+    def from_database(cls,
+                      params: List[TensorType],
+                      result_idx: List[int],
+                      target: str,
+                      func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
+                      kernel_global_source: str,
+                      kernel_lib_path: str,
+                      verbose: bool = False,
+                      pass_configs: Optional[Dict[str, Any]] = None):
+        adapter = cls.__new__(cls)
+        adapter.params = params
+        adapter.result_idx = adapter._legalize_result_idx(result_idx)
+        adapter.kernel_global_source = kernel_global_source
+        adapter.wrapped_source = kernel_global_source
+
+        if isinstance(func_or_mod, tir.PrimFunc):
+            adapter.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
+        else:
+            adapter.ir_module = func_or_mod
+
+        # Cache parameter information during initialization
+        adapter.param_dtypes = [param.dtype for param in params]
+        adapter.param_shapes = []
+        for param in params:
+            native_shape = []
+            for dim in param.shape:
+                if isinstance(dim, tir.IntImm):
+                    native_shape.append(int(dim))
+                elif isinstance(dim, tir.Var):
+                    native_shape.append(dim)  # Keep tir.Var for dynamic dimensions
+                else:
+                    native_shape.append(dim)
+            adapter.param_shapes.append(native_shape)
+
+        adapter.dynamic_symbolic_map = adapter._process_dynamic_symbolic()
+
+        adapter.target = Target.canon_target(determine_target(target))
+        adapter.verbose = verbose
+        adapter.lib_generator = LibraryGenerator(adapter.target)
+        adapter.lib = adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
+        adapter.lib.init()
+
+        adapter._post_init()
+        return adapter
 
     def _process_dynamic_symbolic(self):
         """Extract information about dynamic shapes from the TIR function.
@@ -179,7 +228,10 @@ class CtypesKernelAdapter(BaseKernelAdapter):
 
         # if stream is not None, we need to pass the stream to the library
         if stream is None:
-            stream = torch.cuda.current_stream().cuda_stream
+            if str(self.target).startswith("cuda") and torch.cuda.is_available():
+                stream = torch.cuda.current_stream().cuda_stream
+            else:
+                stream = 0
 
         self._forward_from_prebuild_lib(*args, stream=stream)
 

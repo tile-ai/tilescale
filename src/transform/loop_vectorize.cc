@@ -53,8 +53,6 @@ public:
 
   int Plan(const For &node) {
     this->operator()(node);
-    // Always Enable vectorization
-    // if (!has_nonlocal_memory_access_) return 1;
     return vector_size_;
   }
 
@@ -82,7 +80,6 @@ private:
       }
     }
     UpdateVectorSize(node->indices, node->buffer);
-    return arith::IRVisitorWithAnalyzer::VisitExpr_(node);
   }
 
   void VisitStmt_(const BufferStoreNode *node) final {
@@ -90,7 +87,7 @@ private:
         node->buffer.scope() == "shared.dyn")
       has_nonlocal_memory_access_ = true;
     UpdateVectorSize(node->indices, node->buffer);
-    return arith::IRVisitorWithAnalyzer::VisitStmt_(node);
+    return arith::IRVisitorWithAnalyzer::VisitExpr(node->value);
   }
 
   void VisitStmt_(const IfThenElseNode *node) final {
@@ -127,14 +124,12 @@ private:
     }
     // so we should disable this GCD optimization
     max_vector_size = arith::ZeroAwareGCD(max_vector_size, extent_ptr->value);
-
     auto last_dim = buffer->shape.back();
     auto mod_set = analyzer_.modular_set(last_dim);
     // when dynamic shape like [m, k]: coeff=1, base=0, GCD will block
     // conditionally tail vectorize
     if (buffer->shape.back().as<IntImmNode>()) {
       max_vector_size = arith::ZeroAwareGCD(max_vector_size, mod_set->coeff);
-
       auto gcd_base = arith::ZeroAwareGCD(max_vector_size, mod_set->base);
       // If gcd_base is equal to the last dimension,
       // we should analyze the second-to-last dimension
@@ -142,7 +137,6 @@ private:
       if (gcd_base < Downcast<IntImm>(last_dim)->value) {
         max_vector_size = gcd_base;
       }
-
       vector_size_ = arith::ZeroAwareGCD(max_vector_size, vector_size_);
 
       PrimExpr elem_offset = 0;
@@ -173,31 +167,6 @@ private:
   // conditionally vectorize
   bool dynamic_ = false;
   PrimExpr condition_;
-};
-
-class VectorizeDynamicCallRemover : public StmtExprMutator {
-public:
-  VectorizeDynamicCallRemover(Var inner_var, int vector_size)
-      : inner_var_(inner_var), vector_size_(vector_size) {}
-
-private:
-  PrimExpr VisitExpr_(const CallNode *op) final {
-    if (op->op.same_as(builtin::if_then_else())) {
-      PrimExpr cond = this->VisitExpr(op->args[0]);
-      Map<Var, PrimExpr> vmap;
-      // Currently remove upper bound check
-      vmap.Set(inner_var_, 0);
-      cond = Substitute(cond, vmap);
-      Array<PrimExpr> new_args{cond, op->args[1], op->args[2]};
-      return Call(op->dtype, op->op, new_args, op->span);
-    } else {
-      // TODO: For other calls
-      return GetRef<PrimExpr>(op);
-    }
-  }
-
-  Var inner_var_;
-  int vector_size_;
 };
 
 class VectorizeRewriter : public StmtExprMutator {
@@ -235,27 +204,7 @@ private:
           return body;
         }
       } else {
-        Var inner_var = Var("vec");
-        Var outer_var = Var(old_var->name_hint);
-        Map<Var, PrimExpr> vmap;
-        vmap.Set(fnode->loop_var, outer_var * vector_size_ + inner_var);
-        Stmt body = Substitute(fnode->body, vmap);
-        // add condition ifthenelse here
-        Map<Var, PrimExpr> vmap_condition;
-        vmap_condition.Set(fnode->loop_var, outer_var * vector_size_);
-        PrimExpr condition = Substitute(condition_, vmap_condition);
-
-        VectorizeDynamicCallRemover remover(inner_var, vector_size_);
-        body = remover(body);
-
-        For vectorize_for =
-            For(inner_var, 0, vector_size_, ForKind::kVectorized, body);
-        For serial_for =
-            For(inner_var, 0, vector_size_, ForKind::kSerial, body);
-        body = IfThenElse(condition, vectorize_for, serial_for);
-        body = For(outer_var, 0, extent / vector_size_, fnode->kind, body,
-                   fnode->thread_binding, fnode->annotations, fnode->span);
-        return body;
+        return fnode;
       }
     } else {
       return ret;
@@ -288,12 +237,16 @@ bool IndiceCanVectorize(PrimExpr expr, Var var, PrimExpr iter_var_size,
     return false;
   Var v0("v0"), v1("v1");
   analyzer->Bind(v0, Range(0, target_vectorized_size));
-  analyzer->Bind(v1, Range(0, FloorDiv(iter_var_size, target_vectorized_size)));
+  analyzer->Bind(v1, Range(0, analyzer->Simplify(FloorDiv(
+                                  iter_var_size, target_vectorized_size))));
   PrimExpr expr_transformed = analyzer->Simplify(
       Substitute(expr, {{var, v0 + v1 * target_vectorized_size}}));
+  PrimExpr expr_simplified = analyzer->Simplify(expr_transformed);
 
   Vectorizer vectorizer(v0, IntImm(v0->dtype, target_vectorized_size));
-  PrimExpr expr_vectorized = vectorizer.VisitExpr(expr_transformed);
+  PrimExpr expr_vectorized =
+      analyzer->Simplify(vectorizer.VisitExpr(expr_transformed));
+
   auto ramp_node = expr_vectorized.as<RampNode>();
   if (!ramp_node) {
     // Broadcast value

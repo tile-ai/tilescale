@@ -1,9 +1,10 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
 from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang
+from tilelang.engine.callback import register_cuda_postproc_callback
 import torch
 
 
@@ -31,9 +32,9 @@ def matmul(
 
     @T.prim_func
     def main(
-            A: T.Buffer(A_shape, in_dtype),
-            B: T.Buffer(B_shape, in_dtype),
-            C: T.Buffer((M, N), out_dtype),
+            A: T.Tensor(A_shape, in_dtype),
+            B: T.Tensor(B_shape, in_dtype),
+            C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -88,7 +89,7 @@ def run_gemm(
 
     stramp = "&*(XS)"
 
-    @tvm.register_func("tilelang_callback_cuda_postproc", override=True)
+    @register_cuda_postproc_callback
     def tilelang_callback_cuda_postproc(code, _):
         code = f"// {stramp}\n" + code
         return code
@@ -141,9 +142,9 @@ def matmu_jit_kernel(
 
     @T.prim_func
     def main(
-            A: T.Buffer(A_shape, in_dtype),
-            B: T.Buffer(B_shape, in_dtype),
-            C: T.Buffer((M, N), out_dtype),
+            A: T.Tensor(A_shape, in_dtype),
+            B: T.Tensor(B_shape, in_dtype),
+            C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -236,5 +237,4 @@ def test_gemm_jit_kernel():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    test_gemm_jit_kernel()
+    tilelang.testing.main()

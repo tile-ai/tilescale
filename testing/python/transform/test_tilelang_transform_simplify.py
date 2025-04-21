@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
 from tilelang import tvm as tvm
@@ -14,11 +14,11 @@ def modify(
 
     @T.prim_func
     def main(
-            A: T.Buffer((64, 64)),
-            B: T.Buffer((64, 64)),
-            C: T.Buffer((64, 64)),
-            D: T.Buffer((64, 64)),
-            bias: T.Buffer((64, 64)),
+            A: T.Tensor((64, 64)),
+            B: T.Tensor((64, 64)),
+            C: T.Tensor((64, 64)),
+            D: T.Tensor((64, 64)),
+            bias: T.Tensor((64, 64)),
     ):
         if with_B:
             if with_bias:
@@ -88,7 +88,7 @@ def test_matmul():
     torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
 
     # Get CUDA Source
-    # print(rt_mod.imported_modules[0].get_source())
+    print(kernel.get_kernel_source())
 
 
 if __name__ == "__main__":

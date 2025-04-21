@@ -1,5 +1,8 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
+
+from __future__ import annotations
+
 import re
 from typing import Union, Optional, Literal
 from tilelang import tvm as tvm
@@ -29,7 +32,7 @@ def match_global_kernel(source: str, annotation: str = "__global__") -> int:
 
 
 def match_declare_kernel(source: str, annotation: str = "__global__") -> int:
-    pattern = r"__global__\s+void\s+\w+"
+    pattern = r"__global__\s+void\s+(?:__launch_bounds__\(\d+\)\s+)?\w+"
     for line in source.split("\n"):
         if annotation in line:
             matched = re.findall(pattern, line)

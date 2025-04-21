@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 from tilelang import tvm as tvm
 import tilelang as tl
@@ -35,7 +35,7 @@ block_K = 32
 def test_multi_version_buffer():
 
     @T.prim_func
-    def before(A: T.Buffer((M, K), dtype), B: T.Buffer((K, N), dtype)):
+    def before(A: T.Tensor((M, K), dtype), B: T.Tensor((K, N), dtype)):
         bx = T.launch_thread("blockIdx.x", 8)
         by = T.launch_thread("blockIdx.y", 8)
         v = T.launch_thread("threadIdx.x", 128)
@@ -68,7 +68,7 @@ def test_multi_version_buffer():
                     T.tvm_access_ptr(T.type_annotation("float32"), C_local.data, 0, 32, 3))
 
     @T.prim_func
-    def after(A: T.Buffer((M, K), dtype), B: T.Buffer((K, N), dtype)):
+    def after(A: T.Tensor((M, K), dtype), B: T.Tensor((K, N), dtype)):
         bx = T.launch_thread("blockIdx.x", 8)
         by = T.launch_thread("blockIdx.y", 8)
         v = T.launch_thread("threadIdx.x", 128)
@@ -108,4 +108,4 @@ def test_multi_version_buffer():
 
 
 if __name__ == "__main__":
-    test_multi_version_buffer()
+    tilelang.testing.main()

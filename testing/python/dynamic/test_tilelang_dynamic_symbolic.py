@@ -99,9 +99,9 @@ def tl_matmul_macro(
 
     @T.prim_func
     def main(
-            A: T.Buffer(A_shape, in_dtype),
-            B: T.Buffer(B_shape, in_dtype),
-            C: T.Buffer((M, N), out_dtype),
+            A: T.Tensor(A_shape, in_dtype),
+            B: T.Tensor(B_shape, in_dtype),
+            C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
 
@@ -210,7 +210,7 @@ def tl_matmul_block(
     B_shared_shape = (block_N, block_K) if trans_B else (block_K, block_N)
 
     @T.prim_func
-    def main(A: T.Buffer(A_shape, in_dtype), B: T.Buffer(B_shape, in_dtype), C: T.Buffer(
+    def main(A: T.Tensor(A_shape, in_dtype), B: T.Tensor(B_shape, in_dtype), C: T.Tensor(
         (M, N), out_dtype)):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -309,7 +309,7 @@ def tl_matmul_block_all_dynamic(
     B_shared_shape = (block_N, block_K) if trans_B else (block_K, block_N)
 
     @T.prim_func
-    def main(A: T.Buffer(A_shape, in_dtype), B: T.Buffer(B_shape, in_dtype), C: T.Buffer(
+    def main(A: T.Tensor(A_shape, in_dtype), B: T.Tensor(B_shape, in_dtype), C: T.Tensor(
         (M, N), out_dtype)):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -390,6 +390,71 @@ def assert_tl_matmul_block_all_dynamic_correctness(
     torch.testing.assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
 
 
+def assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(
+    M,
+    N,
+    K,
+    trans_A,
+    trans_B,
+    in_dtype,
+    out_dtype,
+    dtypeAccum,
+    block_M,
+    block_N,
+    block_K,
+    num_stages=3,
+    num_threads=128,
+    dynamic_alignment=8,
+):
+    program = tl_matmul_block_all_dynamic(
+        block_M,
+        block_N,
+        block_K,
+        trans_A,
+        trans_B,
+        in_dtype,
+        out_dtype,
+        dtypeAccum,
+        num_stages,
+        num_threads,
+    )
+
+    kernel = tilelang.compile(
+        program,
+        pass_configs={
+            "tl.disable_dynamic_tail_split": dynamic_alignment != 0,
+            "tl.dynamic_alignment": dynamic_alignment
+        })
+
+    if trans_A:
+        A = torch.rand(K, M, device="cuda", dtype=getattr(torch, in_dtype))
+    else:
+        A = torch.rand(M, K, device="cuda", dtype=getattr(torch, in_dtype))
+    if trans_B:
+        B = torch.rand(N, K, device="cuda", dtype=getattr(torch, in_dtype))
+    else:
+        B = torch.rand(K, N, device="cuda", dtype=getattr(torch, in_dtype))
+    C = torch.zeros(M, N, device="cuda", dtype=getattr(torch, out_dtype))
+
+    kernel(A, B, C)
+
+    def ref_program(A, B):
+        import torch
+
+        if trans_A:
+            A = A.T
+        if trans_B:
+            B = B.T
+        C = torch.matmul(A.to(torch.float), B.to(torch.float))
+        C = C.to(torch.__getattribute__(out_dtype))
+        return C
+
+    # Get Reference Result
+    ref_c = ref_program(A, B)
+
+    torch.testing.assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
+
+
 def test_assert_tl_matmul_macro():
     assert_tl_matmul_macro_correctness(128, 128, 128, "float16", "float16", "float16")
     assert_tl_matmul_macro_correctness(66, 128, 128, "float16", "float16", "float16")
@@ -412,6 +477,40 @@ def test_assert_tl_matmul_block_all_dynamic():
                                                    "float16", 64, 64, 32)
     assert_tl_matmul_block_all_dynamic_correctness(36, 128, 128, False, False, "float16", "float16",
                                                    "float16", 64, 64, 32)
+
+
+def test_assert_tl_matmul_block_all_dynamic_with_pass_config():
+    assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(
+        128,
+        128,
+        128,
+        False,
+        False,
+        "float16",
+        "float16",
+        "float16",
+        64,
+        64,
+        32,
+        dynamic_alignment=8)
+    assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(
+        64,
+        128,
+        128,
+        False,
+        False,
+        "float16",
+        "float16",
+        "float16",
+        64,
+        64,
+        32,
+        dynamic_alignment=8)
+    assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(
+        64, 128, 60, False, False, "float16", "float16", "float16", 64, 64, 32, dynamic_alignment=4)
+    # Tail split is enabled with dynamic alignment 0
+    assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(
+        64, 128, 64, False, False, "float16", "float16", "float16", 64, 64, 32, dynamic_alignment=0)
 
 
 if __name__ == "__main__":

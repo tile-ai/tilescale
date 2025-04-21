@@ -1,17 +1,54 @@
-// Copyright (c) Microsoft Corporation.
+// Copyright (c) Tile-AI Corporation.
 // Licensed under the MIT License.
 #pragma once
 
 #include "common.h"
+#include <type_traits>
 
 namespace tl {
 
+// Trait to determine the MFMA instruction to use based on data type
+template <typename T> struct MfmaTraits;
+
+// Specialization for half/float16
+template <> struct MfmaTraits<half> {
+  template <typename AccType>
+  static TL_DEVICE void mfma_op(const half *b, const half *a, AccType *c) {
+    *c = __builtin_amdgcn_mfma_f32_16x16x16f16(*((float16x4 *)b),
+                                               *((float16x4 *)a), *c, 0, 0, 0);
+  }
+};
+
+// Specialization for __hip_bfloat16
+template <> struct MfmaTraits<__hip_bfloat16> {
+  template <typename AccType>
+  static TL_DEVICE void mfma_op(const __hip_bfloat16 *b,
+                                const __hip_bfloat16 *a, AccType *c) {
+    bfloat16x4_vec b_vec, a_vec;
+
+    // Reinterpret the pointers
+    short *b_short = reinterpret_cast<short *>(const_cast<__hip_bfloat16 *>(b));
+    short *a_short = reinterpret_cast<short *>(const_cast<__hip_bfloat16 *>(a));
+
+    // Copy the data
+    for (int i = 0; i < 4; ++i) {
+      b_vec[i] = b_short[i];
+      a_vec[i] = a_short[i];
+    }
+
+    // Call the intrinsic and store the result directly to c
+    *c = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(b_vec, a_vec, *c, 0, 0, 0);
+  }
+};
+
 // ref to bitblas/tl/mfma_macro_generator.py::kPack
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool TransposeA,
-          bool TransposeB, int kPack, typename A_type, typename B_type,
-          typename C_type, typename AccDataType = float>
+          bool TransposeB, bool clear_accum, int kPack, typename A_type,
+          typename B_type, typename C_type, typename AccDataType = float>
 class GemmTensorOp {
 public:
+  static_assert(!clear_accum, "clear_accum=true is not supported yet");
+
   static constexpr int micro_size_x = 16;
   static constexpr int micro_size_y = 16;
   static constexpr int micro_size_k = 16;
@@ -130,34 +167,48 @@ public:
         const auto l = warp_m * warp_row_tiles + i * micro_size_x;
         const auto r = ki * (kPack * micro_size_k);
         for (int local_id = 0; local_id < (kPack * local_size_a); local_id++) {
-          auto [row, col] = reverse_index_map(lane_id, local_id);
-          A_local[i * kPack * local_size_a + local_id] =
-              A_shared[make_swizzle_layout<last_dim_a, sizeof(A_type)>(
-                  l + row, r + col)];
+          if constexpr (TransposeA) {
+            auto [row, col] = reverse_index_map_transposed(lane_id, local_id);
+            A_local[i * kPack * local_size_a + local_id] =
+                A_shared[make_swizzle_layout<last_dim_a, sizeof(A_type)>(
+                    r + row, l + col)];
+          } else {
+            auto [row, col] = reverse_index_map(lane_id, local_id);
+            A_local[i * kPack * local_size_a + local_id] =
+                A_shared[make_swizzle_layout<last_dim_a, sizeof(A_type)>(
+                    l + row, r + col)];
+          }
         }
       }
-
       // Fetch B into register
       for (int j = 0; j < warp_cols; j++) {
         const auto l = warp_n * warp_col_tiles + j * micro_size_y;
         const auto r = ki * (kPack * micro_size_k);
         for (int local_id = 0; local_id < (kPack * local_size_b); local_id++) {
-          auto [row, col] = reverse_index_map(lane_id, local_id);
-          B_local[j * kPack * local_size_b + local_id] =
-              B_shared[make_swizzle_layout<last_dim_b, sizeof(B_type)>(
-                  l + row, r + col)];
+          if constexpr (TransposeB) {
+            auto [row, col] = reverse_index_map(lane_id, local_id);
+            B_local[j * kPack * local_size_b + local_id] =
+                B_shared[make_swizzle_layout<last_dim_b, sizeof(B_type)>(
+                    l + row, r + col)];
+          } else {
+            auto [row, col] = reverse_index_map_transposed(lane_id, local_id);
+            B_local[j * kPack * local_size_b + local_id] =
+                B_shared[make_swizzle_layout<last_dim_b, sizeof(B_type)>(
+                    r + row, l + col)];
+          }
         }
       }
-
       // Compute
       for (int kp = 0; kp < kPack; kp++) {
         for (int i = 0; i < warp_rows; ++i) {
           for (int j = 0; j < warp_cols; ++j) {
-            *(((float32x4 *)C_local) + ((i * warp_cols) + j)) =
-                __builtin_amdgcn_mfma_f32_16x16x16f16(
-                    *(((float16x4 *)B_local) + j * kPack + kp),
-                    *(((float16x4 *)A_local) + i * kPack + kp),
-                    *(((float32x4 *)C_local) + ((i * warp_cols) + j)), 0, 0, 0);
+            auto acc_ptr = ((float32x4 *)C_local) + ((i * warp_cols) + j);
+            auto b_ptr = ((B_type *)B_local) + (j * kPack + kp) * 4;
+            auto a_ptr = ((A_type *)A_local) + (i * kPack + kp) * 4;
+
+            // Use the trait to select the correct MFMA instruction, either fp16
+            // or bf16 currently
+            MfmaTraits<A_type>::mfma_op(b_ptr, a_ptr, acc_ptr);
           }
         }
       }
@@ -191,10 +242,17 @@ public:
         const auto l = warp_n * warp_col_tiles + j * micro_size_y;
         const auto r = ki * kPack * micro_size_k;
         for (int local_id = 0; local_id < kPack * local_size_b; local_id++) {
-          auto [row, col] = reverse_index_map(lane_id, local_id);
-          B_local[j * local_size_b + local_id] =
-              B_shared[make_swizzle_layout<last_dim_b, sizeof(B_type)>(
-                  l + row, r + col)];
+          if constexpr (TransposeB) {
+            auto [row, col] = reverse_index_map(lane_id, local_id);
+            B_local[j * local_size_b + local_id] =
+                B_shared[make_swizzle_layout<last_dim_b, sizeof(B_type)>(
+                    l + row, r + col)];
+          } else {
+            auto [row, col] = reverse_index_map_transposed(lane_id, local_id);
+            B_local[j * local_size_b + local_id] =
+                B_shared[make_swizzle_layout<last_dim_b, sizeof(B_type)>(
+                    r + row, l + col)];
+          }
         }
       }
 
@@ -202,12 +260,14 @@ public:
       for (int kp = 0; kp < kPack; kp++) {
         for (int i = 0; i < warp_rows; ++i) {
           for (int j = 0; j < warp_cols; ++j) {
-            *(((float32x4 *)C_local) + ((i * warp_cols) + j)) =
-                __builtin_amdgcn_mfma_f32_16x16x16f16(
-                    *(((float16x4 *)B_local) + j * kPack + kp),
-                    *(((float16x4 *)A_local) + ki * warp_rows * kPack +
-                      i * kPack + kp),
-                    *(((float32x4 *)C_local) + ((i * warp_cols) + j)), 0, 0, 0);
+            auto acc_ptr = ((float32x4 *)C_local) + ((i * warp_cols) + j);
+            auto b_ptr = ((B_type *)B_local) + (j * kPack + kp) * 4;
+            auto a_ptr = ((A_type *)A_local) +
+                         (ki * warp_rows * kPack + i * kPack + kp) * 4;
+
+            // Use the trait to select the correct MFMA instruction, either fp16
+            // or bf16 currently
+            MfmaTraits<A_type>::mfma_op(b_ptr, a_ptr, acc_ptr);
           }
         }
       }
@@ -220,20 +280,22 @@ public:
 namespace tl {
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, int kPack, typename A_type, typename B_type,
-          typename C_type>
+          bool trans_B, bool clear_accum, int kPack, typename A_type,
+          typename B_type, typename C_type>
 TL_DEVICE void gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
-  using Compute = GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                               trans_B, kPack, A_type, B_type, C_type>;
+  using Compute =
+      GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A, trans_B,
+                   clear_accum, kPack, A_type, B_type, C_type>;
   Compute::body(pA, pB, accum);
 }
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, int kPack, typename A_type, typename B_type,
-          typename C_type>
+          bool trans_B, bool clear_accum, int kPack, typename A_type,
+          typename B_type, typename C_type>
 TL_DEVICE void gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
-  using Compute = GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                               trans_B, kPack, A_type, B_type, C_type>;
+  using Compute =
+      GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A, trans_B,
+                   clear_accum, kPack, A_type, B_type, C_type>;
   Compute::body_rs(pA, pB, accum);
 }
 

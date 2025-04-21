@@ -53,9 +53,9 @@ import tilelang.language as T
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
     @T.prim_func
     def main(
-        A: T.Buffer((M, K), dtype),
-        B: T.Buffer((K, N), dtype),
-        C: T.Buffer((M, N), dtype),
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((K, N), dtype),
+        C: T.Tensor((M, N), dtype),
     ):
         # Define a grid with enough blocks to cover M×N
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
@@ -126,9 +126,9 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
 func = matmul(1024, 1024, 1024, 128, 128, 32)
 print(func)  # Prints an IR-like representation of the TileLang kernel
 
-rt_mod, params = tilelang.lower(func)
+artifact = tilelang.lower(func)
 
-profiler = Profiler(rt_mod, params, result_idx=[2])
+profiler = Profiler(artifact.rt_mod, artifact.params, result_idx=[2])
 
 import torch
 a = torch.randn(1024, 1024).cuda().half()
@@ -141,7 +141,7 @@ ref_c = a @ b
 torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
 
 # Get CUDA Kernel Source
-print(rt_mod.imported_modules[0].get_source())
+print(artifact.kernel_source)
 ```
 
 ---
@@ -176,9 +176,9 @@ from tilelang.intrinsics import make_mma_swizzle_layout as make_swizzle_layout
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
     @T.prim_func
     def main(
-        A: T.Buffer((M, K), dtype),
-        B: T.Buffer((K, N), dtype),
-        C: T.Buffer((M, N), dtype),
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((K, N), dtype),
+        C: T.Tensor((M, N), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
             # Allocate shared and local fragments
@@ -326,9 +326,9 @@ def tl_matmul(
 
     @T.prim_func
     def main(
-            A: T.Buffer(A_shape, in_dtype),
-            B: T.Buffer(B_shape, in_dtype),
-            C: T.Buffer((M, N), out_dtype),
+            A: T.Tensor(A_shape, in_dtype),
+            B: T.Tensor(B_shape, in_dtype),
+            C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
 

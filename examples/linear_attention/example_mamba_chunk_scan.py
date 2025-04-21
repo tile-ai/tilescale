@@ -1,10 +1,9 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
 import argparse
 import torch
 import tilelang
-from tilelang import Profiler
 from tilelang.autotuner import *
 import tilelang.language as T
 from einops import rearrange, repeat
@@ -92,13 +91,13 @@ def chunk_scan_fwd(batch, seqlen, chunk_size, ngroups, nheads, headdim, dstate, 
     def kernel_func(block_M, block_N, block_K, block_Dstate, num_stages, threads):
 
         @T.prim_func
-        def main(cb: T.Buffer((batch, nchunks, ngroups, chunk_size, chunk_size), dtype),
-                 x: T.Buffer((batch, seqlen, nheads, headdim), dtype), dt: T.Buffer(
-                     (batch, nheads, nchunks, chunk_size), dtype), dA_cumsum: T.Buffer(
-                         (batch, nheads, nchunks, chunk_size), dtype), C: T.Buffer(
-                             (batch, seqlen, ngroups, dstate), dtype), prev_states: T.Buffer(
-                                 (batch, nchunks, nheads, headdim, dstate), dtype), D: T.Buffer(
-                                     (nheads), dtype), Output: T.Buffer(
+        def main(cb: T.Tensor((batch, nchunks, ngroups, chunk_size, chunk_size), dtype),
+                 x: T.Tensor((batch, seqlen, nheads, headdim), dtype), dt: T.Tensor(
+                     (batch, nheads, nchunks, chunk_size), dtype), dA_cumsum: T.Tensor(
+                         (batch, nheads, nchunks, chunk_size), dtype), C: T.Tensor(
+                             (batch, seqlen, ngroups, dstate), dtype), prev_states: T.Tensor(
+                                 (batch, nchunks, nheads, headdim, dstate), dtype), D: T.Tensor(
+                                     (nheads), dtype), Output: T.Tensor(
                                          (batch, seqlen, nheads, headdim), dtype)):
             with T.Kernel(
                     nheads,
@@ -204,11 +203,7 @@ def chunk_scan_fwd(batch, seqlen, chunk_size, ngroups, nheads, headdim, dstate, 
             keys=["block_M", "block_N", "block_K", "block_Dstate", "num_stages", "threads"],
             warmup=10,
             rep=10)
-        @jit(
-            out_idx=[7],
-            supply_type=tilelang.TensorSupplyType.Normal,
-            ref_prog=None,
-            profiler="auto")
+        @jit(out_idx=[7], supply_type=tilelang.TensorSupplyType.Normal, ref_prog=None)
         def kernel(block_M=None,
                    block_N=None,
                    block_K=None,
@@ -244,19 +239,22 @@ if __name__ == "__main__":
         program = chunk_scan_fwd(
             batch, seq_len, chunk_size, groups, heads, dim, dstate, tune=args.tune)(
                 block_M=64, block_N=64, block_K=64, block_Dstate=128, num_stages=2, threads=128)
-        mod, params = tilelang.lower(program)
-        mod = Profiler(mod, params, [7], tilelang.TensorSupplyType.Normal)
-        mod.assert_allclose(ref_program, rtol=0.01, atol=0.01)
+        kernel = tilelang.compile(program, out_idx=[7])
+        profiler = kernel.get_profiler(tilelang.TensorSupplyType.Normal)
+        profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
         print("All checks pass.")
-        latency = mod.do_bench(ref_program, warmup=500)
+        latency = profiler.do_bench(ref_program, warmup=500)
         print("Ref: {:.2f} ms".format(latency))
         print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
-        latency = mod.do_bench(mod.func, warmup=500)
+        latency = profiler.do_bench(warmup=500)
         print("Tile-lang: {:.2f} ms".format(latency))
         print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
     else:
-        best_latency, best_config, _ = chunk_scan_fwd(
+        best_result = chunk_scan_fwd(
             batch, seq_len, chunk_size, groups, heads, dim, dstate, tune=args.tune)
+        best_latency = best_result.latency
+        best_config = best_result.config
+        ref_latency = best_result.ref_latency
         print(f"Best latency: {best_latency}")
         print(f"Best TFlops: {total_flops / best_latency * 1e-9}")
         print(f"Best config: {best_config}")

@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 """Template for the TileLang Carver."""
 
@@ -8,3 +8,4 @@ from .gemv import GEMVTemplate  # noqa: F401
 from .elementwise import ElementwiseTemplate  # noqa: F401
 from .general_reduce import GeneralReductionTemplate  # noqa: F401
 from .flashattention import FlashAttentionTemplate  # noqa: F401
+from .conv import ConvTemplate  # noqa: F401

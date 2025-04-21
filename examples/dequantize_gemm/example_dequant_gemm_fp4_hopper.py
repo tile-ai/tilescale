@@ -1,16 +1,13 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
 import tilelang
-from tilelang import Profiler
 import tilelang.language as T
 from tilelang.autotuner import *
-from tilelang import tvm
 from tvm import tir
 import itertools
 import torch
 import argparse
-from functools import partial
 
 
 def _tir_u8_to_f4_to_f16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, dtype: str):
@@ -69,8 +66,8 @@ def test_convert(N, K, block_N, block_K, in_dtype, num_bits=4, threads=128):
 
     @T.prim_func
     def main(
-            B: T.Buffer(B_shape, storage_dtype),
-            C: T.Buffer((N, K), in_dtype),
+            B: T.Tensor(B_shape, storage_dtype),
+            C: T.Tensor((N, K), in_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), threads=threads) as (bx):
             B_shared = T.alloc_shared(B_shared_shape, storage_dtype)
@@ -103,11 +100,10 @@ def test_fp4_fp16_convert_close():
         "float16",
     )
 
-    mod, params = tilelang.lower(program)
-    mod = Profiler(mod, params, [1], tilelang.TensorSupplyType.Integer)
+    kernel = tilelang.compile(program, out_idx=[1])
 
     B = torch.randint(0, 16, (N, K // 2), dtype=torch.uint8, device="cuda").to(torch.uint8)
-    tl_out = mod.func(B)
+    tl_out = kernel(B)
     ref_out = torch_convert(B)
     assert torch.allclose(tl_out, ref_out, rtol=0.01, atol=0.01), (tl_out, ref_out)
     print("Pass")
@@ -148,9 +144,9 @@ def matmul(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune=False):
 
         @T.prim_func
         def main_split(
-                A: T.Buffer(A_shape, in_dtype),
-                B: T.Buffer(B_shape, storage_dtype),
-                Ct: T.Buffer((N, M), out_dtype),
+                A: T.Tensor(A_shape, in_dtype),
+                B: T.Tensor(B_shape, storage_dtype),
+                Ct: T.Tensor((N, M), out_dtype),
         ):
             SplitC = T.alloc_buffer([
                 split, (N + block_N - 1) // block_N * block_N,
@@ -198,9 +194,9 @@ def matmul(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune=False):
 
         @T.prim_func
         def main(
-                A: T.Buffer(A_shape, in_dtype),
-                B: T.Buffer(B_shape, storage_dtype),
-                Ct: T.Buffer((N, M), out_dtype),
+                A: T.Tensor(A_shape, in_dtype),
+                B: T.Tensor(B_shape, storage_dtype),
+                Ct: T.Tensor((N, M), out_dtype),
         ):
             with T.Kernel(
                     T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
@@ -247,11 +243,7 @@ def matmul(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune=False):
             keys=["block_M", "block_N", "block_K", "num_stages", "threads", "split"],
             warmup=10,
             rep=10)
-        @jit(
-            out_idx=[2],
-            supply_type=tilelang.TensorSupplyType.Integer,
-            ref_prog=None,
-            profiler="auto")
+        @jit(out_idx=[2], supply_type=tilelang.TensorSupplyType.Integer, ref_prog=None)
         def kernel(block_M=None,
                    block_N=None,
                    block_K=None,
@@ -291,19 +283,21 @@ if __name__ == "__main__":
         program = matmul(
             M, N, K, "float16", "float16", "float32", num_bits=4, tune=args.tune)(
                 block_M=128, block_N=128, block_K=128, num_stages=2, threads=256, split=1)
-        mod, params = tilelang.lower(program)
-        mod = Profiler(mod, params, [2], tilelang.TensorSupplyType.Integer)
-        mod.assert_allclose(ref_program, rtol=0.01, atol=0.01)
+        kernel = tilelang.compile(program, out_idx=[2])
+        profiler = kernel.get_profiler(tilelang.TensorSupplyType.Integer)
+        profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
         print("All checks pass.")
-        latency = mod.do_bench(ref_program, warmup=500)
+        latency = profiler.do_bench(ref_program, warmup=500)
         print("Ref: {:.2f} ms".format(latency))
         print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
-        latency = mod.do_bench(mod.func, warmup=500)
+        latency = profiler.do_bench(warmup=500)
         print("Tile-lang: {:.2f} ms".format(latency))
         print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
     else:
-        best_latency, best_config, ref_latency = matmul(
-            M, N, K, "float16", "float16", "float32", num_bits=4, tune=args.tune)
+        best_result = matmul(M, N, K, "float16", "float16", "float32", num_bits=4, tune=args.tune)
+        best_latency = best_result.latency
+        best_config = best_result.config
+        ref_latency = best_result.ref_latency
         print(f"Best latency: {best_latency}")
         print(f"Best TFlops: {total_flops / best_latency * 1e-9}")
         print(f"Best config: {best_config}")

@@ -1,4 +1,4 @@
-// Copyright (c) Microsoft Corporation.
+// Copyright (c) Tile-AI Corporation.
 // Licensed under the MIT License.
 
 /*!
@@ -149,7 +149,8 @@ Fragment makeGemmFragmentB(const int block_m, const int block_n,
 
 Fragment makeGemmFragmentACDNA(const int block_m, const int block_n,
                                const int block_k, const int warp_m,
-                               const int warp_n, bool transposed = false);
+                               const int warp_n, const int element_size,
+                               bool transposed = false);
 
 // Default Memory Layout
 Layout makeGemmLayoutLinear(int stride, int continuous);

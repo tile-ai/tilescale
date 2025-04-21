@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 import torch
 import torch.backends
@@ -52,10 +52,10 @@ def gemv_simt(
 
     @T.prim_func
     def main(
-            A: T.Buffer(A_shape, in_dtype),
-            B: T.Buffer(B_shape, in_dtype),
-            Bias: T.Buffer(Bias_shape, out_dtype),
-            C: T.Buffer(C_shape, out_dtype),
+            A: T.Tensor(A_shape, in_dtype),
+            B: T.Tensor(B_shape, in_dtype),
+            Bias: T.Tensor(Bias_shape, out_dtype),
+            C: T.Tensor(C_shape, out_dtype),
     ):
         with T.Kernel(
                 T.ceildiv(N, n_partition), M, threads=(reduce_thread, n_partition)) as (
@@ -159,7 +159,7 @@ def evaluate_gemv_simt(
     ref_c = torch.mm(A.to(torch.float32), B.T.to(torch.float32))
     if with_bias:
         ref_c += Bias.to(torch.float32)
-
+    ref_c = ref_c.to(out_dtype)
     print(C)
     print(ref_c)
     tilelang.testing.torch_assert_close(C, ref_c, rtol=1e-2, atol=1e-2)

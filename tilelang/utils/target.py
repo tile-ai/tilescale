@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
 from typing import Literal, Union
@@ -83,5 +83,4 @@ def determine_target(target: Union[str, Target, Literal["auto"]] = "auto",
 
     if return_object:
         return Target(return_var)
-
     return return_var

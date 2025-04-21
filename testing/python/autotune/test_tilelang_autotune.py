@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
 import itertools
@@ -7,7 +7,7 @@ import logging
 import tilelang as tl
 import tilelang.testing
 import tilelang.language as T
-from tilelang.autotuner import autotune, jit
+from tilelang.autotuner import AutoTuner
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -154,27 +154,6 @@ def matmul(M, N, K, with_roller):
     #  - The "tvm" profiler backend
     #  - HIP as the compilation target (modify as needed for your hardware)
 
-    @autotune(
-        configs=get_configs(M, N, K, with_roller),
-        keys=[
-            "block_M",
-            "block_N",
-            "block_K",
-            "num_stages",
-            "thread_num",
-            "enable_rasteration",
-        ],
-        warmup=3,
-        rep=5,
-    )
-    @jit(
-        out_idx=[2],
-        supply_type=tl.TensorSupplyType.Integer,
-        ref_prog=ref_program,
-        skip_check=True,
-        profiler="auto",
-        target="auto",
-    )
     def kernel(
         block_M=None,
         block_N=None,
@@ -215,9 +194,9 @@ def matmul(M, N, K, with_roller):
 
         @T.prim_func
         def main(
-                A: T.Buffer((M, K), dtype),
-                B: T.Buffer((N, K), dtype),
-                C: T.Buffer((M, N), dtype),
+                A: T.Tensor((M, K), dtype),
+                B: T.Tensor((N, K), dtype),
+                C: T.Tensor((M, N), dtype),
         ):
             """
             The compiled TVM function for block-level matrix multiplication.
@@ -272,14 +251,24 @@ def matmul(M, N, K, with_roller):
 
         return main
 
-    return kernel()
+    autotuner = AutoTuner.from_kernel(
+        kernel=kernel, configs=get_configs(M, N, K, with_roller)).set_compile_args(
+            out_idx=[-1],
+            supply_type=tl.TensorSupplyType.Integer,
+            ref_prog=ref_program,
+            skip_check=False,
+            target="auto",
+        )
+    return autotuner.run(warmup=3, rep=20)
 
 
 def test_autotune_get_configs():
+    get_configs(8192, 8192, 8192, with_roller=True)
     get_configs(8192, 8192, 8192, with_roller=False)
 
 
 def test_autotune_matmul():
+    matmul(8192, 8192, 8192, with_roller=True)
     matmul(8192, 8192, 8192, with_roller=False)
 
 

@@ -2,7 +2,7 @@
 # Licensed under the MIT License.
 """The profiler and convert to torch utils"""
 
-from typing import List, Literal, Optional, Callable, Any
+from typing import List, Optional, Callable, Any
 from functools import partial
 import torch
 from contextlib import suppress
@@ -100,6 +100,13 @@ class Profiler:
                 ins.append(self.supply(self.params[i]))
         return ins
 
+    def _get_params(self, with_output=False):
+        params = []
+        for i in range(len(self.params)):
+            if with_output or i not in self.result_idx:
+                params.append(self.params[i])
+        return params
+
     def _get_distributed_inputs(self, with_output=False):
         ins = []
         for i in range(len(self.params)):
@@ -139,6 +146,7 @@ class Profiler:
     def assert_allclose(
         self,
         reference_program: Callable,
+        input_tensors: Optional[List[torch.Tensor]] = None,
         atol: float = 1e-2,
         rtol: float = 1e-2,
         max_mismatched_ratio=0.01,
@@ -147,6 +155,7 @@ class Profiler:
         
         Args:
             reference_program: Reference implementation to compare against
+            input_tensors: Optional pre-generated input tensors
             atol: Absolute tolerance for comparison
             rtol: Relative tolerance for comparison
             max_mismatched_ratio: Maximum allowed ratio of mismatched elements
@@ -155,7 +164,7 @@ class Profiler:
             self.init_distributed()
             ins = self._get_distributed_inputs()
         else:
-            ins = self._get_inputs()
+            ins = self._get_inputs() if input_tensors is None else input_tensors
         ref_outs = reference_program(*ins)
         torch.cuda.synchronize()
         lib_outs = self.func(*ins)
@@ -165,7 +174,9 @@ class Profiler:
             lib_outs = [lib_outs]
         if isinstance(ref_outs, torch.Tensor):
             ref_outs = [ref_outs]
-        assert len(lib_outs) == len(ref_outs)
+        elif ref_outs is None:
+            ref_outs = []
+        assert len(lib_outs) == len(ref_outs), "len(lib_outs) not equals to len(ref_outs) !"
         # torch.set_printoptions(edgeitems=torch.inf)
         for lhs, rhs in zip(lib_outs, ref_outs):
             # close_mask = torch.isclose(lhs, rhs, rtol=rtol, atol=atol)
@@ -215,9 +226,7 @@ class Profiler:
             func = self.__call__
         return func(*ins)
 
-    def determine_profiler(self,
-                           func: Optional[Callable] = None,
-                           profiler: Literal["torch", "tvm", "auto"] = "auto"):
+    def determine_profiler(self, func: Optional[Callable] = None):
         """Determines which profiler backend to use based on function type.
         
         Args:
@@ -227,12 +236,10 @@ class Profiler:
         Returns:
             str: The determined profiler type ("torch" or "tvm")
         """
-        if profiler == "auto":
-            if isinstance(func, tvm.runtime.Module):
-                return "tvm"
-            else:
-                return "torch"
-        return profiler
+        if isinstance(func, tvm.runtime.Module):
+            return "tvm"
+        else:
+            return "torch"
 
     def do_bench(
         self,
@@ -241,7 +248,6 @@ class Profiler:
         rep: int = 100,
         n_warmup: int = 1,
         n_repeat: int = 1,
-        profiler: Literal["torch", "tvm", "auto"] = "auto",
         input_tensors: List[torch.Tensor] = None,
     ) -> float:
         """Benchmarks the execution time of a given function.
@@ -258,7 +264,7 @@ class Profiler:
         Returns:
             float: Average execution time in milliseconds
         """
-        profiler = self.determine_profiler(func, profiler)
+        profiler = self.determine_profiler(func)
         if profiler == "torch":
             if func is None:
                 assert self.adapter is not None, "benchmarking function should be provided"

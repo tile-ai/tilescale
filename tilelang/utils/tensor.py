@@ -1,9 +1,12 @@
 # Copyright (c) Tile-AI Organization.
 # Licensed under the MIT License.
+
+from __future__ import annotations
 """The profiler and convert to torch utils"""
 from enum import Enum
 import torch
 from tvm.runtime import ndarray
+from tvm import tir
 from torch.utils.dlpack import to_dlpack
 import numpy as np
 
@@ -46,7 +49,7 @@ def adapt_torch2tvm(arg):
     return arg
 
 
-def get_tensor_supply(supply_type: TensorSupplyType):
+def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):
 
     from tilelang.engine.param import KernelParam
 
@@ -59,17 +62,28 @@ def get_tensor_supply(supply_type: TensorSupplyType):
                 f"TensorType must have a shape, but got {type(param)}, "
                 "likely you are trying to generate a random tensor with a dynamic symbolic shape.")
 
+        # Check if with dynamic symbolic shape
+        for shape in param.shape:
+            if isinstance(shape, tir.Var):
+                raise ValueError(
+                    f"TensorType must have a static shape, but got {shape}, "
+                    "likely you are trying to generate a random tensor with a dynamic symbolic shape."
+                )
+
         shape = list(map(int, param.shape))
         if supply_type == TensorSupplyType.Auto:
             is_unsigned = param.is_unsigned()
             is_float8 = param.is_float8()
+            is_boolean = param.is_boolean()
             if is_unsigned:
                 return torch.randint(low=0, high=3, size=shape, device=device, dtype=dtype)
             elif is_float8:
                 return torch.randint(
                     low=-128, high=128, size=shape, device=device, dtype=torch.int8).to(dtype)
+            elif is_boolean:
+                return torch.randint(low=0, high=2, size=shape, device=device, dtype=dtype)
             elif dtype in {torch.float16, torch.float32, torch.bfloat16}:
-                return torch.empty(*shape, device=device, dtype=dtype).normal_(-1.0, 1.0)
+                return torch.empty(*shape, device=device, dtype=dtype).uniform_(-1.0, 1.0)
             else:
                 return torch.randint(low=-2, high=3, size=shape, device=device, dtype=dtype)
 
@@ -82,11 +96,14 @@ def get_tensor_supply(supply_type: TensorSupplyType):
         if supply_type == TensorSupplyType.Integer:
             is_unsigned = param.is_unsigned()
             is_float8 = param.is_float8()
+            is_boolean = param.is_boolean()
             if is_unsigned:
                 return torch.randint(low=0, high=3, size=shape, device=device, dtype=dtype)
             elif is_float8:
                 return torch.randint(
                     low=-128, high=128, size=shape, device=device, dtype=torch.int8).to(dtype)
+            elif is_boolean:
+                return torch.randint(low=0, high=2, size=shape, device=device, dtype=dtype)
             else:
                 return torch.randint(low=-2, high=3, size=shape, device=device, dtype=dtype)
         elif supply_type == TensorSupplyType.Uniform:
@@ -201,7 +218,7 @@ def torch_assert_close(
     verbose: bool = False,
     equal_nan: bool = True,
     check_device: bool = True,
-    check_dtype: bool = False,
+    check_dtype: bool = True,
     check_layout: bool = True,
     check_stride: bool = False,
 ):

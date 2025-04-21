@@ -24,6 +24,8 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Simplify again to clean up any duplicated conditions
     # that may have been introduced by safety checks
     mod = tir.transform.Simplify()(mod)
+    # Try to vectorize loop with dynamic shape
+    mod = tilelang.transform.LoopVectorizeDynamic()(mod)
 
     return mod
 
@@ -34,20 +36,25 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.IfStmtBinding()(mod)
         mod = tilelang.transform.MultiVersionBuffer()(mod)
         mod = tilelang.transform.WarpSpecialized()(mod)
+        # if tma is not enabled, we can also do pipeline planning
+        # to get better performance with async copy
+        mod = tilelang.transform.PipelinePlanning()(mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
         mod = tir.transform.LowerOpaqueBlock()(mod)
         mod = tilelang.transform.MergeIfStmt()(mod)
         mod = tilelang.transform.RewriteWgmmaSync()(mod)
         mod = tilelang.transform.InjectFenceProxy()(mod)
     else:
+        mod = tilelang.transform.IfStmtBinding()(mod)
         mod = tir.transform.PlanAndUpdateBufferAllocationLocation()(mod)
         mod = tilelang.transform.PipelinePlanning()(mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
+        mod = tilelang.transform.MergeIfStmt()(mod)
 
     # TODO(lei): may need a pass to fuse the if-then-else in the
     # pipeline loop when we meet dynamic branch.
     mod = tir.transform.LowerOpaqueBlock()(mod)
-    mod = tir.transform.FlattenBuffer()(mod)
+    mod = tilelang.transform.FlattenBuffer()(mod)
     mod = tir.transform.NarrowDataType(32)(mod)
     mod = tir.transform.Simplify()(mod)
     mod = tilelang.transform.VectorizeLoop()(mod)
@@ -74,6 +81,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tir.transform.InferFragment()(mod)
     mod = tir.transform.LowerThreadAllreduce()(mod)
     mod = tilelang.transform.LowerHopperIntrin()(mod)
+    mod = tilelang.transform.ConfigIndexBitwidth()(mod)
     mod = tilelang.transform.ThreadSync("shared")(mod)
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
     mod = tilelang.transform.InjectPTXAsyncCopy()(mod)
@@ -81,7 +89,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = tir.transform.SplitHostDevice()(mod)
     mod = tir.transform.MergeSharedMemoryAllocations()(mod)
-
     mod = tilelang.transform.MakePackedAPI()(mod)
     mod = tir.transform.LowerDeviceKernelLaunch()(mod)
 

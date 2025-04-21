@@ -1,12 +1,10 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
 import sys
 import os
 import ctypes
 
-import warnings
-import functools
 import logging
 from tqdm import tqdm
 
@@ -47,7 +45,7 @@ def _init_logger():
     logger = logging.getLogger(__name__)
     handler = TqdmLoggingHandler()
     formatter = logging.Formatter(
-        fmt="%(asctime)s [TileLang:%(levelname)s]: %(message)s",
+        fmt="%(asctime)s  [TileLang:%(name)s:%(levelname)s]: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     handler.setFormatter(formatter)
@@ -58,32 +56,10 @@ def _init_logger():
 
 _init_logger()
 
-
-def deprecated(reason):
-    """
-    This is a decorator which can be used to mark functions as deprecated.
-    It will result in a warning being emitted when the function is used.
-    """
-
-    def decorator(func):
-
-        @functools.wraps(func)
-        def new_func(*args, **kwargs):
-            warnings.warn(
-                f"Call to deprecated function {func.__name__} ({reason}).",
-                category=DeprecationWarning,
-                stacklevel=2,
-            )
-            return func(*args, **kwargs)
-
-        return new_func
-
-    return decorator
-
-
 logger = logging.getLogger(__name__)
 
 from .env import SKIP_LOADING_TILELANG_SO
+from .env import enable_cache, disable_cache, is_cache_enabled  # noqa: F401
 
 import tvm
 import tvm._ffi.base
@@ -113,6 +89,7 @@ from .cache import cached  # noqa: F401
 
 from .utils import (
     TensorSupplyType,  # noqa: F401
+    deprecated,  # noqa: F401
 )
 from .layout import (
     Layout,  # noqa: F401
@@ -125,7 +102,7 @@ from . import (
     engine,  # noqa: F401
 )
 
-from .engine import lower  # noqa: F401
+from .engine import lower, register_cuda_postproc, register_hip_postproc  # noqa: F401
 
 from .version import __version__  # noqa: F401
 

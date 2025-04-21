@@ -13,9 +13,9 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
 
     @T.prim_func
     def matmul(
-            A: T.Buffer((M, K), dtype),
-            B: T.Buffer((K, N), dtype),
-            C: T.Buffer((M, N), dtype),
+            A: T.Tensor((M, K), dtype),
+            B: T.Tensor((K, N), dtype),
+            C: T.Tensor((M, N), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), is_cpu=True) as (bx, by):
             A_local = T.alloc_local((block_M, block_K), dtype)
@@ -52,9 +52,9 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
 def assert_matmul_codegen(M=1024, N=1024, K=1024, block_M=128, block_N=128, block_K=32):
     func = matmul(M, N, K, block_M, block_N, block_K)
 
-    rt_mod, _ = tilelang.lower(func, target="c")
+    artifact = tilelang.lower(func, target="c")
 
-    code = rt_mod.imported_modules[0].get_source()
+    code = artifact.kernel_source
 
     assert code is not None, "Code generation failed"
 
@@ -69,9 +69,9 @@ def test_matmul_compile():
         # a simple kernel just for jit test
         @T.prim_func
         def matmul(
-                A: T.Buffer((M, K), dtype),
-                B: T.Buffer((K, N), dtype),
-                C: T.Buffer((M, N), dtype),
+                A: T.Tensor((M, K), dtype),
+                B: T.Tensor((K, N), dtype),
+                C: T.Tensor((M, N), dtype),
         ):
             with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), is_cpu=True) as (bx, by):
                 A_local = T.alloc_local((block_M, block_K), dtype)

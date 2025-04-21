@@ -40,6 +40,7 @@ deeplearning_operators/matmul
 deeplearning_operators/matmul_dequant
 deeplearning_operators/flash_attention
 deeplearning_operators/flash_linear_attention
+deeplearning_operators/deepseek_mla
 deeplearning_operators/convolution
 deeplearning_operators/tmac_gpu
 :::
@@ -53,6 +54,12 @@ language_ref/primitives
 language_ref/tilelibrary
 ::: 
 
+:::{toctree}
+:maxdepth: 1
+:caption: API Reference
+
+api/modules
+:::
 
 :::{toctree}
 :maxdepth: 1

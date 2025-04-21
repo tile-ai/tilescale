@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 """Wrapping transformations."""
 # pylint: disable=invalid-name, unsupported-binary-operation
@@ -258,3 +258,53 @@ def InjectPTXAsyncCopy():
         The result pass
     """
     return _ffi_api.InjectPTXAsyncCopy()  # type: ignore
+
+
+def LowerDeviceStorageAccessInfo():
+    """Lower attached storage access information on device.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+
+    Note
+    ----
+    Run this pass after all storage access analysis finish.
+    """
+    return _ffi_api.LowerDeviceStorageAccessInfo()  # type: ignore
+
+
+def LoopVectorizeDynamic():
+    """Try to vectorize loop with dynamic shape.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    ----
+    """
+    return _ffi_api.LoopVectorizeDynamic()  # type: ignore
+
+
+def ConfigIndexBitwidth():
+    """Config index bitwidth.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    ----
+    """
+    return _ffi_api.ConfigIndexBitwidth()  # type: ignore
+
+
+def FlattenBuffer():
+    """FlattenBuffer
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.FlattenBuffer()  # type: ignore

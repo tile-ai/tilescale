@@ -12,11 +12,11 @@ def retnet(batch, heads, seq_len, dim_qk, dim_v, block_M, block_N):
 
     @T.prim_func
     def main(
-            Q: T.Buffer(qk_shape, dtype),
-            K: T.Buffer(qk_shape, dtype),
-            V: T.Buffer(v_shape, dtype),
-            mask: T.Buffer([heads, seq_len, seq_len], dtype),
-            Output: T.Buffer(v_shape, dtype),
+            Q: T.Tensor(qk_shape, dtype),
+            K: T.Tensor(qk_shape, dtype),
+            V: T.Tensor(v_shape, dtype),
+            mask: T.Tensor([heads, seq_len, seq_len], dtype),
+            Output: T.Tensor(v_shape, dtype),
     ):
         with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, threads=128 * 2) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_M, dim_qk], dtype)
@@ -118,13 +118,13 @@ def retnet_inference(batch, heads, dim_qk, dim_v, block_M):
 
     @T.prim_func
     def main(
-            Q: T.Buffer(qk_shape, dtype),
-            K: T.Buffer(qk_shape, dtype),
-            V: T.Buffer(v_shape, dtype),
-            prev_kv: T.Buffer([batch, heads, dim_v, dim_qk], dtype),
-            prev_scale: T.Buffer([heads], dtype),
-            decay: T.Buffer([heads], dtype),
-            Output: T.Buffer([batch, heads, dim_v], dtype),
+            Q: T.Tensor(qk_shape, dtype),
+            K: T.Tensor(qk_shape, dtype),
+            V: T.Tensor(v_shape, dtype),
+            prev_kv: T.Tensor([batch, heads, dim_v, dim_qk], dtype),
+            prev_scale: T.Tensor([heads], dtype),
+            decay: T.Tensor([heads], dtype),
+            Output: T.Tensor([batch, heads, dim_v], dtype),
     ):
         with T.Kernel(T.ceildiv(dim_v, block_M), heads, batch, threads=128) as (bx, by, bz):
             Q_local = T.alloc_fragment([1, dim_qk], dtype)
@@ -180,18 +180,18 @@ if __name__ == "__main__":
     BLOCK_M = 64
     BLOCK_N = 64
     program = retnet(BATCH, H, N_CTX, dim_qk, dim_v, BLOCK_M, BLOCK_N)
-    mod, params = tilelang.lower(program)
-    mod = tilelang.Profiler(mod, params, [4], tilelang.TensorSupplyType.Normal)
+    kernel = tilelang.compile(program, out_idx=[4])
+    profiler = kernel.get_profiler(tilelang.TensorSupplyType.Normal)
 
     ins = []
-    for i in range(len(mod.params)):
-        if i not in mod.result_idx:
-            shape = [int(x) for x in mod.params[i].shape]
+    for i in range(len(kernel.params)):
+        if i not in kernel.result_idx:
+            shape = [int(x) for x in kernel.params[i].shape]
             ins.append(torch.empty(shape, device="cuda", dtype=torch.float16).normal_(-0.1, 0.1))
 
     ref_outs = ref_program(*ins)
     torch.cuda.synchronize()
-    lib_outs = mod.func(*ins)
+    lib_outs = kernel(*ins)
     torch.cuda.synchronize()
 
     if isinstance(lib_outs, torch.Tensor):
@@ -210,7 +210,7 @@ if __name__ == "__main__":
             max_mismatched_ratio=0.01,
         )
 
-    mod.assert_allclose(ref_program, rtol=0.01, atol=0.01)
-    latency = mod.do_bench(mod, n_warmup=10, n_repeat=10, profiler="torch")
+    profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
+    latency = profiler.do_bench(n_warmup=10, n_repeat=10, profiler="torch")
     print("tilelang: {:.2f} ms".format(latency))
     print("tilelang: {:.2f} TFlops".format(total_flops / latency * 1e-9))

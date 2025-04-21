@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
 import torch
@@ -6,7 +6,6 @@ import torch.backends
 from tilelang import tvm as tvm
 import tilelang.testing
 from tvm import DataType
-import tilelang as TL
 import tilelang.language as T
 from tilelang.intrinsics import get_swizzle_layout
 from tilelang.intrinsics.mma_macro_generator import (
@@ -109,9 +108,9 @@ def tl_matmul(
 
     @T.prim_func
     def main(
-            A: T.Buffer(A_shape, in_dtype),
-            B: T.Buffer(B_shape, in_dtype),
-            C: T.Buffer((M, N), out_dtype),
+            A: T.Tensor(A_shape, in_dtype),
+            B: T.Tensor(B_shape, in_dtype),
+            C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
 
@@ -181,8 +180,8 @@ def tl_matmul(
 
 def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     matmul = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
-    mod, params = TL.lower(matmul)
-    src_code = mod.imported_modules[0].get_source()
+    kernel = tilelang.compile(matmul, out_idx=[2])
+    src_code = kernel.get_kernel_source()
     print(src_code)
     # src_code is the generated cuda source
     assert src_code is not None
@@ -203,11 +202,11 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
 
     C = torch.zeros(M, N, device="cuda", dtype=accum_dtype)
 
-    mod = TL.Profiler(mod, params, [], TL.TensorSupplyType.Integer)
+    profiler = kernel.get_profiler(tilelang.TensorSupplyType.Integer)
 
-    mod(A, B, C)
+    profiler(A, B, C)
 
-    latency = mod.do_bench(mod.func, warmup=25)
+    latency = profiler.do_bench(warmup=25)
 
     # Ensure that the latency is not None
     assert latency is not None

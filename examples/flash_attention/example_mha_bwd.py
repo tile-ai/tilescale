@@ -1,10 +1,9 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
 import torch
 import torch.nn.functional as F
 import tilelang
-from tilelang import cached
 from tilelang.autotuner import *
 import tilelang.language as T
 import argparse
@@ -18,11 +17,11 @@ def flashattn_fwd(batch, heads, seq_len, dim, is_casual, block_M, block_N):
 
     @T.prim_func
     def flash_fwd(
-            Q: T.Buffer(shape, dtype),  # type: ignore
-            K: T.Buffer(shape, dtype),  # type: ignore
-            V: T.Buffer(shape, dtype),  # type: ignore
-            Output: T.Buffer(shape, dtype),  # type: ignore
-            lse: T.Buffer([batch, heads, seq_len], accum_dtype),  # type: ignore
+            Q: T.Tensor(shape, dtype),  # type: ignore
+            K: T.Tensor(shape, dtype),  # type: ignore
+            V: T.Tensor(shape, dtype),  # type: ignore
+            Output: T.Tensor(shape, dtype),  # type: ignore
+            lse: T.Tensor([batch, heads, seq_len], accum_dtype),  # type: ignore
     ):
         with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, threads=128) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_M, dim], dtype)
@@ -90,9 +89,9 @@ def flashattn_bwd_preprocess(batch, heads, seq_len, dim):
 
     @T.prim_func
     def flash_bwd_prep(
-            O: T.Buffer(shape, dtype),  # type: ignore
-            dO: T.Buffer(shape, dtype),  # type: ignore
-            Delta: T.Buffer([batch, heads, seq_len], accum_dtype),  # type: ignore
+            O: T.Tensor(shape, dtype),  # type: ignore
+            dO: T.Tensor(shape, dtype),  # type: ignore
+            Delta: T.Tensor([batch, heads, seq_len], accum_dtype),  # type: ignore
     ):
         with T.Kernel(heads, T.ceildiv(seq_len, blk), batch) as (bx, by, bz):
             o = T.alloc_fragment([blk, blk], dtype)
@@ -125,8 +124,8 @@ def flashattn_bwd_postprocess(batch, heads, seq_len, dim):
 
     @T.prim_func
     def flash_bwd_post(
-            dQ: T.Buffer(shape, accum_dtype),  # type: ignore
-            dQ_out: T.Buffer(shape, dtype),  # type: ignore
+            dQ: T.Tensor(shape, accum_dtype),  # type: ignore
+            dQ_out: T.Tensor(shape, dtype),  # type: ignore
     ):
         with T.Kernel(T.ceildiv(seq_len, blk), heads, batch, threads=128) as (bx, by, bz):
             T.annotate_layout({dQ: make_dq_layout(dQ)})
@@ -147,15 +146,15 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_casual, block_M, block_N):
 
     @T.prim_func
     def flash_bwd(
-            Q: T.Buffer(shape, dtype),  # type: ignore
-            K: T.Buffer(shape, dtype),  # type: ignore
-            V: T.Buffer(shape, dtype),  # type: ignore
-            dO: T.Buffer(shape, dtype),  # type: ignore
-            lse: T.Buffer([batch, heads, seq_len], accum_dtype),  # type: ignore
-            Delta: T.Buffer([batch, heads, seq_len], accum_dtype),  # type: ignore
-            dQ: T.Buffer(shape, accum_dtype),  # type: ignore
-            dK: T.Buffer(shape, dtype),  # type: ignore
-            dV: T.Buffer(shape, dtype),  # type: ignore
+            Q: T.Tensor(shape, dtype),  # type: ignore
+            K: T.Tensor(shape, dtype),  # type: ignore
+            V: T.Tensor(shape, dtype),  # type: ignore
+            dO: T.Tensor(shape, dtype),  # type: ignore
+            lse: T.Tensor([batch, heads, seq_len], accum_dtype),  # type: ignore
+            Delta: T.Tensor([batch, heads, seq_len], accum_dtype),  # type: ignore
+            dQ: T.Tensor(shape, accum_dtype),  # type: ignore
+            dK: T.Tensor(shape, dtype),  # type: ignore
+            dV: T.Tensor(shape, dtype),  # type: ignore
     ):
         with T.Kernel(heads, T.ceildiv(seq_len, block_M), batch, threads=256) as (bx, by, bz):
             K_shared = T.alloc_shared([block_M, dim], dtype)
@@ -236,8 +235,12 @@ class _attention(torch.autograd.Function):
         BATCH, N_CTX, H, D_HEAD = q.shape
         block_M = 64
         block_N = 64 if D_HEAD <= 128 else 32
-        mod = cached(flashattn_fwd, [3, 4], BATCH, H, N_CTX, D_HEAD, causal, block_M, block_N)
-        o, lse = mod(q, k, v)
+        kernel = tilelang.compile(
+            flashattn_fwd(BATCH, H, N_CTX, D_HEAD, causal, block_M, block_N),
+            out_idx=[3, 4],
+            target="cuda",
+            execution_backend="cython")
+        o, lse = kernel(q, k, v)
         ctx.save_for_backward(q, k, v, o, lse)
         ctx.causal = causal
         return o
@@ -254,13 +257,24 @@ class _attention(torch.autograd.Function):
         do, q, k, v, o = [maybe_contiguous(x) for x in (do, q, k, v, o)]
         block_M = 128
         block_N = 128 if D_HEAD <= 64 else 32
-        mod_prep = cached(flashattn_bwd_preprocess, [2], BATCH, H, N_CTX, D_HEAD)
-        mod_post = cached(flashattn_bwd_postprocess, [1], BATCH, H, N_CTX, D_HEAD)
-        delta = mod_prep(o, do)
-        mod = cached(flashattn_bwd, [6, 7, 8], BATCH, H, N_CTX, D_HEAD, ctx.causal, block_M,
-                     block_N)
-        dq, dk, dv = mod(q, k, v, do, lse, delta)
-        dq = mod_post(dq)
+        kernel_prep = tilelang.compile(
+            flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD),
+            out_idx=[2],
+            target="cuda",
+            execution_backend="cython")
+        kernel_post = tilelang.compile(
+            flashattn_bwd_postprocess(BATCH, H, N_CTX, D_HEAD),
+            out_idx=[1],
+            target="cuda",
+            execution_backend="cython")
+        delta = kernel_prep(o, do)
+        kernel = tilelang.compile(
+            flashattn_bwd(BATCH, H, N_CTX, D_HEAD, ctx.causal, block_M, block_N),
+            out_idx=[6, 7, 8],
+            target="cuda",
+            execution_backend="cython")
+        dq, dk, dv = kernel(q, k, v, do, lse, delta)
+        dq = kernel_post(dq)
         return dq, dk, dv, None
 
 

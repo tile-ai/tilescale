@@ -109,9 +109,9 @@ def tl_matmul(
 
     @T.prim_func
     def main(
-            A: T.Buffer(A_shape, in_dtype),
-            B: T.Buffer(B_shape, in_dtype),
-            C: T.Buffer((M, N), out_dtype),
+            A: T.Tensor(A_shape, in_dtype),
+            B: T.Tensor(B_shape, in_dtype),
+            C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
 
@@ -219,8 +219,13 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
 def test_assert_tl_matmul():
     assert_tl_matmul_correctness(128, 128, 128, "float16", "float16", "float16")
     assert_tl_matmul_correctness(128, 256, 256, "float16", "float32", "float32")
-    assert_tl_matmul_correctness(128, 128, 128, "bfloat16", "float32", "float32")
     assert_tl_matmul_correctness(128, 256, 256, "int8", "int32", "int32")
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(8, 0)
+def test_assert_tl_matmul_bfloat16():
+    assert_tl_matmul_correctness(256, 256, 256, "bfloat16", "float32", "float32")
 
 
 @tilelang.testing.requires_cuda

@@ -16,6 +16,7 @@ def tl_gemm(
     M,
     N,
     K,
+    block_N,
     in_dtype,
     out_dtype,
     accum_dtype,
@@ -28,26 +29,25 @@ def tl_gemm(
         "float32",
     ], "Currently only float16 and float32 are supported"
 
-    TILE_SIZE = (128, 128, 128)
-    block_M = TILE_SIZE[0]
-    block_N = TILE_SIZE[1]
-    block_K = TILE_SIZE[2]
+    group_size = 128
+    block_M = 128
+    block_K = 128
 
     A_shape = (M, K)
-    Scales_A_shape = (M, T.ceildiv(K, block_K))
+    Scales_A_shape = (M, T.ceildiv(K, group_size))
     B_shape = (N, K)
-    Scales_B_shape = (T.ceildiv(N, block_N), T.ceildiv(K, block_K))
+    Scales_B_shape = (T.ceildiv(N, group_size), T.ceildiv(K, group_size))
     A_shared_shape = (block_M, block_K)
     B_shared_shape = (block_N, block_K)
     C_shared_shape = (block_M, block_N)
 
     @T.prim_func
     def main(
-            A: T.Buffer(A_shape, in_dtype),
-            B: T.Buffer(B_shape, in_dtype),
-            C: T.Buffer((M, N), out_dtype),
-            scales_a: T.Buffer(Scales_A_shape, "float32"),
-            scales_b: T.Buffer(Scales_B_shape, "float32"),
+            A: T.Tensor(A_shape, in_dtype),
+            B: T.Tensor(B_shape, in_dtype),
+            C: T.Tensor((M, N), out_dtype),
+            scales_a: T.Tensor(Scales_A_shape, "float32"),
+            scales_b: T.Tensor(Scales_B_shape, "float32"),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
 
@@ -70,7 +70,7 @@ def tl_gemm(
                 # Load B into shared memory
                 T.copy(B[bx * block_N, k * block_K], B_shared)
                 # Load scale into shared memory
-                Scale_B = scales_b[bx, k]
+                Scale_B = scales_b[bx * block_N // group_size, k]
                 for i in T.Parallel(block_M):
                     Scale_C_shared[i] = scales_a[by * block_M + i, k] * Scale_B
 
@@ -148,8 +148,8 @@ def calc_diff(x, y):
 
 def assert_tl_gemm_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     gemm = tl_gemm(M, N, K, in_dtype, out_dtype, accum_dtype)
-    mod, params = TL.lower(gemm)
-    src_code = mod.imported_modules[0].get_source()
+    kernel = TL.compile(gemm, out_idx=[])
+    src_code = kernel.get_kernel_source()
 
     # src_code is the generated cuda source
     assert src_code is not None
@@ -165,16 +165,15 @@ def assert_tl_gemm_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
 
     C = torch.zeros(M, N, device="cuda", dtype=out_dtype)
 
-    mod = TL.Profiler(mod, params, [], TL.TensorSupplyType.Integer)
-
-    mod(A_fp8, B_fp8, C, A_scale, B_scale)
+    kernel(A_fp8, B_fp8, C, A_scale, B_scale)
     # Get Reference Result
     ref_c = ref_deepgemm_fp8(A_fp8, B_fp8, A_scale, B_scale, out_dtype)
     diff = calc_diff(C, ref_c)
     print(f"diff: {diff}")
     assert diff < 1e-3
 
-    latency = mod.do_bench(mod.func, warmup=25)
+    profiler = kernel.get_profiler()
+    latency = profiler.do_bench(warmup=25)
     # Ensure that the latency is not None
     assert latency is not None
     print(f"latency: {latency} ms")
@@ -185,4 +184,5 @@ def assert_tl_gemm_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
 if __name__ == "__main__":
     for dtype in ["e4m3_float8"]:
         for out_dtype in ["bfloat16", "float32"]:
-            assert_tl_gemm_correctness(1024, 1024, 8192, dtype, out_dtype, "float32")
+            for block_N in [16, 32, 64, 128]:
+                assert_tl_gemm_correctness(1024, 1024, 8192, block_N, dtype, out_dtype, "float32")

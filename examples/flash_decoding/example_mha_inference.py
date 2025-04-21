@@ -18,10 +18,10 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
 
     @T.macro
     def MMA0(
-        K: T.Buffer(shape_kv, dtype),
-        Q_shared: T.Buffer([block_M, dim], dtype),
-        K_shared: T.Buffer([block_N, dim], dtype),
-        acc_s: T.Buffer([block_M, block_N], accum_dtype),
+        K: T.Tensor(shape_kv, dtype),
+        Q_shared: T.SharedBuffer([block_M, dim], dtype),
+        K_shared: T.SharedBuffer([block_N, dim], dtype),
+        acc_s: T.FragmentBuffer([block_M, block_N], accum_dtype),
         k: T.int32,
         mid: T.int32,
         hid: T.int32,
@@ -42,10 +42,10 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
 
     @T.macro
     def MMA1(
-        V: T.Buffer(shape_kv, dtype),
-        V_shared: T.Buffer([block_M, dim], dtype),
-        acc_s_cast: T.Buffer([block_M, block_N], dtype),
-        acc_o: T.Buffer([block_M, dim], accum_dtype),
+        V: T.Tensor(shape_kv, dtype),
+        V_shared: T.SharedBuffer([block_M, dim], dtype),
+        acc_s_cast: T.FragmentBuffer([block_M, block_N], dtype),
+        acc_o: T.FragmentBuffer([block_M, dim], accum_dtype),
         k: T.int32,
         hid: T.int32,
         bid: T.int32,
@@ -58,13 +58,13 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
 
     @T.macro
     def Softmax(
-            acc_s: T.Buffer([block_M, block_N], accum_dtype),
-            acc_s_cast: T.Buffer([block_M, block_N], dtype),
-            scores_max: T.Buffer([block_M], accum_dtype),
-            scores_max_prev: T.Buffer([block_M], accum_dtype),
-            scores_scale: T.Buffer([block_M], accum_dtype),
-            scores_sum: T.Buffer([block_M], accum_dtype),
-            logsum: T.Buffer([block_M], accum_dtype),
+            acc_s: T.FragmentBuffer([block_M, block_N], accum_dtype),
+            acc_s_cast: T.FragmentBuffer([block_M, block_N], dtype),
+            scores_max: T.FragmentBuffer([block_M], accum_dtype),
+            scores_max_prev: T.FragmentBuffer([block_M], accum_dtype),
+            scores_scale: T.FragmentBuffer([block_M], accum_dtype),
+            scores_sum: T.FragmentBuffer([block_M], accum_dtype),
+            logsum: T.FragmentBuffer([block_M], accum_dtype),
     ):
         T.copy(scores_max, scores_max_prev)
         T.fill(scores_max, -T.infinity(accum_dtype))
@@ -88,19 +88,19 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
 
     @T.macro
     def Rescale(
-            acc_o: T.Buffer([block_M, dim], accum_dtype),
-            scores_scale: T.Buffer([block_M], accum_dtype),
+            acc_o: T.FragmentBuffer([block_M, dim], accum_dtype),
+            scores_scale: T.FragmentBuffer([block_M], accum_dtype),
     ):
         for i, j in T.Parallel(block_M, dim):
             acc_o[i, j] *= scores_scale[i]
 
     @T.macro
     def flash_attn_split(
-            Q: T.Buffer(shape_q, dtype),
-            K: T.Buffer(shape_kv, dtype),
-            V: T.Buffer(shape_kv, dtype),
-            glse: T.Buffer([batch, heads, num_split, seqlen_q], dtype),
-            Output_partial: T.Buffer(part_shape, dtype),
+            Q: T.Tensor(shape_q, dtype),
+            K: T.Tensor(shape_kv, dtype),
+            V: T.Tensor(shape_kv, dtype),
+            glse: T.Tensor([batch, heads, num_split, seqlen_q], dtype),
+            Output_partial: T.Tensor(part_shape, dtype),
     ):
         with T.Kernel(
                 T.ceildiv(seqlen_q, block_M), heads * batch, num_split,
@@ -150,9 +150,9 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
 
     @T.macro
     def combine(
-            glse: T.Buffer([batch, heads, num_split, seqlen_q], dtype),
-            Output_partial: T.Buffer(part_shape, dtype),
-            Output: T.Buffer(shape_q, dtype),
+            glse: T.Tensor([batch, heads, num_split, seqlen_q], dtype),
+            Output_partial: T.Tensor(part_shape, dtype),
+            Output: T.Tensor(shape_q, dtype),
     ):
         with T.Kernel(T.ceildiv(seqlen_q, block_M), heads, batch, threads=128) as (bx, by, bz):
             po_local = T.alloc_fragment([block_M, dim], dtype)
@@ -167,7 +167,6 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
 
             T.annotate_layout({
                 o_accum_local: T.Fragment(o_accum_local.shape, forward_thread_fn=lambda i, j: i),
-                lse_local_split: T.Fragment(lse_local_split.shape, forward_thread_fn=lambda i: i),
                 o_shared: tilelang.layout.make_swizzled_layout(o_shared),
                 po_shared: tilelang.layout.make_swizzled_layout(po_shared),
             })
@@ -190,7 +189,9 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
             for k in T.Pipelined(num_split, num_stages=2):
                 T.copy(Output_partial[bz, bx * block_M:(bx + 1) * block_M, by, k, :], po_shared)
                 T.copy(po_shared, po_local)
-                T.copy(lse_local[k, :], lse_local_split)
+                for i in T.Parallel(block_M):
+                    lse_local_split[i] = lse_local[k, i]
+                # T.copy(lse_local[k, :], lse_local_split)
                 for i in T.Parallel(block_M):
                     scale_local[i] = T.exp2(lse_local_split[i] - lse_logsum_local[i])
                 for i, j in T.Parallel(block_M, dim):
@@ -200,12 +201,12 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
 
     @T.prim_func
     def main(
-            Q: T.Buffer(shape_q, dtype),
-            K: T.Buffer(shape_kv, dtype),
-            V: T.Buffer(shape_kv, dtype),
-            glse: T.Buffer([batch, heads, num_split, seqlen_q], dtype),
-            Output_partial: T.Buffer(part_shape, dtype),  # [batch, seqlen_q, heads, num_split, dim]
-            Output: T.Buffer(shape_q, dtype),
+            Q: T.Tensor(shape_q, dtype),
+            K: T.Tensor(shape_kv, dtype),
+            V: T.Tensor(shape_kv, dtype),
+            glse: T.Tensor([batch, heads, num_split, seqlen_q], dtype),
+            Output_partial: T.Tensor(part_shape, dtype),  # [batch, seqlen_q, heads, num_split, dim]
+            Output: T.Tensor(shape_q, dtype),
     ):
         flash_attn_split(Q, K, V, glse, Output_partial)
         combine(glse, Output_partial, Output)
@@ -304,14 +305,15 @@ if __name__ == "__main__":
     BLOCK_N = 64  # if D_HEAD <= 128 else 32
     program = flashattn(BATCH, H, Q_CTX, KV_CTX, D_HEAD, causal, BLOCK_M, BLOCK_N)
     ref_program = partial(ref_program, causal=causal)
-    mod = tilelang.compile(program, out_idx=[5], target="cuda", execution_backend="dlpack")
-    profiler = mod.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
+    kernel = tilelang.compile(program, out_idx=[5], target="cuda", execution_backend="dlpack")
+    print(kernel.get_kernel_source())
+    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
     profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
     print("All checks passed!")
 
     latency = profiler.do_bench(ref_program, warmup=500)
     print("{:.2f} ms".format(latency))
     print("{:.2f} TFlops".format(total_flops / latency * 1e-9))
-    latency = profiler.do_bench(profiler.mod, n_warmup=10, n_repeat=10, profiler="tvm")
+    latency = profiler.do_bench(n_warmup=10, n_repeat=10)
     print("{:.4f} ms".format(latency))
     print("{:.2f} TFlops".format(total_flops / latency * 1e-9))

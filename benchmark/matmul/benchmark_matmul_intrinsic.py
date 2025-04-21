@@ -1,10 +1,8 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
 import argparse
 import logging
-import torch
-import torch.backends
 from tilelang import tvm as tvm
 from tvm import DataType
 import tilelang as tl
@@ -108,9 +106,9 @@ def tl_matmul(
 
     @T.prim_func
     def main(
-            A: T.Buffer(A_shape, in_dtype),
-            B: T.Buffer(B_shape, in_dtype),
-            C: T.Buffer((M, N), out_dtype),
+            A: T.Tensor(A_shape, in_dtype),
+            B: T.Tensor(B_shape, in_dtype),
+            C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
 
@@ -164,7 +162,7 @@ def tl_matmul(
 
 def ref_program(A, B):
     """Reference matrix multiplication program."""
-    return torch.matmul(A, B.T)
+    return A @ B.T
 
 
 def get_configs(M, N, K, with_roller=False):
@@ -274,7 +272,6 @@ def matmul(M,
         supply_type=tl.TensorSupplyType.Integer,
         ref_prog=ref_program,
         skip_check=True,
-        profiler="auto",
         target="auto",
     )
     def kernel(
@@ -329,8 +326,10 @@ if __name__ == "__main__":
     total_flops = 2 * M * N * K
 
     # Run autotuning
-    best_latency, best_config, ref_latency = matmul(M, N, K, in_dtype, out_dtype, accum_dtype,
-                                                    with_roller)
+    best_result = matmul(M, N, K, in_dtype, out_dtype, accum_dtype, with_roller)
+    best_latency = best_result.latency
+    best_config = best_result.config
+    ref_latency = best_result.ref_latency
 
     # Print benchmark results
     print(f"Best latency (s): {best_latency}")

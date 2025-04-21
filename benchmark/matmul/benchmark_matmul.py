@@ -160,15 +160,6 @@ def matmul(M, N, K, with_roller):
 
     @autotune(
         configs=get_configs(M, N, K, with_roller),
-        keys=[
-            "block_M",
-            "block_N",
-            "block_K",
-            "num_stages",
-            "thread_num",
-            "policy",
-            "enable_rasteration",
-        ],
         warmup=3,
         rep=20,
     )
@@ -177,7 +168,6 @@ def matmul(M, N, K, with_roller):
         supply_type=tl.TensorSupplyType.Integer,
         ref_prog=ref_program,
         skip_check=True,
-        profiler="auto",
         target="auto",
     )
     def kernel(
@@ -221,9 +211,9 @@ def matmul(M, N, K, with_roller):
 
         @T.prim_func
         def main(
-                A: T.Buffer((M, K), dtype),
-                B: T.Buffer((N, K), dtype),
-                C: T.Buffer((M, N), dtype),
+                A: T.Tensor((M, K), dtype),
+                B: T.Tensor((N, K), dtype),
+                C: T.Tensor((M, N), dtype),
         ):
             """
             The compiled TVM function for block-level matrix multiplication.
@@ -293,14 +283,16 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     M, N, K = args.m, args.n, args.k
-    # with_roller = args.with_roller
-    with_roller = True
+    with_roller = args.with_roller
 
     # Compute total floating-point operations to measure throughput
     total_flops = 2 * M * N * K
 
     # matmul(...) returns (best_latency, best_config, ref_latency)
-    best_latency, best_config, ref_latency = matmul(M, N, K, with_roller)
+    best_result = matmul(M, N, K, with_roller)
+    best_latency = best_result.latency
+    best_config = best_result.config
+    ref_latency = best_result.ref_latency
 
     # Print out the benchmark results
     print(f"Best latency (s): {best_latency}")
