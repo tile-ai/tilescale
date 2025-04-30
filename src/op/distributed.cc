@@ -192,5 +192,10 @@ TIR_DEFINE_TL_BUILTIN(FcollectBlock)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+TIR_DEFINE_TL_BUILTIN(CpengineCpAsync)
+    .set_num_inputs(-1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
 } // namespace tl
 } // namespace tvm

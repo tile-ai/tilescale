@@ -37,6 +37,7 @@ extern "C" const char* get_last_error() {{
 }}
 
 extern "C" int init() {{
+    nvshmem_init();
     error_buf[0] = '\\0';
     {0}
 }}
@@ -74,6 +75,9 @@ TMA_DESC_INIT_FUNC = """
 \t}}
 """
 
+CPENGINE_DESC_INIT_FUNC = """
+\t// CUresult {0}_result = CUTLASS_CUDA_DRIVER_WRAPPER_CALL(cuMemcpyDtoDAsync)();
+"""
 
 class BaseWrapper(ABC):
 
@@ -200,14 +204,14 @@ class TLCUDASourceWrapper(object):
 
         # TODO: Pass ptr created by nvshmem_malloc and stream to kernel
         _call_str = """"""
-        _call_str += "\tcudaStream_t stream_;\n"
+        # _call_str += "\tcudaStream_t stream_;\n"
         # TODO: check the impl of TileLink
         if self.use_nvshmem:
             _call_str += "\tint mype_node;\n"
-            _call_str += "\tnvshmem_init();\n"
-            _call_str += "\tmype_node = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);\n"
-            _call_str += "\tcudaSetDevice(mype_node);\n"
-        _call_str += "\tcudaStreamCreate(&stream_);\n"
+            # _call_str += "\tnvshmem_init();\n"
+            # _call_str += "\tmype_node = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);\n"
+            # _call_str += "\tcudaSetDevice(mype_node);\n"
+        # _call_str += "\tcudaStreamCreate(&stream_);\n"
         desc_name_map: Dict[str, str] = {}
         for function_name, function_info in function_informations.items():
             block_info = function_info["block_info"]
@@ -232,20 +236,20 @@ class TLCUDASourceWrapper(object):
             grid_str = "dim3({}, {}, {})".format(
                 legalize_c(grid_info[0]), legalize_c(grid_info[1]), legalize_c(grid_info[2]))
             smem_str = 0 if dynamic_smem_buf is None else dynamic_smem_buf
-            _call_str += "\t{}<<<{}, {}, {}, stream_>>>({});\n".format(
+            _call_str += "\t{}<<<{}, {}, {}, stream>>>({});\n".format(
                 function_name, grid_str, block_str, smem_str, call_args)
-            if self.use_nvshmem:
-                _call_str += "\tnvshmemx_barrier_all_on_stream(stream_);\n"
+            # if self.use_nvshmem:
+            #     _call_str += "\tnvshmemx_barrier_all_on_stream(stream);\n"
 
         _call_str = self.generate_tma_descriptor_args(desc_name_map) + _call_str
-        _call_str += "\tcudaStreamSynchronize(stream_);\n"
-        if self.use_nvshmem:
-            _call_str += "\tnvshmem_finalize();\n"
-        _call_str += "\tcudaStreamDestroy(stream_);\n"
+        # _call_str += self.generate_cpengine_calls()
 
         # Wrap the kernel dispatch logic in an external C function
         host_func = PREDEF_HOST_FUNC.format(def_args, _call_str)
         return host_func
+
+    def generate_cpengine_calls(self) -> str:
+        return CPENGINE_DESC_INIT_FUNC.format("cpengine")
 
     def generate_tma_descriptor_args(self, desc_name_map: Dict[str, str]) -> str:
         tma_descripter_init = ""

@@ -63,7 +63,8 @@ from .customize import (
 )
 from .logical import any_of, all_of  # noqa: F401
 from .builtin import *  # noqa: F401
-from .distributed import *  # noqa: F401
+from .distributed.multi_device.nvshmem import *  # noqa: F401
+from .distributed.multi_device.cpengine import *  # noqa: F401
 
 from .memscope import *  # noqa: F401
 

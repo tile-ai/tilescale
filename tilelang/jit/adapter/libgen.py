@@ -11,7 +11,8 @@ import tempfile
 import subprocess
 import logging
 from tilelang.env import TILELANG_TEMPLATE_PATH
-from tilelang.contrib.rocm import find_rocm_path, get_rocm_arch, NVSHMEM_INCLUDE_DIR, NVSHMEM_LIB_PATH
+from tilelang.contrib.rocm import find_rocm_path, get_rocm_arch
+from tilelang.env import NVSHMEM_INCLUDE_DIR, NVSHMEM_LIB_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -91,13 +92,12 @@ class LibraryGenerator(object):
         else:
             raise ValueError(f"Unsupported target: {target}")
 
-        if with_tl:
-            command += [
-                "-I" + TILELANG_TEMPLATE_PATH,
-                "-I" + CUTLASS_INCLUDE_DIR,
-            ]
-            command += ["-diag-suppress=20013"]
-            command += ["-rdc=true"]
+        command += [
+            "-I" + TILELANG_TEMPLATE_PATH,
+            "-I" + CUTLASS_INCLUDE_DIR,
+        ]
+        command += ["-diag-suppress=20013"]
+        command += ["-rdc=true"]
         if os.environ.get("NVSHMEM_PATH", None) is not None:
             command += [
                 "-I" + NVSHMEM_INCLUDE_DIR, "-L" + NVSHMEM_LIB_PATH,

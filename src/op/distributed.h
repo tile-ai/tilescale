@@ -209,5 +209,10 @@ const Op &FcollectWarp();
  */
 const Op &FcollectBlock();
 
+/*!
+ * \brief tvm intrinsics for collective gather operation
+ */
+const Op &CpengineCpAsync();
+
 } // namespace tl
 } // namespace tvm

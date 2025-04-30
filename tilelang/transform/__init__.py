@@ -91,6 +91,17 @@ def LowerHopperIntrin():
         if hasattr(_ffi_api, "LowerHopperIntrin") else lambda f: f # type: ignore
 
 
+def LowerCpengineIntrin():
+    """LowerCpengineIntrin
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.LowerCpengineIntrin()  # type: ignore
+    
+
 def WarpSpecializedPipeline():
     """WarpSpecializedPipeline
 

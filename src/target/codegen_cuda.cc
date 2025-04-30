@@ -1278,6 +1278,17 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       }
     }
     os << ")";
+  } else if (op->op.same_as(tl::SignalOp())) {
+    os << "nvshmemx_signal_op(";
+    for (int i = 0; i < op->args.size(); i++) {
+      this->PrintExpr(op->args[i], os);
+      if (i != op->args.size() - 1) {
+        os << ", ";
+      }
+    }
+    os << ")";
+  } else if (op->op.same_as(tl::Fence())) {
+    os << "nvshmem_fence()";
   } else if (op->op.same_as(tl::SyncAll())) {
     os << "nvshmem_sync_all()";
   } else {
