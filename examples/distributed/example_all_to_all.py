@@ -7,6 +7,7 @@ import os
 import tilelang
 import tilelang.language as T
 from tilelang.profiler import TensorSupplyType
+from tilelang.distributed.utils import init_distributed
 import argparse
 import random
 
@@ -100,27 +101,7 @@ args = parse_args()
 # dtype = torch.float16
 # nelems = M * PE_num * N
 
-import os
-import datetime
-
-WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-RANK = int(os.environ.get("RANK", 0))
-LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
-
-torch.cuda.set_device(LOCAL_RANK)
-torch.distributed.init_process_group(
-    backend="nccl",
-    world_size=WORLD_SIZE,
-    rank=RANK,
-    timeout=datetime.timedelta(seconds=1800),
-)
-assert torch.distributed.is_initialized()
-TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
-
-torch.cuda.synchronize()
-pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
-
-RANK = int(os.environ.get("RANK", 0))
+WORLD_SIZE, RANK, LOCAL_RANK = init_distributed()
 
 func = all_to_all(args.M, args.topk, args.N, args.G)
 kernel = tilelang.compile(func, pass_configs={"tl.disable_tma_lower": True})
@@ -132,8 +113,6 @@ if RANK == 0:
 profiler = kernel.get_profiler(tensor_supply_type=TensorSupplyType.Randn)
 
 ref_tensor = torch.randn(args.M * args.topk * PE_num, args.N, dtype=torch.float16).cuda()
-
-# profiler.init_distributed()
 
 token_num = args.M
 exp_indices = generate_random_exp_indices(token_num, args.G, args.topk)

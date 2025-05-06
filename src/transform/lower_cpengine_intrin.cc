@@ -29,7 +29,6 @@
 
 #include "../op/distributed.h"
 #include "../op/bulk_copy.h"
-#include "../runtime/cpengine_rt.h"
 namespace tvm {
 namespace tl {
 
@@ -53,7 +52,7 @@ public:
     if (call->op.same_as(CpengineCpAsync())) {
         LOG(INFO) << "call CpengineCpAsync";
         cpengine_calls_.push_back(Evaluate(
-          Call(DataType::Handle(), builtin::tvm_call_packed(), {StringImm(tvm_cpengine_cp_async)})));
+          Call(DataType::Handle(), builtin::tvm_call_packed(), {StringImm("tvm_cpengine_cp_async")})));
       return 0;
     } else {
       return StmtExprMutator::VisitExpr_(call);

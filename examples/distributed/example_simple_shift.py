@@ -5,7 +5,7 @@ import os
 import tilelang
 import tilelang.language as T
 from tilelang.profiler import TensorSupplyType
-
+from tilelang.distributed.utils import init_distributed
 
 def simple_shift(M, N, block_M, block_N, dtype="float16"):
 
@@ -28,11 +28,10 @@ def simple_shift(M, N, block_M, block_N, dtype="float16"):
     return main
 
 
+WORLD_SIZE, RANK, LOCAL_RANK = init_distributed()
+
 func = simple_shift(128, 128, 128, 128)
-
 kernel = tilelang.compile(func, out_idx=-1)
-
-RANK = int(os.environ.get("RANK", 0))
 
 # Get CUDA Source
 if RANK == 0:

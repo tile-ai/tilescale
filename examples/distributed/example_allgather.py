@@ -7,11 +7,9 @@ import os
 import tilelang
 import tilelang.language as T
 from tilelang.profiler import TensorSupplyType
+from tilelang.distributed.utils import init_distributed
 
-PE_num = 8
-
-
-def allgather(M, N, block_M, block_N, dtype="float16"):
+def allgather(PE_num, M, N, block_M, block_N, dtype="float16"):
 
     @T.prim_func
     def main(
@@ -37,14 +35,15 @@ def allgather(M, N, block_M, block_N, dtype="float16"):
     return main
 
 
+WORLD_SIZE, RANK, LOCAL_RANK = init_distributed()
+
 M, N, block_M, block_N = 32, 32, 32, 32
+PE_num = WORLD_SIZE
 dtype = torch.float16
 nelems = M * PE_num * N
 
-RANK = int(os.environ.get("RANK", 0))
-
-func = allgather(M, N, block_M, block_N)
-kernel = tilelang.compile(func, out_idx=-1)
+func = allgather(PE_num, M, N, block_M, block_N)
+kernel = tilelang.compile(func, pass_configs={"tl.disable_tma_lower": True})
 
 # Get CUDA Source
 if RANK == 0:
@@ -55,12 +54,12 @@ profiler = kernel.get_profiler(tensor_supply_type=TensorSupplyType.Randn)
 ref_tensor = torch.arange(nelems, dtype=dtype).cuda()
 ref_tensor = ref_tensor.reshape(M * PE_num, N)
 
-profiler.init_distributed()
 ag_buffer = pynvshmem.nvshmem_create_tensor([M, N], dtype)
 ag_buffer[:].copy_(ref_tensor[M * RANK:M * (RANK + 1), :])
 print("ag_buffer:", ag_buffer)
 
-out = kernel(ag_buffer)
+out = pynvshmem.nvshmem_create_tensor([M * PE_num, N], dtype)
+kernel(ag_buffer, out)
 print("out:", out)
 
 ref_cpu = ref_tensor.cpu()
