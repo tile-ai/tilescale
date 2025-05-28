@@ -18,7 +18,6 @@ def cannon(MESH, M, N, K, block_M, block_N, block_K, dtype="float16"):
     M_local = T.ceildiv(M, MESH)
     N_local = T.ceildiv(N, MESH)
     K_local = T.ceildiv(K, MESH)
-    K_local = T.ceildiv(N, MESH)
     accum_dtype = "float32"
 
     @T.prim_func
