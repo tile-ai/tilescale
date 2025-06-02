@@ -439,7 +439,7 @@ private:
       auto var = call->args[1].as<Var>().value();
       return buffer_data_to_buffer_[var];
     }
-    return NullOpt;
+    return std::nullopt;
   }
 
   void addToUseList(const Buffer &buffer) {
@@ -480,7 +480,7 @@ private:
     }
     if (op->annotations.count(attr::kLayoutMap)) {
       auto map =
-          op->annotations.Get(attr::kLayoutMap).as<Map<Var, Layout>>().value();
+          op->annotations.Get(attr::kLayoutMap)->as<Map<Var, Layout>>().value();
       for (const auto &[var, layout] : map) {
         ICHECK(buffer_data_to_buffer_.count(var))
             << "buffer " << var << " is not found in the block";
@@ -641,7 +641,7 @@ tvm::transform::Pass LayoutInference() {
   return CreatePrimFuncPass(pass_func, 0, "tl.LayoutInference", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.LayoutInference")
+TVM_FFI_REGISTER_GLOBAL("tl.transform.LayoutInference")
     .set_body_typed(LayoutInference);
 
 } // namespace tl

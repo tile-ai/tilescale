@@ -9,7 +9,6 @@ from tilelang import tvm as tvm
 from tvm import te, tir
 from tilelang import language as T
 from tvm.script import ir as I
-from tvm.driver.build_module import schedule_to_module
 
 
 def test_makeapi():

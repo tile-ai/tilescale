@@ -103,6 +103,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
             # so we need to inject a fence proxy before it
             mod = tilelang.transform.InjectFenceProxy()(mod)
 
+    mod = tilelang.transform.LowerStmtGroupBlock()(mod)
     mod = tir.transform.LowerOpaqueBlock()(mod)
     mod = tir.transform.NarrowDataType(32)(mod)
     mod = tilelang.transform.ConfigIndexBitwidth()(mod)
@@ -132,7 +133,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # the Legalization.
     mod = tilelang.transform.ThreadPartialSync("shared.dyn")(mod)
     mod = tir.transform.InferFragment()(mod)
-    mod = tir.transform.LowerThreadAllreduce()(mod)
+    mod = tilelang.transform.LowerThreadAllreduce()(mod)
     mod = tilelang.transform.LowerHopperIntrin()(mod)
     mod = tilelang.transform.ThreadSync("shared")(mod)
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)

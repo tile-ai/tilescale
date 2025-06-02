@@ -142,6 +142,7 @@ message(STATUS "TVM_SOURCE_DIR: ${TVM_SOURCE_DIR}")
 # Include directories for TileLang
 set(TILE_LANG_INCLUDES
   ${TVM_SOURCE_DIR}/include
+  ${TVM_SOURCE_DIR}/ffi/include
   ${TVM_SOURCE_DIR}/src
   ${TVM_SOURCE_DIR}/3rdparty/dlpack/include
   ${TVM_SOURCE_DIR}/3rdparty/dmlc-core/include
@@ -159,7 +160,7 @@ if(USE_CUDA)
   set(CUDA_MAJOR_VERSION ${CUDAToolkit_VERSION_MAJOR})
   message(STATUS "Setting CUDA_MAJOR_VERSION=${CUDA_MAJOR_VERSION}")
   add_compile_definitions(CUDA_MAJOR_VERSION=${CUDA_MAJOR_VERSION})
-  
+
   list(APPEND TILE_LANG_INCLUDES ${CUDAToolkit_INCLUDE_DIRS})
 endif(USE_CUDA)
 
@@ -196,6 +197,7 @@ target_compile_definitions(tilelang_objs PRIVATE -DTILE_LANG_EXPORTS)
 # Shared library
 add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
 target_link_libraries(tilelang PUBLIC tvm_runtime)
+target_link_libraries(tilelang PRIVATE tvm_ffi_header)
 
 # Static library
 add_library(tilelang_static STATIC $<TARGET_OBJECTS:tilelang_objs>)

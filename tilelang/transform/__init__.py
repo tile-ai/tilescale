@@ -59,6 +59,17 @@ def LowerTileOp():
     return _ffi_api.LowerTileOp()  # type: ignore
 
 
+def LowerStmtGroupBlock():
+    """LowerStmtGroupBlock
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.LowerStmtGroupBlock()  # type: ignore
+
+
 def InjectSoftwarePipeline():
     """InjectSoftwarePipeline
 
@@ -89,8 +100,11 @@ def LowerHopperIntrin():
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.LowerHopperIntrin() \
-        if hasattr(_ffi_api, "LowerHopperIntrin") else lambda f: f # type: ignore
+    return (
+        _ffi_api.LowerHopperIntrin()
+        if hasattr(_ffi_api, "LowerHopperIntrin")
+        else lambda f: f
+    )  # type: ignore
 
 
 def WarpSpecializedPipeline():
@@ -330,8 +344,7 @@ def FlattenBuffer():
 
 
 def EliminateStorageSyncForMBarrier():
-    """EliminateStorageSyncForMBarrier
-    """
+    """EliminateStorageSyncForMBarrier"""
     return _ffi_api.EliminateStorageSyncForMBarrier()  # type: ignore
 
 
@@ -344,3 +357,14 @@ def MergeSharedMemoryAllocations():
         The result pass
     """
     return _ffi_api.MergeSharedMemoryAllocations()  # type: ignore
+
+
+def LowerThreadAllreduce():
+    """LowerThreadAllreduce
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.LowerThreadAllreduce()  # type: ignore

@@ -20,12 +20,10 @@
 
 from typing import Type
 
-from tvm import tir
-from tvm._ffi.runtime_ctypes import DataType, DataTypeCode
+from tvm import DataType, DataTypeCode, tir
+from tvm.script.parser._core import OpMethod, doc, register_op
 from tvm.tir import IntImm
 from tvm.tir.expr import FloatImm
-
-from tvm.script.parser._core import OpMethod, doc, register_op
 
 
 def _register_expr_op(ty: Type):  # pylint: disable=invalid-name
@@ -61,8 +59,10 @@ def _register_expr_op(ty: Type):  # pylint: disable=invalid-name
 
         if isinstance(a, int):
             if hasattr(b, "dtype"):
-                if (DataType(b.dtype).type_code == DataTypeCode.INT or
-                        DataType(b.dtype).type_code == DataTypeCode.UINT):
+                if (
+                    DataType(b.dtype).type_code == DataTypeCode.INT
+                    or DataType(b.dtype).type_code == DataTypeCode.UINT
+                ):
                     a = IntImm(_get_type_str(b.dtype), a)
                 elif DataType(b.dtype).type_code == DataTypeCode.FLOAT:
                     a = FloatImm(_get_type_str(b.dtype), a)
@@ -78,8 +78,10 @@ def _register_expr_op(ty: Type):  # pylint: disable=invalid-name
 
         assert isinstance(a, tir.PrimExpr), "Operand should be a PrimExpr."
         if isinstance(b, int):
-            if (DataType(a.dtype).type_code == DataTypeCode.INT or
-                    DataType(a.dtype).type_code == DataTypeCode.UINT):
+            if (
+                DataType(a.dtype).type_code == DataTypeCode.INT
+                or DataType(a.dtype).type_code == DataTypeCode.UINT
+            ):
                 b = IntImm(_get_type_str(a.dtype), b)
             elif DataType(a.dtype).type_code == DataTypeCode.FLOAT:
                 b = FloatImm(_get_type_str(a.dtype), b)
@@ -88,10 +90,16 @@ def _register_expr_op(ty: Type):  # pylint: disable=invalid-name
 
         if DataType(a.dtype).lanes == DataType(b.dtype).lanes:
             return op(a, b)
-        elif DataType(a.dtype).lanes == 1 and DataType(a.dtype).lanes != DataType(b.dtype).lanes:
+        elif (
+            DataType(a.dtype).lanes == 1
+            and DataType(a.dtype).lanes != DataType(b.dtype).lanes
+        ):
             broadcast_a = tir.Broadcast(a, DataType(b.dtype).lanes)
             return op(broadcast_a, b)
-        elif DataType(b.dtype).lanes == 1 and DataType(a.dtype).lanes != DataType(b.dtype).lanes:
+        elif (
+            DataType(b.dtype).lanes == 1
+            and DataType(a.dtype).lanes != DataType(b.dtype).lanes
+        ):
             broadcast_b = tir.Broadcast(b, DataType(a.dtype).lanes)
             return op(a, broadcast_b)
         else:

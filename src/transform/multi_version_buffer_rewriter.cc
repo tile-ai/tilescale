@@ -219,11 +219,11 @@ private:
 
   Stmt VisitStmt_(const ForNode *op) final {
     auto num_stages_anno = op->annotations.Get("num_stages");
-    if (!num_stages_anno.defined())
+    if (!num_stages_anno)
       return StmtExprMutator::VisitStmt_(op);
 
-    ICHECK(num_stages_anno.as<IntImmNode>());
-    int num_stages = static_cast<int>(num_stages_anno.as<IntImmNode>()->value);
+    ICHECK(num_stages_anno->as<IntImmNode>());
+    int num_stages = static_cast<int>(num_stages_anno->as<IntImmNode>()->value);
 
     const SeqStmtNode *pipeline_body_seq = op->body.as<SeqStmtNode>();
     CHECK(pipeline_body_seq) << "ValueError: The body of the software pipeline "
@@ -329,7 +329,7 @@ tvm::transform::Pass MultiVersionBuffer() {
   return CreatePrimFuncPass(pass_func, 0, "tl.MultiVersionBuffer", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.MultiVersionBuffer")
+TVM_FFI_REGISTER_GLOBAL("tl.transform.MultiVersionBuffer")
     .set_body_typed(MultiVersionBuffer);
 
 } // namespace tl

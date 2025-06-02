@@ -210,7 +210,7 @@ TVM_REGISTER_PASS_CONFIG_OPTION("tl.Simplify", SimplifyConfig);
 class StmtSimplifier : public IRMutatorWithAnalyzer {
 public:
   static PrimFunc Apply(PrimFunc func, Analyzer *analyzer,
-                        Optional<SimplifyConfig> config_opt = NullOpt) {
+                        Optional<SimplifyConfig> config_opt = std::nullopt) {
     auto config = config_opt.value_or(AttrsWithDefaultValues<SimplifyConfig>());
     analyzer->rewrite_simplify.SetEnabledExtensions(
         config->GetEnabledExtensions());
@@ -440,7 +440,7 @@ private:
     if (const int64_t *as_int = as_const_int(condition)) {
       return Bool(*as_int);
     } else {
-      return NullOpt;
+      return std::nullopt;
     }
   }
 
@@ -448,7 +448,7 @@ private:
   std::optional<ControlFlowGraph> touch_pattern_;
 
   Map<Var, PrimExpr> non_inlined_bindings_;
-  Optional<Stmt> current_stmt_{NullOpt};
+  Optional<Stmt> current_stmt_{std::nullopt};
   std::unordered_set<const VarNode *> used_in_buffer_def_;
   std::unordered_set<const VarNode *> used_vars_;
   std::unordered_set<const BufferNode *> used_buffers_;
@@ -465,7 +465,7 @@ tvm::transform::Pass Simplify() {
   return CreatePrimFuncPass(pass_func, 0, "tl.Simplify", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.Simplify").set_body_typed(Simplify);
+TVM_FFI_REGISTER_GLOBAL("tl.transform.Simplify").set_body_typed(Simplify);
 
 } // namespace tl
 } // namespace tvm

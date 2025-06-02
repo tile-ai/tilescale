@@ -24,7 +24,7 @@
  * shared memory allocations into one allocation.
  */
 #include <tvm/runtime/logging.h>
-#include <tvm/runtime/registry.h>
+#include <tvm/ffi/function.h>
 #include <tvm/tir/expr.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
@@ -1010,7 +1010,7 @@ Pass MergeSharedMemoryAllocations() {
                             {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.MergeSharedMemoryAllocations")
+TVM_FFI_REGISTER_GLOBAL("tl.transform.MergeSharedMemoryAllocations")
     .set_body_typed(MergeSharedMemoryAllocations);
 
 } // namespace transform

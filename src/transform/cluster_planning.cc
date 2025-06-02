@@ -22,6 +22,7 @@
  * \brief Plan the cluster for GPU(sm90+) blocks
  */
 
+#include <tvm/ffi/function.h>
 #include <tvm/arith/analyzer.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/stmt_functor.h>
@@ -132,7 +133,7 @@ tvm::transform::Pass ClusterPlanning() {
   return CreatePrimFuncPass(pass_func, 0, "tl.ClusterPlanning", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.ClusterPlanning")
+TVM_FFI_REGISTER_GLOBAL("tl.transform.ClusterPlanning")
     .set_body_typed(ClusterPlanning);
 } // namespace transform
 
