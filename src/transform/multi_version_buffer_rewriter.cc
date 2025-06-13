@@ -220,7 +220,7 @@ private:
   Stmt VisitStmt_(const ForNode *op) final {
     loop_stack_.emplace_back(op->loop_var, op->extent);
     auto num_stages_anno = op->annotations.Get("num_stages");
-    if (!num_stages_anno.defined()) {
+    if (!num_stages_anno) {
       auto for_node = StmtExprMutator::VisitStmt_(op);
       loop_stack_.pop_back();
       return for_node;

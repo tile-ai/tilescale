@@ -267,11 +267,11 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
         source_buffer.scope() == "local.fragment") {
       if (T.layout_map.count(buffer)) {
         const FragmentNode *src_layout =
-            T.layout_map[buffer].as<Fragment>()->get();
+            T.layout_map[buffer].as<FragmentNode>();
         Fragment dst_layout_fragment =
             CompleteBufferFragment(buffer)->BindThreadRange(T.thread_bounds);
         const FragmentNode *dst_layout =
-            dst_layout_fragment.as<Fragment>().get();
+            dst_layout_fragment.as<FragmentNode>();
         if (as_const_int(dst_layout->ReplicateExtent()) &&
             as_const_int(src_layout->ReplicateExtent()) &&
             (*as_const_int(dst_layout->ReplicateExtent()) >
@@ -325,7 +325,7 @@ Fragment ParallelOp::CompleteBufferFragment(const Buffer &buffer) {
   PrimExpr thd_b = loop_layout_->ForwardThread(
       ind_inv->Forward(fwd),
       FloorDiv(ReplicationPlaceholder(), indice_rep_extent));
-  return Fragment(buffer->shape, {}, thd_b, dest_buffer_rep_extent, NullOpt)
+  return Fragment(buffer->shape, {}, thd_b, dest_buffer_rep_extent, std::nullopt)
       ->CondenseReplicateVar();
 }
 
