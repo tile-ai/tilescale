@@ -197,10 +197,6 @@ std::pair<int, int> Gemm::ComputeWarpPartition(int num_warps, Target target,
     // Try all possible combinations that satisfy the constraints
     for (int m = 1; m <= max_m_warps && m <= num_warps; m++) {
       int n = num_warps / m;
-      if (n > max_n_warps)
-        continue;
-      if (m * n != num_warps)
-        continue;
 
       // Calculate how balanced this partition is
       float m_per_warp = static_cast<float>(this->M) / (m * kMPerWarp);
@@ -354,9 +350,9 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       const int64_t mat_continuous = *as_const_int(A->shape[dim_A - 1]);
       const int64_t continuity =
           trans_A ? 4 * mat_continuous / warp_m : mat_continuous;
-      results.Set(A,
-                  makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                   A->dtype.bits(), trans_A ? 1 : 2));
+      results.Set(A, makeGemmABLayoutHopper(mat_stride, mat_continuous,
+                                            mat_continuous, A->dtype.bits(),
+                                            trans_A ? 1 : 2));
     } else {
       auto fragment = makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n,
                                         A->dtype.bits(), trans_A);
@@ -368,8 +364,9 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       const int64_t mat_continuous = *as_const_int(B->shape[dim_B - 1]);
       const int64_t continuity =
           trans_B ? mat_continuous : mat_continuous / warp_n;
-      results.Set(B, makeGemmABLayout(mat_stride, mat_continuous, continuity,
-                                      B->dtype.bits(), trans_B ? 2 : 1));
+      results.Set(B,
+                  makeGemmABLayoutHopper(mat_stride, mat_continuous, continuity,
+                                         B->dtype.bits(), trans_B ? 2 : 1));
     } else {
       ICHECK(0) << "WGMMA only support B in shared.";
     }

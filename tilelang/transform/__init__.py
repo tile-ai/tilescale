@@ -378,3 +378,14 @@ def StorageRewrite():
         The result pass
     """
     return _ffi_api.StorageRewrite()  # type: ignore
+
+def LowerL2Persistent():
+    """LowerL2Persistent
+    """
+    return _ffi_api.LowerL2Persistent()  # type: ignore
+
+
+def PersistThreadblock():
+    """PersistThreadblock
+    """
+    return _ffi_api.PersistThreadblock()  # type: ignore
