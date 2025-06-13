@@ -368,3 +368,13 @@ def LowerThreadAllreduce():
         The result pass
     """
     return _ffi_api.LowerThreadAllreduce()  # type: ignore
+
+def StorageRewrite():
+    """StorageRewrite
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.StorageRewrite()  # type: ignore
