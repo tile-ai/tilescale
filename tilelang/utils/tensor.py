@@ -22,12 +22,21 @@ class TensorSupplyType(Enum):
 
 
 def map_torch_type(intype: str) -> torch.dtype:
-    typemap = {
-        'e4m3_float8': torch.float8_e4m3fn,
-        'e5m2_float8': torch.float8_e5m2,
-    }
-    if intype in typemap:
-        return typemap[intype]
+    if intype == "e4m3_float8":
+        assert hasattr(torch, "float8_e4m3fn"), \
+            "torch.float8_e4m3fn is not supported in this version of torch" \
+                "Please upgrade torch >= 2.1.0"
+        return torch.float8_e4m3fn
+    elif intype == "e5m2_float8":
+        assert hasattr(torch, "float8_e5m2"), \
+            "torch.float8_e5m2 is not supported in this version of torch" \
+                "Please upgrade torch >= 2.1.0"
+        return torch.float8_e5m2
+    elif intype == "e4m3fnuz_float8":
+        assert hasattr(torch, "float8_e4m3fnuz"), \
+            "torch.float8_e4m3fnuz is not supported in this version of torch" \
+                "Please upgrade torch >= 2.2.0"
+        return torch.float8_e4m3fnuz
     else:
         return getattr(torch, intype)
 
@@ -221,6 +230,8 @@ def torch_assert_close(
     check_dtype: bool = True,
     check_layout: bool = True,
     check_stride: bool = False,
+    base_name: str = "LHS",
+    ref_name: str = "RHS",
 ):
     """
     Custom function to assert that two tensors are "close enough," allowing a specified
@@ -296,7 +307,7 @@ def torch_assert_close(
             f"{mismatch_info}"
             f"\nGreatest absolute difference: {diff.max().item()}, "
             f"Greatest relative difference: {(diff / (torch.abs(tensor_b) + 1e-12)).max().item()}"
-            f"\nLHS: {tensor_a}"
-            f"\nRHS: {tensor_b}")
+            f"\n{base_name}: {tensor_a}"
+            f"\n{ref_name}: {tensor_b}")
     else:
         return True

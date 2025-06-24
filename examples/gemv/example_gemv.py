@@ -5,7 +5,8 @@ import itertools
 import tilelang as tl
 import tilelang.language as T
 from tvm import DataType
-from tilelang.autotuner import autotune, jit
+from tilelang.autotuner import autotune
+from tilelang import jit
 
 
 def ref_program(A, B):
@@ -234,9 +235,6 @@ def get_best_config(N, K):
     )
     @jit(
         out_idx=[-1],
-        supply_type=tl.TensorSupplyType.Integer,
-        ref_prog=ref_program,
-        skip_check=False,
         target="auto",
     )
     def kernel(
@@ -304,11 +302,11 @@ def check_correctness_and_bench(kernel, N, K, bench_ref=True):
     print(f"TileLang Latency: {latency} ms\n")
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(description="GEMV Example")
     parser.add_argument("--n", type=int, default=1024, help="Matrix dimension N")
     parser.add_argument("--k", type=int, default=1024, help="Matrix dimension K")
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
     N, K = args.n, args.k
     check_correctness_and_bench(naive_gemv(N, K, 128, 128), N, K)
     check_correctness_and_bench(naive_splitk_gemv(N, K, 32, 32), N, K)
@@ -318,13 +316,15 @@ if __name__ == "__main__":
     print("Test passed!")
 
     best_result = get_best_config(N, K)
-    best_latency = best_result.latency
     best_config = best_result.config
-    ref_latency = best_result.ref_latency
-    kernel = splitk_gemv_vectorized_tvm(N, K, *best_config)
+    kernel = splitk_gemv_vectorized_tvm(N, K, **best_config)
     kernel = tl.compile(kernel, out_idx=-1)
     profiler = kernel.get_profiler()
     latency = profiler.do_bench(lambda x, y: x @ y.T, warmup=500)
     print(f"Torch Latency: {latency} ms")
     latency = profiler.do_bench(kernel, warmup=500)
     print(f"TileLang Latency: {latency} ms\n")
+
+
+if __name__ == "__main__":
+    main()

@@ -26,6 +26,7 @@ cdef class CythonKernelWrapper:
         # Add new cache attributes
         list param_dtypes    # Cache for parameter dtypes
         list param_shapes    # Cache for parameter shapes as native Python lists
+        object get_current_device
 
     def __cinit__(self, result_idx, params, lib):
         # Initialize wrapper with kernel configuration
@@ -36,6 +37,7 @@ cdef class CythonKernelWrapper:
         self.param_dtypes = [param.dtype for param in params]
         # Convert TVM shape arrays to native Python lists
         self.param_shapes = []
+        self.get_current_device = torch.cuda.current_device
         for param in params:
             native_shape = []
             for dim in param.shape:
@@ -67,7 +69,46 @@ cdef class CythonKernelWrapper:
         self.buffer_device_map = buffer_device_map
         return self
 
-    cpdef forward(self, list inputs, int64_t stream = -1):
+    cpdef void _check_buffer_device(self, list tensor_list):
+        for param, (buffer_idx, device) in self.buffer_device_map.items():
+            tensor = tensor_list[buffer_idx]
+            if isinstance(tensor, torch.Tensor):
+                tensor_device = tensor.device
+                device_type_match = device.type == tensor_device.type
+                device_index_match = (
+                    tensor_device.index is None or 
+                    device.index is None or 
+                    tensor_device.index == device.index
+                )
+                if not (device_type_match and device_index_match):
+                    raise ValueError(
+                        f"Buffer device mismatch for parameter {param}: "
+                        f"expected {device}, got {tensor_device}"
+                    )
+
+    cpdef void _check_buffer_dtype(self, list tensor_list):
+        for param, (buffer_idx, torch_dtype) in self.buffer_dtype_map.items():
+            tensor = tensor_list[buffer_idx]
+            if isinstance(tensor, torch.Tensor) and tensor.dtype != torch_dtype:
+                raise ValueError(
+                    f"Buffer dtype mismatch for parameter {param}: "
+                    f"expected {torch_dtype}, got {tensor.dtype}"
+                )
+
+    cpdef void _check_static_shape(self, list tensor_list):
+        for param, (buffer_idx, shape_list) in self.static_shape_map.items():
+            tensor = tensor_list[buffer_idx]
+            if isinstance(tensor, torch.Tensor):
+                for shape_idx, expected_shape in shape_list:
+                    actual_shape = tensor.shape[shape_idx]
+                    if actual_shape != expected_shape:
+                        raise ValueError(
+                            f"Static shape mismatch for parameter {param}: "
+                            f"expected {expected_shape} at index {shape_idx}, "
+                            f"got {actual_shape}"
+                        )
+
+    cpdef forward(self, list inputs, int64_t stream = -1, bint skip_tensor_validation = False):
         # Validate input dimensions and prepare for kernel execution
         cdef int total_params = len(self.params)
         cdef int total_inputs = len(inputs)
@@ -83,79 +124,70 @@ cdef class CythonKernelWrapper:
         # Use current CUDA stream if none specified
         if stream == -1: 
             if torch.cuda.is_available():
-                stream = torch.cuda.current_stream().cuda_stream
+                try:
+                    stream = torch._C._cuda_getCurrentRawStream(torch.cuda.current_device())
+                except ImportError:
+                    stream = torch.cuda.current_stream().cuda_stream
             else:
                 stream = 0
 
         cdef int ins_idx = 0
         cdef list tensor_list = []
 
-        if total_result_idx > 0:
-            # Prepare input and output tensors
-            for i in range(len(self.params)):
-                if i in self.result_idx:
-                    dtype = self.param_dtypes[i]
-                    shape = []
-                    # Now working with native Python list, no FFI calls needed
-                    for s in self.param_shapes[i]:
-                        if isinstance(s, tir.Var):
-                            for key in self.dynamic_symbolic_map:
-                                if(str(s) == str(key)):
-                                    ref_tensor_idx, ref_shape_idx = self.dynamic_symbolic_map[key]
-                                    shape.append(tensor_list[ref_tensor_idx].shape[ref_shape_idx])
-                        else:  # Already converted to Python int during initialization
-                            shape.append(s)
-                    device = inputs[0].device if len(inputs) > 0 else torch.cuda.current_device()
-                    if use_distributed:
-                        tensor = pynvshmem.nvshmem_create_tensor(shape, dtype)
-                    else:
-                        tensor = torch.empty(*shape, dtype=dtype, device=device)
-                else:
-                    tensor = inputs[ins_idx]
-                    ins_idx += 1
-                tensor_list.append(tensor)
-        else:
-            tensor_list = inputs
-        
-        # Convert tensor pointers to C void pointers for kernel call
-        call_args = []
-        for i in range(len(tensor_list)):
-            if isinstance(tensor_list[i], torch.Tensor):
-                call_args.append(ctypes.c_void_p(tensor_list[i].data_ptr()))
-            elif isinstance(tensor_list[i], int):
-                # Dynamic symbolics which are passed as integer arguments
-                if i in self.ptr_map:
-                    call_args.append(ctypes.c_void_p(tensor_list[i]))
-                else:
-                    call_args.append(tensor_list[i])
-            elif isinstance(tensor_list[i], float):
-                call_args.append(ctypes.c_float(tensor_list[i]))
-            elif isinstance(tensor_list[i], bool):
-                call_args.append(ctypes.c_bool(tensor_list[i]))
+        # Prepare input and output tensors
+        for i in range(len(self.params)):
+            if i in self.result_idx:
+                dtype = self.param_dtypes[i]
+                shape = []
+                # Now working with native Python list, no FFI calls needed
+                for s in self.param_shapes[i]:
+                    if isinstance(s, tir.Var):
+                        for key in self.dynamic_symbolic_map:
+                            if(str(s) == str(key)):
+                                ref_tensor_idx, ref_shape_idx = self.dynamic_symbolic_map[key]
+                                shape.append(tensor_list[ref_tensor_idx].shape[ref_shape_idx])
+                    else:  # Already converted to Python int during initialization
+                        shape.append(s)
+                device = inputs[0].device if len(inputs) > 0 else torch.cuda.current_device()
+                tensor = torch.empty(*shape, dtype=dtype, device=device)
             else:
-                raise ValueError(f"Unsupported tensor type: {type(tensor_list[i])}")
+                tensor = inputs[ins_idx]
+                ins_idx += 1
+            tensor_list.append(tensor)
+
+        # Convert tensor pointers to C void pointers for kernel call
+        cdef dict dtype_to_ctype = {
+            torch.float16: ctypes.c_float,
+            torch.float32: ctypes.c_float,
+            torch.float64: ctypes.c_double,
+            torch.int8: ctypes.c_int8,
+            torch.int16: ctypes.c_int16,
+            torch.int32: ctypes.c_int32,
+            torch.int64: ctypes.c_int64,
+        }
+        
+        call_args = []
+        for i, tensor in enumerate(tensor_list):
+            if isinstance(tensor, torch.Tensor):
+                if not tensor.is_contiguous():
+                    raise ValueError(f"Input tensor at index {i} must be contiguous")
+                call_args.append(ctypes.c_void_p(tensor.data_ptr()))
+            elif isinstance(tensor, (int, float, bool)):
+                if i in self.ptr_map:
+                    call_args.append(ctypes.c_void_p(tensor))
+                else:
+                    dtype = self.param_dtypes[i]
+                    if dtype not in dtype_to_ctype:
+                        raise ValueError(f"Unsupported tensor dtype: {dtype}")
+                    call_args.append(dtype_to_ctype[dtype](tensor))
+            else:
+                raise ValueError(f"Unsupported tensor type: {type(tensor)}")
 
         # Check buffer device
-        for param, (buffer_idx, device) in self.buffer_device_map.items():
-            if isinstance(tensor_list[buffer_idx], torch.Tensor):
-                tensor_device = tensor_list[buffer_idx].device
-                # Compare device types and indices separately to handle both string and torch.device objects            
-                if (tensor_device.type != device.type or 
-                    (tensor_device.index is not None and device.index is not None and tensor_device.index != device.index)):
-                    raise ValueError(f"Buffer device mismatch for parameter {param}: expected {device}, got {tensor_device}")
-
-        # Check buffer dtype map
-        for param, (buffer_idx, torch_dtype) in self.buffer_dtype_map.items():
-            if isinstance(tensor_list[buffer_idx], torch.Tensor):
-                if tensor_list[buffer_idx].dtype != torch_dtype:
-                    raise ValueError(f"Buffer dtype mismatch for parameter {param}: expected {torch_dtype}, got {tensor_list[buffer_idx].dtype}")
-        
-        # Check static shape map
-        for param, (buffer_idx, shape_list) in self.static_shape_map.items():
-            if isinstance(tensor_list[buffer_idx], torch.Tensor):
-                for shape_idx, shape in shape_list:
-                    if tensor_list[buffer_idx].shape[shape_idx] != shape:
-                        raise ValueError(f"Static shape mismatch for parameter {param}: expected {shape} at index {shape_idx}, got {tensor_list[buffer_idx].shape}")
+        if not skip_tensor_validation:
+            self._check_buffer_device(tensor_list)
+            self._check_buffer_dtype(tensor_list)
+            self._check_static_shape(tensor_list)
 
         # Add dynamic dimension values to kernel arguments
         for _, (buffer_idx, shape_idx) in self.dynamic_symbolic_map.items():

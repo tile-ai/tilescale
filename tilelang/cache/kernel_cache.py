@@ -2,24 +2,29 @@
 # Licensed under the MIT License.
 """The cache utils with class and database persistence - KernelCache Class"""
 
-import os
 import json
+import logging
+import os
 import shutil
+import threading
 from hashlib import sha256
-from typing import Callable, List, Literal, Union, Optional
+from pathlib import Path
+from typing import Callable, List, Literal, Optional, Union
+
+import cloudpickle
 from tvm.target import Target
 from tvm.tir import PrimFunc
-from tilelang.jit import JITKernel
-from tilelang.engine.param import KernelParam
-import threading
-import cloudpickle
-import logging
 
+from tilelang.engine.param import KernelParam
 from tilelang.env import TILELANG_CACHE_DIR, is_cache_enabled
+from tilelang.jit import JITKernel
+from tilelang.version import __version__
 
 KERNEL_PATH = "kernel.cu"
-WRAPPED_KERNEL_PATH = "warpped_kernel.cu"
+WRAPPED_KERNEL_PATH = "wrapped_kernel.cu"
 KERNEL_LIB_PATH = "kernel_lib.so"
+KERNEL_CUBIN_PATH = "kernel.cubin"
+KERNEL_PY_PATH = "kernel.py"
 PARAMS_PATH = "params.pkl"
 
 
@@ -28,7 +33,7 @@ class KernelCache:
     Caches compiled kernels using a class and database persistence to avoid redundant compilation.
     Cache files:
         kernel.cu: The compiled kernel source code
-        warpped_kernel.cu: The compiled wrapped kernel source code
+        wrapped_kernel.cu: The compiled wrapped kernel source code
         kernel_lib.so: The compiled kernel library
         params.pkl: The compiled kernel parameters
     """
@@ -36,6 +41,9 @@ class KernelCache:
     _instance = None  # For implementing singleton pattern
     _lock = threading.Lock()  # For thread safety
     _memory_cache = {}  # In-memory cache dictionary
+    execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython"
+
+    cache_dir: Path = Path(TILELANG_CACHE_DIR)
 
     def __new__(cls, cache_dir=TILELANG_CACHE_DIR):
         """
@@ -51,11 +59,11 @@ class KernelCache:
             with cls._lock:
                 if cls._instance is None:  # Double-checked locking
                     instance = super().__new__(cls)
-                    instance.cache_dir = cache_dir
+                    instance.cache_dir = Path(cache_dir)
                     os.makedirs(instance.cache_dir, exist_ok=True)
 
                     instance.logger = logging.getLogger(__name__)
-                    instance.logger.setLevel(logging.ERROR)
+                    instance.logger.setLevel(logging.DEBUG)
                     instance._memory_cache = {}  # Initialize memory cache
                     cls._instance = instance
         return cls._instance
@@ -64,10 +72,11 @@ class KernelCache:
         self,
         func: Callable,
         out_idx: List[int],
-        execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
+        execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         args=None,
         target: Union[str, Target] = "auto",
         target_host: Union[str, Target] = None,
+        pass_configs: dict = None,
     ) -> str:
         """
         Generates a unique hash key for caching compiled kernels.
@@ -83,8 +92,10 @@ class KernelCache:
         Returns:
             str: SHA256 hash key for the kernel configuration.
         """
-        func_binary = cloudpickle.dumps(func.script())
+        self.execution_backend = execution_backend
+        func_binary = cloudpickle.dumps(func.script(show_meta=True))
         key_data = {
+            "version": __version__,
             "func": sha256(func_binary).hexdigest(),  # Use SHA256 to generate hash key
             "out_idx": (tuple(out_idx) if isinstance(out_idx, (list, tuple)) else [out_idx]),
             "args_repr": tuple(
@@ -93,9 +104,12 @@ class KernelCache:
             "target": str(target),
             "target_host": str(target_host) if target_host else None,
             "execution_backend": execution_backend,
+            "pass_configs": pass_configs,
         }
-        key_string = json.dumps(key_data, sort_keys=True)  # Sort keys to ensure consistency
-        return sha256(key_string.encode()).hexdigest()  # Use SHA256 to generate hash key
+        # Sort keys to ensure consistency
+        key_string = json.dumps(key_data, sort_keys=True)
+        # Use SHA256 to generate hash key
+        return sha256(key_string.encode()).hexdigest()
 
     def cached(
         self,
@@ -104,7 +118,7 @@ class KernelCache:
         *args,
         target: Union[str, Target] = "auto",
         target_host: Union[str, Target] = None,
-        execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
+        execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         verbose: bool = False,
         pass_configs: dict = None,
     ) -> JITKernel:
@@ -138,16 +152,26 @@ class KernelCache:
             execution_backend=execution_backend,
             args=args,
             target=target,
-            target_host=target_host)
+            target_host=target_host,
+            pass_configs=pass_configs,
+        )
         with self._lock:
             # First check in-memory cache
             if key in self._memory_cache:
+                self.logger.warning("Found kernel in memory cache. For better performance," \
+                                    " consider using `@tilelang.jit` instead of direct kernel caching.")
                 return self._memory_cache[key]
+
+            if verbose:
+                self.logger.debug(f"Checking disk cache for kernel {func.attrs['global_symbol']}")
 
             # Then check disk cache
             kernel = self._load_kernel_from_disk(key, target, target_host, out_idx,
                                                  execution_backend, pass_configs, func)
             if kernel is not None:
+                if verbose:
+                    self.logger.debug(
+                        f"Found kernel in disk cache for {func.attrs['global_symbol']}")
                 # Populate memory cache with disk result
                 self._memory_cache[key] = kernel
                 return kernel
@@ -165,22 +189,25 @@ class KernelCache:
         if execution_backend == "dlpack":
             self.logger.warning("DLPack backend does not support cache saving to disk.")
         else:
-            with self._lock:  # enter critical section again to check and update disk cache
-                disk_kernel = self._load_kernel_from_disk(
-                    key,
-                    target,
-                    target_host,
-                    out_idx,
-                    execution_backend,
-                    pass_configs,
-                    func,
-                )
-                if disk_kernel is None:
+            with self._lock:
+                if is_cache_enabled():
                     self._save_kernel_to_disk(key, kernel, func)
 
         # Store in memory cache after compilation
         self._memory_cache[key] = kernel
         return kernel
+
+    def set_cache_dir(self, cache_dir: str):
+        """
+        Sets the cache directory for the kernel cache.
+        """
+        self.cache_dir = Path(cache_dir)
+
+    def get_cache_dir(self) -> Path:
+        """
+        Gets the cache directory for the kernel cache.
+        """
+        return self.cache_dir
 
     def clear_cache(self):
         """
@@ -224,8 +251,9 @@ class KernelCache:
         # Save kernel source code
         try:
             kernel_path = os.path.join(cache_path, KERNEL_PATH)
-            with open(kernel_path, "w") as f:
-                f.write(kernel.artifact.kernel_source)
+            if kernel.artifact.kernel_source is not None:
+                with open(kernel_path, "w") as f:
+                    f.write(kernel.artifact.kernel_source)
         except Exception as e:
             self.logger.error(f"Error saving kernel source code to disk: {e}")
 
@@ -239,9 +267,15 @@ class KernelCache:
 
         # Save kernel library
         try:
-            kernel_lib_path = os.path.join(cache_path, KERNEL_LIB_PATH)
+            if self.execution_backend == "nvrtc":
+                kernel_lib_path = os.path.join(cache_path, KERNEL_CUBIN_PATH)
+            else:
+                kernel_lib_path = os.path.join(cache_path, KERNEL_LIB_PATH)
             src_lib_path = kernel.adapter.libpath
             shutil.copy(src_lib_path, kernel_lib_path)
+            if self.execution_backend == "nvrtc":
+                shutil.copy(
+                    src_lib_path.replace(".cubin", ".py"), os.path.join(cache_path, KERNEL_PY_PATH))
         except Exception as e:
             self.logger.error(f"Error saving kernel library to disk: {e}")
 
@@ -259,7 +293,7 @@ class KernelCache:
         target: Union[str, Target] = "auto",
         target_host: Union[str, Target] = None,
         out_idx: List[int] = None,
-        execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
+        execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         pass_configs: dict = None,
         func: Callable = None,
     ) -> JITKernel:
@@ -292,7 +326,10 @@ class KernelCache:
         except Exception as e:
             self.logger.error(f"Error loading wrapped kernel source code from disk: {e}")
 
-        kernel_lib_path = os.path.join(cache_path, KERNEL_LIB_PATH)
+        if self.execution_backend == "nvrtc":
+            kernel_lib_path = os.path.join(cache_path, KERNEL_CUBIN_PATH)
+        else:
+            kernel_lib_path = os.path.join(cache_path, KERNEL_LIB_PATH)
 
         # Load kernel parameters
         try:
@@ -320,7 +357,7 @@ class KernelCache:
     def _clear_disk_cache(self):
         """
         Removes all cached kernels from disk.
-        
+
         Note:
             This operation will delete the entire cache directory and recreate it empty.
             Use with caution as this operation cannot be undone.
@@ -328,6 +365,7 @@ class KernelCache:
         try:
             if os.path.exists(self.cache_dir):
                 shutil.rmtree(self.cache_dir)  # Delete entire cache directory
-            os.makedirs(self.cache_dir, exist_ok=True)  # Re-create cache directory
+            # Re-create cache directory
+            os.makedirs(self.cache_dir, exist_ok=True)
         except Exception as e:
             self.logger.error(f"Error clearing disk cache: {e}")

@@ -3,6 +3,7 @@
 """The cache utils with class and database persistence - Init file"""
 
 from typing import List, Union, Literal, Optional
+from pathlib import Path
 from tvm.target import Target
 from tvm.tir import PrimFunc
 from tilelang.jit import JITKernel
@@ -19,12 +20,12 @@ def cached(
     *args,
     target: Union[str, Target] = "auto",
     target_host: Union[str, Target] = None,
-    execution_backend: Optional[Literal["dlpack", "ctypes", "cython"]] = "cython",
+    execution_backend: Optional[Literal["dlpack", "ctypes", "cython", "nvrtc"]] = "cython",
     verbose: Optional[bool] = False,
     pass_configs: Optional[dict] = None,
 ) -> JITKernel:
     """
-    Caches and reuses compiled kerne(ls (using KernelCache class).
+    Caches and reuses compiled kernels (using KernelCache class).
     """
     return _kernel_cache_instance.cached(
         func,
@@ -36,6 +37,25 @@ def cached(
         verbose=verbose,
         pass_configs=pass_configs,
     )
+
+
+def get_cache_dir() -> Path:
+    """
+    Gets the cache directory for the kernel cache.
+    Example:
+        >>> tilelang.cache.get_cache_dir()
+        PosixPath('/Users/username/.tilelang/cache')
+    """
+    return _kernel_cache_instance.get_cache_dir()
+
+
+def set_cache_dir(cache_dir: str):
+    """
+    Sets the cache directory for the kernel cache.
+    Example:
+        >>> tilelang.cache.set_cache_dir("/path/to/cache")
+    """
+    _kernel_cache_instance.set_cache_dir(cache_dir)
 
 
 def clear_cache():

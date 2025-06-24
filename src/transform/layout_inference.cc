@@ -259,7 +259,6 @@ public:
       auto &next = infer_list_[cur_infer_id];
       auto iter_var = thread_var_vec_[cur_infer_id];
       auto thread_bounds = thread_bounds_vec_[cur_infer_id];
-
       // Double-check that 'next' is valid
       ICHECK(next != nullptr) << "infer_list_[" << cur_infer_id
                               << "] is null inside run_infer_step.";
@@ -289,11 +288,26 @@ public:
         ICHECK(layout.defined()) << "InferLayout returned an undefined layout.";
 
         if (layout_map.count(buffer)) {
+          // If replicate size of this buffer is greater than the old one
+          if (buffer.scope() == "local.fragment" &&
+              level != InferLevel::kStrict) {
+            const FragmentNode *dst_layout = layout.as<Fragment>().get();
+            const FragmentNode *src_layout =
+                layout_map[buffer].as<Fragment>().get();
+            if (as_const_int(dst_layout->ReplicateExtent()) &&
+                as_const_int(src_layout->ReplicateExtent()) &&
+                (*as_const_int(dst_layout->ReplicateExtent()) >
+                 *as_const_int(src_layout->ReplicateExtent()))) {
+              // update map
+              layout_map.Set(buffer, layout);
+              continue;
+            }
+          }
           // If already in map, ensure they are structurally equal
           ICHECK(StructuralEqual()(layout, layout_map[buffer]))
               << "Get different layout for " << buffer
-              << " current layout: " << layout->DebugOutput()
-              << " previous layout: " << layout_map[buffer]->DebugOutput();
+              << "\n current layout: " << layout->DebugOutput()
+              << "\n previous layout: " << layout_map[buffer]->DebugOutput();
         } else {
           // Otherwise, update map
           layout_map.Set(buffer, layout);
@@ -302,9 +316,10 @@ public:
 
           // Check if buffer exists in use_list_
           if (!use_list_.count(buffer)) {
-            LOG(WARNING) << "Buffer " << buffer << " not found in use_list_. "
-                         << "Potential mismatch between inference updates and "
-                         << "use_list_.";
+            LOG(WARNING) << "Layout inference failed for buffer " << buffer
+                         << ". "
+                         << "The buffer cannot be inferred with current layout "
+                            "inference rules.";
             continue;
           }
 
@@ -423,9 +438,10 @@ private:
         auto const_int_bound = analyzer_.const_int_bound(thread_var_);
         auto min_value = const_int_bound->min_value;
         auto max_value = const_int_bound->max_value;
+        auto extent = max_value - min_value + 1;
         auto dtype = thread_var_->var.dtype();
         thread_bounds_vec_.push_back(Range::FromMinExtent(
-            IntImm(dtype, min_value), IntImm(dtype, max_value + 1)));
+            IntImm(dtype, min_value), IntImm(dtype, extent)));
       } else {
         thread_bounds_vec_.push_back(Range::FromMinExtent(0, 1));
       }
@@ -461,9 +477,10 @@ private:
           analyzer_.const_int_bound.IsBound(thread_var_->var)) {
         auto const_int_bound = analyzer_.const_int_bound(thread_var_);
         auto dtype = thread_var_->var.dtype();
+        auto extent =
+            const_int_bound->max_value - const_int_bound->min_value + 1;
         thread_bounds_vec_.push_back(Range::FromMinExtent(
-            IntImm(dtype, const_int_bound->min_value),
-            IntImm(dtype, const_int_bound->max_value + 1)));
+            IntImm(dtype, const_int_bound->min_value), IntImm(dtype, extent)));
       } else {
         thread_bounds_vec_.push_back(Range::FromMinExtent(0, 1));
       }
@@ -477,9 +494,14 @@ private:
       buffer_data_to_buffer_.Set(buffer->data, buffer);
     }
     if (op->annotations.count(attr::kLayoutMap)) {
-      auto map =
-          op->annotations.Get(attr::kLayoutMap).as<Map<Var, Layout>>().value();
-      for (const auto &[var, layout] : map) {
+      // Check if the layout map is Map<Var, Layout>
+      auto map = op->annotations.Get(attr::kLayoutMap).as<Map<Var, Layout>>();
+      ICHECK(map.defined()) << "layout map is not defined";
+      ICHECK(map.value().defined()) << "layout map is not defined";
+
+      for (const auto &[var, layout] : map.value()) {
+        ICHECK(buffer_data_to_buffer_.count(var))
+            << "buffer " << var << " is not found in the block";
         auto buffer = buffer_data_to_buffer_[var];
         ICHECK(StructuralEqual()(layout->InputShape(), buffer->shape));
         annotated_layout_map_.Set(buffer, layout);
@@ -571,9 +593,9 @@ private:
         }
       });
 
+      auto loop_layout = result_.for_map[root];
       bool parallel_loop = !is_register_store && !skip_thread_partition_;
       if (parallel_loop) {
-        auto loop_layout = result_.for_map[root];
         for_node =
             PartitionLoop(for_node, thread_var_->var, analyzer_, loop_layout);
       }

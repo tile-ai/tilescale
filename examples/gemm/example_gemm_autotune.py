@@ -46,8 +46,6 @@ def get_configs(M, N, K, with_roller=False, topk=20):
             config["thread_num"] = block_rows * block_cols * 32
             config["enable_rasteration"] = hint.rasterization_plan is not NoRasterization
             configs.append(config)
-        for config in configs:
-            print(config)
     else:
         block_M = [64, 128, 256]
         block_N = [64, 128, 256]
@@ -88,7 +86,7 @@ def get_best_config(M, N, K, with_roller=False):
         thread_num=None,
         enable_rasteration=None,
     ):
-        dtype = "float16"
+        dtype = "bfloat16"
         accum_dtype = "float"
 
         @T.prim_func
@@ -122,10 +120,11 @@ def get_best_config(M, N, K, with_roller=False):
     autotuner = AutoTuner.from_kernel(
         kernel=kernel, configs=get_configs(M, N, K, with_roller)).set_compile_args(
             out_idx=[-1],
+            target="auto",
+        ).set_profile_args(
             supply_type=tl.TensorSupplyType.Integer,
             ref_prog=ref_program,
             skip_check=False,
-            target="auto",
         )
     return autotuner.run(warmup=3, rep=20)
 
@@ -180,7 +179,7 @@ def matmul(M,
            accum_dtype="float"):
 
     @T.prim_func
-    def main(
+    def gemm_autotune(
             A: T.Tensor((M, K), dtype),
             B: T.Tensor((N, K), dtype),
             C: T.Tensor((M, N), dtype),
@@ -204,31 +203,16 @@ def matmul(M,
             T.copy(C_local, C_shared)
             T.copy(C_shared, C[by * block_M, bx * block_N])
 
-    return main
+    return gemm_autotune
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Autotuned MatMul Benchmark")
-    parser.add_argument("--m", type=int, default=16384, help="Matrix dimension M")
-    parser.add_argument("--n", type=int, default=16384, help="Matrix dimension N")
-    parser.add_argument("--k", type=int, default=16384, help="Matrix dimension K")
-    parser.add_argument(
-        "--use_autotune",
-        action="store_true",
-        default=False,
-        help="Whether to use autotune for matmul configs")
-    parser.add_argument(
-        "--with_roller",
-        action="store_true",
-        default=True,
-        help="Whether to enable BitBLAS roller for search space")
-    args = parser.parse_args()
-    M, N, K = args.m, args.n, args.k
-    a = torch.randn(M, K).cuda().half()
-    b = torch.randn(N, K).cuda().half()
-    use_autotune = args.use_autotune
+def main(m: int = 4096,
+         n: int = 4096,
+         k: int = 4096,
+         use_autotune: bool = False,
+         with_roller: bool = False):
+    M, N, K = m, n, k
     use_autotune = True
-    with_roller = args.with_roller
     if use_autotune:
         result = get_best_config(M, N, K, with_roller)
         print(result.config)
@@ -246,3 +230,22 @@ if __name__ == "__main__":
     print(f"Ref latency: {ref_latency}")
     print(f"TileLang TFlops: {2 * M * N * K / tilelang_latency * 1e-9}")
     print(f"Ref TFlops: {2 * M * N * K / ref_latency * 1e-9}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Autotuned MatMul Benchmark")
+    parser.add_argument("--m", type=int, default=4096, help="Matrix dimension M")
+    parser.add_argument("--n", type=int, default=4096, help="Matrix dimension N")
+    parser.add_argument("--k", type=int, default=4096, help="Matrix dimension K")
+    parser.add_argument(
+        "--use_autotune",
+        action="store_true",
+        default=False,
+        help="Whether to use autotune for matmul configs")
+    parser.add_argument(
+        "--with_roller",
+        action="store_true",
+        default=False,
+        help="Whether to enable BitBLAS roller for search space")
+    args = parser.parse_args()
+    main(args.m, args.n, args.k, args.use_autotune, args.with_roller)

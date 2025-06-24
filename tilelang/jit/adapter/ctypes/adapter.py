@@ -119,6 +119,7 @@ class CtypesKernelAdapter(BaseKernelAdapter):
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
         adapter.kernel_global_source = kernel_global_source
         adapter.wrapped_source = kernel_global_source
+        adapter.pass_configs = pass_configs
 
         if isinstance(func_or_mod, tir.PrimFunc):
             adapter.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
@@ -178,7 +179,7 @@ class CtypesKernelAdapter(BaseKernelAdapter):
         ctypes_args.append(ctypes.c_void_p(stream))
         self.lib.call(*ctypes_args)
 
-    def _warp_forward_from_prebuild_lib(self,
+    def _wrap_forward_from_prebuild_lib(self,
                                         *ins: List[torch.Tensor],
                                         stream: Optional[int] = None):
         """High-level wrapper for kernel execution.
@@ -242,7 +243,7 @@ class CtypesKernelAdapter(BaseKernelAdapter):
 
     def _convert_torch_func(self) -> Callable:
         """Returns a PyTorch-compatible function wrapper for the kernel."""
-        return self._warp_forward_from_prebuild_lib
+        return self._wrap_forward_from_prebuild_lib
 
     @property
     def prim_func(self) -> tir.PrimFunc:

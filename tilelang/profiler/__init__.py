@@ -172,26 +172,74 @@ class Profiler:
 
         if isinstance(lib_outs, torch.Tensor):
             lib_outs = [lib_outs]
+        elif isinstance(lib_outs, tuple):
+            lib_outs = list(lib_outs)
+        elif lib_outs is None:
+            lib_outs = []
+
         if isinstance(ref_outs, torch.Tensor):
             ref_outs = [ref_outs]
+        elif isinstance(ref_outs, tuple):
+            ref_outs = list(ref_outs)
         elif ref_outs is None:
             ref_outs = []
-        assert len(lib_outs) == len(ref_outs), "len(lib_outs) not equals to len(ref_outs) !"
+
+        ref_tensors = ins + ref_outs
+        lib_tensors = ins + lib_outs
+
+        assert len(lib_tensors) == len(
+            ref_tensors), "len(lib_tensors) not equals to len(ref_tensors) !"
         # torch.set_printoptions(edgeitems=torch.inf)
-        for lhs, rhs in zip(lib_outs, ref_outs):
+        for lhs, rhs in zip(lib_tensors, ref_tensors):
             # close_mask = torch.isclose(lhs, rhs, rtol=rtol, atol=atol)
             # total_elements = lhs.numel()
             # num_not_close = (~close_mask).sum().item()
             # percentage_not_close = (num_not_close / total_elements) * 100
             # print(f"{percentage_not_close:.2f}% of the elements are not close.")
             # print(f"Total elements: {total_elements}, Not close elements: {num_not_close}")
-            torch_assert_close(
-                lhs,
-                rhs,
-                rtol=rtol,
-                atol=atol,
-                max_mismatched_ratio=max_mismatched_ratio,
-            )
+            if lhs is not None and rhs is not None:
+                # in case of numsplit template, the ref output may be None
+                # which means the value is invalid, so we skip the comparison
+                torch_assert_close(
+                    lhs,
+                    rhs,
+                    rtol=rtol,
+                    atol=atol,
+                    max_mismatched_ratio=max_mismatched_ratio,
+                    base_name="tilelang",
+                    ref_name="ref",
+                )
+
+    def manual_assert_close(
+        self,
+        reference_program: Callable,
+        input_tensors: Optional[List[torch.Tensor]] = None,
+        manual_check_prog: Callable = None,
+    ):
+        """Validates kernel output against a reference implementation.
+        
+        Args:
+            reference_program: Reference implementation to compare against
+            input_tensors: Optional pre-generated input tensors
+            atol: Absolute tolerance for comparison
+            rtol: Relative tolerance for comparison
+            max_mismatched_ratio: Maximum allowed ratio of mismatched elements
+        """
+        ins = self._get_inputs() if input_tensors is None else input_tensors
+        ref_outs = reference_program(*ins)
+        torch.cuda.synchronize()
+        lib_outs = self.func(*ins)
+        torch.cuda.synchronize()
+
+        if isinstance(lib_outs, torch.Tensor):
+            lib_outs = [lib_outs]
+        if isinstance(ref_outs, torch.Tensor):
+            ref_outs = [ref_outs]
+        elif ref_outs is None:
+            ref_outs = []
+        assert len(lib_outs) == len(ref_outs), f"{len(lib_outs)=} not equals to {len(ref_outs)=} !"
+        torch.set_printoptions(edgeitems=torch.inf)
+        manual_check_prog(lib_outs, ref_outs)
 
     def assert_consistent(self, repeat=10):
         """Checks for kernel consistency across multiple runs.

@@ -23,6 +23,36 @@
 namespace tvm {
 namespace codegen {
 
+static std::string GetFP8Type(DataType type) {
+  std::stringstream stream;
+  int32_t lanes = type.lanes();
+  std::string vec;
+  if (type.is_scalar()) {
+    vec = "";
+  } else if (lanes == 2) {
+    vec = "_2";
+  } else if (lanes == 4) {
+    vec = "_4";
+  } else if (lanes == 8) {
+    vec = "_8";
+  } else if (lanes == 16) {
+    vec = "_16";
+  } else {
+    LOG(FATAL) << "Only support scalar and vector types of width (2, 4, 8, 16) "
+                  "for FP8";
+  }
+  if (type.code() == DataType::kFloat8_e4m3fn) {
+    stream << "fp8_e4" << vec << "_t";
+  } else if (type.code() == DataType::kFloat8_e4m3fnuz) {
+    stream << "fp8_e4" << vec << "_t";
+  } else if (type.code() == DataType::kFloat8_e5m2) {
+    stream << "fp8_e5" << vec << "_t";
+  } else {
+    LOG(FATAL) << "Unsupported FP8 type in HIP codegen";
+  }
+  return stream.str();
+}
+
 /*!
  * \brief Replace patterns with replacement strings.
  * \note should use std::format instead when codebase is ported to C++20.
@@ -107,6 +137,11 @@ std::string CodeGenTileLangHIP::Finish() {
   if (need_mma_h_) {
     decl_stream << "#include <mma.h>\n";
   }
+
+  if (enable_fp8_) {
+    decl_stream << "#include <tl_templates/hip/hip_fp8.h>\n";
+  }
+
   decl_stream << "#include <tl_templates/hip/gemm.h>\n";
   decl_stream << "#include <tl_templates/hip/copy.h>\n";
   decl_stream << "#include <tl_templates/hip/reduce.h>\n";
@@ -229,18 +264,9 @@ void CodeGenTileLangHIP::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
     if (!fail)
       return;
   } else if (t.is_float8()) {
-    if (t.is_scalar()) {
-      os << "unsigned char"; // __nv_fp8_storage_t is an alias of unsigned char
-    } else if (lanes == 2) {
-      os << "unsigned short int"; // __nv_fp8x2_storage_t is an alias of
-                                  // unsigned short
-    } else if (lanes == 4) {
-      os << "unsigned int"; // __nv_fp8x4_storage_t is an alias of unsigned int
-    } else {
-      fail = true;
-    }
-    if (!fail)
-      return;
+    enable_fp8_ = true;
+    os << GetFP8Type(t);
+    return;
   } else if (t == DataType::Bool()) {
     os << "bool";
     return;
@@ -768,7 +794,7 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string barrier_name = "_mbarrier";
     this->stream << "__shared__ uint64_t " << barrier_name << "["
                  << barrier_count << "];\n";
-  } else if (op->op.same_as(tl::GetMBarrierOp())) {
+  } else if (op->op.same_as(tl::get_mbarrier())) {
     std::string barrier_name = "_mbarrier";
     std::string barrier_id = this->PrintExpr(op->args[0]);
     os << barrier_name + "[" + barrier_id + "]";
@@ -780,46 +806,24 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     print_extern_call_stmt("tl::mbarrier_arrive_expect_tx");
   } else if (op->op.same_as(builtin::ptx_cp_async_barrier())) {
     print_extern_call_stmt("tl::mbarrier_cp_async_arrive");
-  } else if (op->op.same_as(tl::MBarrierExpectTX())) {
+  } else if (op->op.same_as(tl::mbarrier_expect_tx())) {
     print_extern_call_stmt("tl::mbarrier_expect_tx");
-  } else if (op->op.same_as(tl::MBarrierWaitParity())) {
+  } else if (op->op.same_as(tl::mbarrier_wait_parity())) {
     print_extern_call_stmt("tl::mbarrier_wait");
-  } else if (op->op.same_as(tl::SyncThreadsPartialOp())) {
+  } else if (op->op.same_as(tl::sync_thread_partial())) {
     print_extern_call_stmt("tl::syncthreads_partial");
-  } else if (op->op.same_as(tl::TMALoadOp())) {
-    print_extern_call_stmt("tl::tma_load");
-  } else if (op->op.same_as(tl::TMALoadIm2ColOp())) {
-    print_extern_call_stmt("tl::tma_load_im2col");
-  } else if (op->op.same_as(tl::TMAStoreOp())) {
-    print_extern_call_stmt("tl::tma_store");
-  } else if (op->op.same_as(tl::LDMatrixOp())) {
-    int trans = Downcast<IntImm>(op->args[0])->value;
-    int num = Downcast<IntImm>(op->args[1])->value;
-    std::string func_name = "tl::ptx_ldmatrix_x" + std::to_string(num);
-    if (trans == 1)
-      func_name += "_trans";
-    print_extern_call_stmt(func_name, 2);
-  } else if (op->op.same_as(tl::STMatrixOp())) {
+  } else if (op->op.same_as(tl::ptx_stmatirx())) {
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
     std::string func_name = "tl::ptx_stmatrix_x" + std::to_string(num);
     if (trans == 1)
       func_name += "_trans";
     print_extern_call_stmt(func_name, 2);
-  } else if (op->op.same_as(tl::FenceProxyAsyncOp())) {
-    print_extern_call_stmt("tl::fence_proxy_async");
-  } else if (op->op.same_as(tl::SetMaxNReg())) {
-    this->PrintIndent();
-    int nreg = Downcast<IntImm>(op->args[0])->value;
-    int is_inc = Downcast<IntImm>(op->args[1])->value;
-    std::string func_name =
-        is_inc ? "tl::warpgroup_reg_alloc" : "tl::warpgroup_reg_dealloc";
-    this->stream << func_name << "<" << std::to_string(nreg) << ">();\n";
-  } else if (op->op.same_as(tl::WaitWgmma())) {
+  } else if (op->op.same_as(tl::wait_wgmma())) {
     this->PrintIndent();
     int num_mma = Downcast<IntImm>(op->args[0])->value;
     this->stream << "tl::wait_wgmma<" << std::to_string(num_mma) << ">();\n";
-  } else if (op->op.same_as(tl::PackB16Op())) {
+  } else if (op->op.same_as(tl::pack_b16())) {
     os << "__pack_half2(" << this->PrintExpr(op->args[0]) << ", "
        << this->PrintExpr(op->args[1]) << ")";
   } else if (op->op.same_as(builtin::tvm_fill_fragment())) {
@@ -923,6 +927,8 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
         {"float16x4", "float16x4"},
         {"bfloat16x4", "bfloat16x4"},
         {"float32x4", "float32x4"},
+        {"float8_e4m3fnuzx4", "fp8_e4_4_t"},
+        {"float8_e4m3fnuzx8", "long"},
         {"float32x16", "float32x16"}};
     std::string call_mfma_code = R"({
     *((({C_dytpe}*){c_ref}) + {c_bias}) = {mfma_buildin}(*((({A_dytpe}*){a_ref}) + {a_bias}),
@@ -931,6 +937,7 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
   })";
     std::string mfma_buildin = "__builtin_amdgcn_mfma_" + prefix;
     Replacer replacer;
+
     replacer.register_rule("{mfma_buildin}", mfma_buildin);
     replacer.register_rule("{A_dytpe}", dtype_map[A_dtype]);
     replacer.register_rule("{B_dytpe}", dtype_map[B_dtype]);
@@ -1063,7 +1070,7 @@ void CodeGenTileLangHIP::VisitExpr_(const BroadcastNode *op,
     for (int i = 0; i < lanes / 2; ++i) {
       if (i != 0)
         os << ", ";
-      os << "__pack_nv_bfloat162(" << v << ", " << v << ")";
+      os << "__pack_bfloat162(" << v << ", " << v << ")";
     }
     os << ')';
     return;
@@ -1145,6 +1152,10 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
   // Type code is kBFloat
   if (op->dtype.is_bfloat16()) {
     os << "bfloat16_t";
+    os << '(' << std::scientific << op->value << 'f' << ')';
+    return;
+  } else if (op->dtype.is_float8_e4m3fnuz()) {
+    os << "fp8_e4_t";
     os << '(' << std::scientific << op->value << 'f' << ')';
     return;
   }

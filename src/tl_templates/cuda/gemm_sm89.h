@@ -2,18 +2,19 @@
 // Licensed under the MIT License.
 #pragma once
 
-#include "common.h"
-#include "cuda_fp8.h"
 #include <cute/algorithm/clear.hpp>
 #include <cute/arch/mma_sm80.hpp>
 #include <cute/atom/mma_atom.hpp>
 #include <cute/atom/mma_traits.hpp>
 #include <cute/underscore.hpp>
 
+#include "common.h"
+#include "cuda_fp8.h"
+
 namespace cute {
 
 template <typename A_type, typename B_type, typename C_type, int num_warp_m,
-          int num_warp_n>
+          int num_warp_n, int N>
 struct DispatchInstruction;
 
 using _X = Underscore;
@@ -108,58 +109,78 @@ template <> struct MMA_Traits<SM89_16x8x32_F32F8F8F32_E5M2_TN> {
   using CLayout = SM80_16x8_Row;
 };
 
-template <int num_warp_m, int num_warp_n>
-struct DispatchInstruction<fp8_e4_t, fp8_e4_t, float, num_warp_m, num_warp_n> {
+template <int num_warp_m, int num_warp_n, int N>
+struct DispatchInstruction<fp8_e4_t, fp8_e4_t, float, num_warp_m, num_warp_n,
+                           N> {
   using MMA = MMA_Atom<SM89_16x8x32_F32F8F8F32_E4M3_TN>;
-  using MMA_Group = Tile<_X, Int<num_warp_n * 16>, _X>;
+  using MMA_Group = Tile<_X, Int<std::min(num_warp_n * 16, N)>, _X>;
 };
-template <int num_warp_m, int num_warp_n>
-struct DispatchInstruction<fp8_e5_t, fp8_e5_t, float, num_warp_m, num_warp_n> {
+template <int num_warp_m, int num_warp_n, int N>
+struct DispatchInstruction<fp8_e5_t, fp8_e5_t, float, num_warp_m, num_warp_n,
+                           N> {
   using MMA = MMA_Atom<SM89_16x8x32_F32F8F8F32_E5M2_TN>;
-  using MMA_Group = Tile<_X, Int<num_warp_n * 16>, _X>;
+  using MMA_Group = Tile<_X, Int<std::min(num_warp_n * 16, N)>, _X>;
 };
 
-template <int num_warp_m, int num_warp_n>
-struct DispatchInstruction<half_t, half_t, half_t, num_warp_m, num_warp_n> {
+template <int num_warp_m, int num_warp_n, int N>
+struct DispatchInstruction<half_t, half_t, half_t, num_warp_m, num_warp_n, N> {
   using MMA = MMA_Atom<SM80_16x8x16_F16F16F16F16_TN>;
-  using MMA_Group = Tile<_X, Int<num_warp_n * 16>, _X>;
+  using MMA_Group = Tile<_X, Int<std::min(num_warp_n * 16, N)>, _X>;
 };
-template <int num_warp_m, int num_warp_n>
-struct DispatchInstruction<half_t, half_t, float, num_warp_m, num_warp_n> {
+template <int num_warp_m, int num_warp_n, int N>
+struct DispatchInstruction<half_t, half_t, float, num_warp_m, num_warp_n, N> {
   using MMA = MMA_Atom<SM80_16x8x16_F32F16F16F32_TN>;
-  using MMA_Group = Tile<_X, Int<num_warp_n * 16>, _X>;
+  using MMA_Group = Tile<_X, Int<std::min(num_warp_n * 16, N)>, _X>;
 };
-template <int num_warp_m, int num_warp_n>
+template <int num_warp_m, int num_warp_n, int N>
 struct DispatchInstruction<bfloat16_t, bfloat16_t, float, num_warp_m,
-                           num_warp_n> {
+                           num_warp_n, N> {
   using MMA = MMA_Atom<SM80_16x8x16_F32BF16BF16F32_TN>;
-  using MMA_Group = Tile<_X, Int<num_warp_n * 16>, _X>;
+  using MMA_Group = Tile<_X, Int<std::min(num_warp_n * 16, N)>, _X>;
 };
-template <int num_warp_m, int num_warp_n>
+template <int num_warp_m, int num_warp_n, int N>
 struct DispatchInstruction<tfloat32_t, tfloat32_t, float, num_warp_m,
-                           num_warp_n> {
+                           num_warp_n, N> {
   using MMA = MMA_Atom<SM80_16x8x8_F32TF32TF32F32_TN>;
-  using MMA_Group = Tile<_X, Int<num_warp_n * 16>, _X>;
+  using MMA_Group = Tile<_X, Int<std::min(num_warp_n * 16, N)>, _X>;
 };
-template <int num_warp_m, int num_warp_n>
-struct DispatchInstruction<int8_t, int8_t, int, num_warp_m, num_warp_n> {
+template <int num_warp_m, int num_warp_n, int N>
+struct DispatchInstruction<int8_t, int8_t, int, num_warp_m, num_warp_n, N> {
   using MMA = MMA_Atom<SM80_16x8x32_S32S8S8S32_TN>;
-  using MMA_Group = Tile<_X, Int<num_warp_n * 16>, _X>;
+  using MMA_Group = Tile<_X, Int<std::min(num_warp_n * 16, N)>, _X>;
 };
-template <int num_warp_m, int num_warp_n>
-struct DispatchInstruction<double, double, double, num_warp_m, num_warp_n> {
+template <int num_warp_m, int num_warp_n, int N>
+struct DispatchInstruction<double, double, double, num_warp_m, num_warp_n, N> {
   using MMA = MMA_Atom<SM80_8x8x4_F64F64F64F64_TN>;
   using MMA_Group = Tile<Int<num_warp_m * 16>, Int<num_warp_n * 16>, _X>;
 };
 #elif (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ >= 750))
-template <int num_warp_m, int num_warp_n>
-struct DispatchInstruction<half_t, half_t, float, num_warp_m, num_warp_n> {
+template <int num_warp_m, int num_warp_n, int N>
+struct DispatchInstruction<half_t, half_t, float, num_warp_m, num_warp_n, N> {
   using MMA = MMA_Atom<SM75_16x8x8_F32F16F16F32_TN>;
-  using MMA_Group = Tile<_X, Int<num_warp_n * 16>, _16>;
+  using MMA_Group = Tile<_X, Int<std::min(num_warp_n * 16, N)>, _16>;
 };
 #endif
 
-template <int Bits, int N, int K, bool K_inner, typename Enable = void>
+template <int N, int num_warp_n, bool transpose> struct SelectCopy {
+  static constexpr int remainder = (N / num_warp_n) % 16;
+  using type = std::conditional_t<
+      remainder == 4 || remainder == 8 || remainder == 0,
+      std::conditional_t<
+          transpose,
+          std::conditional_t<
+              remainder == 4, SM75_U32x1_LDSM_N,
+              std::conditional_t<remainder == 8, SM75_U32x2_LDSM_N,
+                                 SM75_U32x4_LDSM_N>>,
+          std::conditional_t<
+              remainder == 4, SM75_U16x2_LDSM_T,
+              std::conditional_t<remainder == 8, SM75_U16x4_LDSM_T,
+                                 SM75_U16x8_LDSM_T>>>,
+      DefaultCopy>;
+};
+
+template <int Bits, int N, int K, bool K_inner, int num_warp_n,
+          typename Enable = void>
 struct OperandTraits {
   // Primary template, use padded layout and default copy
   static constexpr int stride = K_inner ? K : N;
@@ -171,64 +192,64 @@ struct OperandTraits {
   using Copy = DefaultCopy;
 };
 
-template <int N, int K>
-struct OperandTraits<16, N, K, true,
+template <int N, int K, int num_warp_n>
+struct OperandTraits<16, N, K, true, num_warp_n,
                      typename std::enable_if<K % 64 == 32>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<2, 3, 3>{}, Layout<Shape<_8, _32>, Stride<_32, _1>>{}));
   using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<K>>{}));
-  using Copy = SM75_U32x4_LDSM_N;
+  using Copy = typename SelectCopy<N, num_warp_n, true>::type;
 };
 
-template <int N, int K>
-struct OperandTraits<16, N, K, true,
+template <int N, int K, int num_warp_n>
+struct OperandTraits<16, N, K, true, num_warp_n,
                      typename std::enable_if<K % 64 == 0>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<3, 3, 3>{}, Layout<Shape<_8, _64>, Stride<_64, _1>>{}));
   using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<K>>{}));
-  using Copy = SM75_U32x4_LDSM_N;
+  using Copy = typename SelectCopy<N, num_warp_n, true>::type;
 };
 
-template <int N, int K>
-struct OperandTraits<16, N, K, false,
+template <int N, int K, int num_warp_n>
+struct OperandTraits<16, N, K, false, num_warp_n,
                      typename std::enable_if<N % 64 == 32>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<2, 3, 3>{}, Layout<Shape<_32, _8>, Stride<_1, _32>>{}));
   using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<K>>{},
                                         Step<_2, _1>{}));
-  using Copy = SM75_U16x8_LDSM_T;
+  using Copy = typename SelectCopy<N, num_warp_n, false>::type;
 };
 
-template <int N, int K>
-struct OperandTraits<16, N, K, false,
+template <int N, int K, int num_warp_n>
+struct OperandTraits<16, N, K, false, num_warp_n,
                      typename std::enable_if<N % 64 == 0>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<3, 3, 3>{}, Layout<Shape<_64, _8>, Stride<_1, _64>>{}));
   using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<K>>{},
                                         Step<_2, _1>{}));
-  using Copy = SM75_U16x8_LDSM_T;
+  using Copy = typename SelectCopy<N, num_warp_n, false>::type;
 };
 
-template <int N, int K>
-struct OperandTraits<32, N, K, true,
+template <int N, int K, int num_warp_n>
+struct OperandTraits<32, N, K, true, num_warp_n,
                      typename std::enable_if<K % 32 == 0>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<3, 2, 3>{}, Layout<Shape<_8, _32>, Stride<_32, _1>>{}));
   using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<K>>{}));
-  using Copy = SM75_U32x4_LDSM_N;
+  using Copy = typename SelectCopy<N, num_warp_n, true>::type;
 };
 
-template <int N, int K>
-struct OperandTraits<32, N, K, true,
+template <int N, int K, int num_warp_n>
+struct OperandTraits<32, N, K, true, num_warp_n,
                      typename std::enable_if<K % 32 == 16>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<2, 2, 3>{}, Layout<Shape<_8, _16>, Stride<_16, _1>>{}));
   using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<K>>{}));
-  using Copy = SM75_U32x4_LDSM_N;
+  using Copy = typename SelectCopy<N, num_warp_n, true>::type;
 };
 
-template <int N, int K>
-struct OperandTraits<32, N, K, false,
+template <int N, int K, int num_warp_n>
+struct OperandTraits<32, N, K, false, num_warp_n,
                      typename std::enable_if<N % 32 == 0>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<3, 2, 3>{}, Layout<Shape<_32, _8>, Stride<_1, _32>>{}));
@@ -237,8 +258,8 @@ struct OperandTraits<32, N, K, false,
   using Copy = UniversalCopy<tfloat32_t>;
 };
 
-template <int N, int K>
-struct OperandTraits<32, N, K, false,
+template <int N, int K, int num_warp_n>
+struct OperandTraits<32, N, K, false, num_warp_n,
                      typename std::enable_if<N % 32 == 16>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<2, 2, 3>{}, Layout<Shape<_16, _8>, Stride<_1, _16>>{}));
@@ -247,26 +268,26 @@ struct OperandTraits<32, N, K, false,
   using Copy = UniversalCopy<tfloat32_t>;
 };
 
-template <int N, int K>
-struct OperandTraits<8, N, K, true,
+template <int N, int K, int num_warp_n>
+struct OperandTraits<8, N, K, true, num_warp_n,
                      typename std::enable_if<K % 128 == 64>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<2, 4, 3>{}, Layout<Shape<_8, _64>, Stride<_64, _1>>{}));
   using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<K>>{}));
-  using Copy = SM75_U32x4_LDSM_N;
+  using Copy = typename SelectCopy<N, num_warp_n, true>::type;
 };
 
-template <int N, int K>
-struct OperandTraits<8, N, K, true,
+template <int N, int K, int num_warp_n>
+struct OperandTraits<8, N, K, true, num_warp_n,
                      typename std::enable_if<K % 128 == 0>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<3, 4, 3>{}, Layout<Shape<_8, _128>, Stride<_128, _1>>{}));
   using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<K>>{}));
-  using Copy = SM75_U32x4_LDSM_N;
+  using Copy = typename SelectCopy<N, num_warp_n, true>::type;
 };
 
-template <int N, int K>
-struct OperandTraits<64, N, K, true,
+template <int N, int K, int num_warp_n>
+struct OperandTraits<64, N, K, true, num_warp_n,
                      typename std::enable_if<K % 16 == 0>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<2, 0, 4>{}, Layout<Shape<_4, _16>, Stride<_16, _1>>{}));
@@ -274,8 +295,8 @@ struct OperandTraits<64, N, K, true,
   using Copy = DefaultCopy;
 };
 
-template <int N, int K>
-struct OperandTraits<64, N, K, false,
+template <int N, int K, int num_warp_n>
+struct OperandTraits<64, N, K, false, num_warp_n,
                      typename std::enable_if<N % 16 == 0>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<2, 2, 2>{}, Layout<Shape<_16, _4>, Stride<_1, _16>>{}));
@@ -296,13 +317,15 @@ public:
       typename std::conditional<std::is_same<B_type_raw, float>::value,
                                 tfloat32_t, A_type_raw>::type;
   using C_type = C_type_raw;
+
   using Instruction =
-      DispatchInstruction<A_type, B_type, C_type, num_warp_m, num_warp_n>;
+      DispatchInstruction<A_type, B_type, C_type, num_warp_m, num_warp_n, N>;
 
   using OperandATraits =
-      OperandTraits<sizeof_bits<A_type>::value, M, K, !trans_A>;
+      OperandTraits<sizeof_bits<A_type>::value, M, K, !trans_A, num_warp_m>;
   using OperandBTraits =
-      OperandTraits<sizeof_bits<B_type>::value, N, K, trans_B>;
+      OperandTraits<sizeof_bits<B_type>::value, N, K, trans_B, num_warp_n>;
+
   using SmemLayoutA = typename OperandATraits::Layout;
   using SmemLayoutB = typename OperandBTraits::Layout;
   using SmemCopyA = Copy_Atom<typename OperandATraits::Copy, A_type>;
@@ -359,6 +382,7 @@ public:
     // workaround
     auto tCrA_view = make_tensor(tCrA.data(), remove_swizzle(tCrA.layout()));
     auto tCrB_view = make_tensor(tCrB.data(), remove_swizzle(tCrB.layout()));
+
     CUTE_UNROLL
     for (int k = 0; k < size<2>(tCrA); ++k) {
       copy(tiled_copy_A, tCsA(_, _, k), tCrA_copy_view(_, _, k));
@@ -424,7 +448,6 @@ public:
     Tensor tCrB =
         make_tensor(make_rmem_ptr(reinterpret_cast<B_type *>(pB)),
                     partition_shape_B(tiled_mma, Shape<Int<N>, Int<K>>{}));
-
     if constexpr (clear_accum) {
       clear(acc);
     }

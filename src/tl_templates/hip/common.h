@@ -26,6 +26,27 @@
 #define ushort unsigned short
 
 #define TL_DEVICE __forceinline__ __device__
+#define TL_DEVICE_NOINLINE __noinline__ __device__
+
+#define TILELANG_CHECK(stmt)                                                   \
+  do {                                                                         \
+    hipError_t __err = (stmt);                                                 \
+    if (__err != hipSuccess) {                                                 \
+      snprintf(error_buf, ERROR_BUF_SIZE, "%s:%d: %s - %s", __FILE__,          \
+               __LINE__, hipGetErrorName(__err), hipGetErrorString(__err));    \
+      return -1;                                                               \
+    }                                                                          \
+  } while (0)
+
+#define TILELANG_CHECK_LAST_ERROR(kernel_name)                                 \
+  do {                                                                         \
+    hipError_t __err = hipGetLastError();                                      \
+    if (__err != hipSuccess) {                                                 \
+      snprintf(error_buf, ERROR_BUF_SIZE, "kernel_name: %s - %s",              \
+               hipGetErrorName(__err), hipGetErrorString(__err));              \
+      return -1;                                                               \
+    }                                                                          \
+  } while (0)
 
 #define half _Float16
 #define __float2half_rn(x) half(x)
@@ -45,7 +66,7 @@ using float16x16 =
 
 using half_t = float16_t;
 
-using bfloat16_t = __hip_bfloat16;
+using bfloat16_t = hip_bfloat16;
 
 struct bfloat16x2 {
   bfloat16_t data[2];
@@ -77,4 +98,16 @@ TL_DEVICE unsigned __pack_half2(const half_t x, const half_t y) {
   unsigned v0 = *((unsigned short *)&x);
   unsigned v1 = *((unsigned short *)&y);
   return (v1 << 16) | v0;
+}
+
+// Pack two bfloat16_t values.
+TL_DEVICE unsigned __pack_bfloat162(const bfloat16_t x, const bfloat16_t y) {
+  unsigned v0 = *((unsigned short *)&x);
+  unsigned v1 = *((unsigned short *)&y);
+  return (v1 << 16) | v0;
+}
+
+template <typename T1, typename T2>
+TL_DEVICE void AtomicAdd(T1 *address, T2 val) {
+  atomicAdd(reinterpret_cast<T1 *>(address), static_cast<T1>(val));
 }
