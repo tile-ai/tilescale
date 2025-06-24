@@ -10,7 +10,6 @@ from libc.stdlib cimport malloc, free
 from tvm import tir
 from tilelang.utils.tensor import map_torch_type
 from tilelang import use_distributed
-import pynvshmem
 
 cdef class CythonKernelWrapper:
     # Class attributes to store kernel configuration and library reference
