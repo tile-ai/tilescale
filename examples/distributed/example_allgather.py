@@ -2,19 +2,22 @@
 # Licensed under the MIT License.
 
 import torch
-import pynvshmem
-import os
+import torch.distributed as dist
+import triton_dist.pynvshmem as pynvshmem
 import tilelang
 import tilelang.language as T
 from tilelang.profiler import TensorSupplyType
-from tilelang.distributed.utils import init_distributed
+from tilelang.distributed.utils import init_distributed, dtype_map
+
+tilelang.disable_cache()
+
 
 def allgather(PE_num, M, N, block_M, block_N, dtype="float16"):
 
     @T.prim_func
-    def main(
-            A: T.Buffer((M, N), dtype),
-            B: T.Buffer((M * PE_num, N), dtype),
+    def naive_a2a(
+            A: T.Tensor((M, N), dtype), # type: ignore
+            B: T.Tensor((M * PE_num, N), dtype), # type: ignore
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
             mype = T.alloc_local([1], "int32")
@@ -29,42 +32,46 @@ def allgather(PE_num, M, N, block_M, block_N, dtype="float16"):
             for k in T.serial(PE_num - 1):
                 peer[0] = (mype[0] + 1 + k) % npes[0]
                 T.putmem_nbi_block(
-                    T.address_of(B[mype[0] * M, 0]), T.address_of(A[0, 0]), block_M * block_N * 2,
+                    T.address_of(B[mype[0] * M, 0]), 
+                    T.address_of(A[0, 0]), 
+                    block_M * block_N * dtype_map[dtype].itemsize,
                     peer[0])
 
-    return main
+    return naive_a2a
 
 
-WORLD_SIZE, RANK, LOCAL_RANK = init_distributed()
+if __name__ == '__main__':
+    WORLD_SIZE, RANK, LOCAL_RANK, TP_GROUP = init_distributed(return_tp_group=True)
 
-M, N, block_M, block_N = 32, 32, 32, 32
-PE_num = WORLD_SIZE
-dtype = torch.float16
-nelems = M * PE_num * N
+    M, N, block_M, block_N = 64, 32, 64, 32
+    PE_num = WORLD_SIZE
+    dtype = torch.float16
+    nelems = M * PE_num * N
 
-func = allgather(PE_num, M, N, block_M, block_N)
-kernel = tilelang.compile(func, pass_configs={"tl.disable_tma_lower": True})
+    func = allgather(PE_num, M, N, block_M, block_N)
+    kernel = tilelang.compile(func, pass_configs={"tl.disable_tma_lower": True})
 
-# Get CUDA Source
-if RANK == 0:
-    print(kernel.get_kernel_source())
+    # Get CUDA Source
+    if RANK == 0:
+        print(kernel.get_kernel_source())
 
-profiler = kernel.get_profiler(tensor_supply_type=TensorSupplyType.Randn)
+    profiler = kernel.get_profiler(tensor_supply_type=TensorSupplyType.Randn)
 
-ref_tensor = torch.arange(nelems, dtype=dtype).cuda()
-ref_tensor = ref_tensor.reshape(M * PE_num, N)
+    local_ref_tensor = torch.randn(M, N, dtype=dtype).cuda()
 
-ag_buffer = pynvshmem.nvshmem_create_tensor([M, N], dtype)
-ag_buffer[:].copy_(ref_tensor[M * RANK:M * (RANK + 1), :])
-print("ag_buffer:", ag_buffer)
+    ag_buffer = pynvshmem.nvshmem_create_tensor([M, N], dtype)
+    ag_buffer.copy_(local_ref_tensor)
+    print("ag_buffer:", ag_buffer)
 
-out = pynvshmem.nvshmem_create_tensor([M * PE_num, N], dtype)
-kernel(ag_buffer, out)
-print("out:", out)
+    out = pynvshmem.nvshmem_create_tensor([M * PE_num, N], dtype)
+    kernel(ag_buffer, out)
+    print("out:", out)
 
-ref_cpu = ref_tensor.cpu()
-for i in range(PE_num):
-    if i == RANK:
-        out_cpu = out.cpu()
-        assert torch.allclose(out_cpu, ref_cpu, atol=1e-3, rtol=1e-3)
-        print(f"rank {i} check passed.")
+    ref = torch.empty((M * PE_num, N), dtype=dtype).cuda()
+    dist.all_gather_into_tensor(ref, local_ref_tensor, group=TP_GROUP)
+    
+    assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
+    print(f"rank {RANK} check passed.✅")
+            
+    dist.destroy_process_group()
+
