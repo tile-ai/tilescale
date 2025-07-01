@@ -12,20 +12,11 @@ from triton_dist.utils import group_profile
 import argparse
 import random
 from triton_dist.kernels.nvidia import fast_all_to_all, all_to_all_post_process
-from utils import create_all_to_all_context, AllToAllContext
+from .utils import create_all_to_all_context, AllToAllContext, DTYPE_MAP
 from typing import Optional
 
 tilelang.disable_cache()
 
-DTYPE_MAP = {
-    "bfloat16": torch.bfloat16,
-    "float16": torch.float16,
-    "float8_e4m3fn": torch.float8_e4m3fn,
-    "float8_e5m2": torch.float8_e5m2,
-    "s8": torch.int8,
-    "s32": torch.int32,
-    "float32": torch.float32,
-}
 
 def all_to_all(max_m, hidden, num_tot_experts, WORLD_SIZE, threads=128, dtype="float16"):
 
@@ -34,13 +25,13 @@ def all_to_all(max_m, hidden, num_tot_experts, WORLD_SIZE, threads=128, dtype="f
 
     @T.prim_func
     def main(
-        send_buf: T.Tensor((max_m, hidden), dtype),
-        recv_buf: T.Tensor((WORLD_SIZE * max_m * 2, hidden), dtype),
-        scale_send_buf: T.Tensor((max_m), scale_dtype),
-        scale_recv_buf: T.Tensor((WORLD_SIZE * max_m * 2), scale_dtype),
-        split_send_buf: T.Tensor((num_tot_experts), "int32"),
-        split_recv_buf: T.Tensor((num_tot_experts * 2), "int32"),
-        signal_buf: T.Tensor((WORLD_SIZE * 2), "uint64"),
+        send_buf: T.Tensor((max_m, hidden), dtype), # type: ignore
+        recv_buf: T.Tensor((WORLD_SIZE * max_m * 2, hidden), dtype), # type: ignore
+        scale_send_buf: T.Tensor((max_m), scale_dtype), # type: ignore
+        scale_recv_buf: T.Tensor((WORLD_SIZE * max_m * 2), scale_dtype), # type: ignore
+        split_send_buf: T.Tensor((num_tot_experts), "int32"), # type: ignore
+        split_recv_buf: T.Tensor((num_tot_experts * 2), "int32"), # type: ignore
+        signal_buf: T.Tensor((WORLD_SIZE * 2), "uint64"), # type: ignore
     ):
         with T.Kernel(WORLD_SIZE, threads=threads) as (bx):
             peer = bx

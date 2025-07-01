@@ -2,11 +2,18 @@
 # Licensed under the MIT License.
 
 import torch
-# TODO: remove this
-from triton_dist import pynvshmem
+from triton_dist import pynvshmem # TODO: remove this
+ 
+DTYPE_MAP = {
+    "bfloat16": torch.bfloat16,
+    "float16": torch.float16,
+    "float8_e4m3fn": torch.float8_e4m3fn,
+    "float8_e5m2": torch.float8_e5m2,
+    "s8": torch.int8,
+    "s32": torch.int32,
+    "float32": torch.float32,
+}
 
-def dtype_size_in_bytes(dtype: torch.dtype) -> int:
-    return torch.tensor([], dtype=dtype).element_size()
 
 class AllToAllContext:
 
@@ -36,8 +43,8 @@ class AllToAllContext:
         self.hidden = hidden
         self.dtype = dtype
         self.scale_dtype = scale_dtype
-        self.ele_size = dtype_size_in_bytes(self.dtype)
-        self.scale_ele_size = dtype_size_in_bytes(self.scale_dtype)
+        self.ele_size = self.dtype.itemsize
+        self.scale_ele_size = self.scale_dtype.itemsize
 
         self.num_tot_experts = num_tot_experts
         self.experts_per_rank = experts_per_rank
