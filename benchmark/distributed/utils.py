@@ -2,8 +2,8 @@
 # Licensed under the MIT License.
 
 import torch
-from triton_dist import pynvshmem # TODO: remove this
- 
+from triton_dist import pynvshmem  # TODO: remove this
+
 DTYPE_MAP = {
     "bfloat16": torch.bfloat16,
     "float16": torch.float16,
@@ -52,7 +52,7 @@ class AllToAllContext:
         self.WORLD_SIZE = WORLD_SIZE
         self.rank = rank
 
-        # start from 1, becase the initial values of signal buffer is 0
+        # start from 1, because the initial values of signal buffer is 0
         self.call_count = 1
         self.MOD_VALUE = 1000000
 

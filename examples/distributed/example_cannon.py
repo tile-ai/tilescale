@@ -73,14 +73,14 @@ def cannon(MESH, M, N, K, block_M, block_N, block_K, dtype="float16", specialize
                 if block_id < T.ceildiv(M_local, A_rows_per_block):
                     T.putmem_signal_nbi_block(
                         T.address_of(A[(ko + 1) % 2, A_rows_per_block * block_id, 0]),
-                        T.address_of(A[ko % 2, A_rows_per_block * block_id,
-                                       0]), A_rows_per_block * K_local * dtype_map[dtype].itemsize,
+                        T.address_of(A[ko % 2, A_rows_per_block * block_id, 0]),
+                        A_rows_per_block * K_local * dtype_map[dtype].itemsize,
                         T.address_of(A_signal_to[0]), 1, T.NVSHMEM_SIGNAL_ADD, a_peer_to[0])
                 if block_id < T.ceildiv(N_local, B_cols_per_block):
                     T.putmem_signal_nbi_block(
                         T.address_of(B[(ko + 1) % 2, B_cols_per_block * block_id, 0]),
-                        T.address_of(B[ko % 2, B_cols_per_block * block_id,
-                                       0]), B_cols_per_block * K_local * dtype_map[dtype].itemsize,
+                        T.address_of(B[ko % 2, B_cols_per_block * block_id, 0]),
+                        B_cols_per_block * K_local * dtype_map[dtype].itemsize,
                         T.address_of(B_signal_to[0]), 1, T.NVSHMEM_SIGNAL_ADD, b_peer_to[0])
 
                 for w in T.serial(waves):
@@ -177,14 +177,14 @@ def cannon(MESH, M, N, K, block_M, block_N, block_K, dtype="float16", specialize
                     T.putmem_signal_nbi_block(
                         T.address_of(A[(ko + 1) % 2, A_rows_per_block * (block_id - compute_blocks),
                                        0]),
-                        T.address_of(A[ko % 2, A_rows_per_block * (block_id - compute_blocks),
-                                       0]), A_rows_per_block * K_local * dtype_map[dtype].itemsize,
+                        T.address_of(A[ko % 2, A_rows_per_block * (block_id - compute_blocks), 0]),
+                        A_rows_per_block * K_local * dtype_map[dtype].itemsize,
                         T.address_of(A_signal_to[0]), 1, T.NVSHMEM_SIGNAL_ADD, a_peer_to[0])
                     T.putmem_signal_nbi_block(
                         T.address_of(B[(ko + 1) % 2, B_cols_per_block * (block_id - compute_blocks),
                                        0]),
-                        T.address_of(B[ko % 2, B_cols_per_block * (block_id - compute_blocks),
-                                       0]), B_cols_per_block * K_local * dtype_map[dtype].itemsize,
+                        T.address_of(B[ko % 2, B_cols_per_block * (block_id - compute_blocks), 0]),
+                        B_cols_per_block * K_local * dtype_map[dtype].itemsize,
                         T.address_of(B_signal_to[0]), 1, T.NVSHMEM_SIGNAL_ADD, b_peer_to[0])
 
                 if block_id < compute_blocks:

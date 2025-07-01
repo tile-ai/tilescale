@@ -3,21 +3,19 @@
 
 import torch
 import torch.distributed as dist
-import triton_dist.pynvshmem as pynvshmem
+import pynvshmem
 import tilelang
 import tilelang.language as T
 from tilelang.profiler import TensorSupplyType
 from tilelang.distributed.utils import init_distributed, dtype_map
-
-tilelang.disable_cache()
 
 
 def allgather(PE_num, M, N, block_M, block_N, dtype="float16"):
 
     @T.prim_func
     def naive_a2a(
-            A: T.Tensor((M, N), dtype), # type: ignore
-            B: T.Tensor((M * PE_num, N), dtype), # type: ignore
+            A: T.Tensor((M, N), dtype),  # type: ignore
+            B: T.Tensor((M * PE_num, N), dtype),  # type: ignore
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
             mype = T.alloc_local([1], "int32")
@@ -32,10 +30,8 @@ def allgather(PE_num, M, N, block_M, block_N, dtype="float16"):
             for k in T.serial(PE_num - 1):
                 peer[0] = (mype[0] + 1 + k) % npes[0]
                 T.putmem_nbi_block(
-                    T.address_of(B[mype[0] * M, 0]), 
-                    T.address_of(A[0, 0]), 
-                    block_M * block_N * dtype_map[dtype].itemsize,
-                    peer[0])
+                    T.address_of(B[mype[0] * M, 0]), T.address_of(A[0, 0]),
+                    block_M * block_N * dtype_map[dtype].itemsize, peer[0])
 
     return naive_a2a
 
@@ -69,9 +65,8 @@ if __name__ == '__main__':
 
     ref = torch.empty((M * PE_num, N), dtype=dtype).cuda()
     dist.all_gather_into_tensor(ref, local_ref_tensor, group=TP_GROUP)
-    
+
     assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
     print(f"rank {RANK} check passed.✅")
-            
-    dist.destroy_process_group()
 
+    dist.destroy_process_group()

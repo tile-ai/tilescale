@@ -7,6 +7,7 @@ import tilelang.language as T
 from tilelang.profiler import TensorSupplyType
 from tilelang.distributed.utils import init_distributed
 
+
 def simple_shift(M, N, block_M, block_N, dtype="float16"):
 
     @T.prim_func
