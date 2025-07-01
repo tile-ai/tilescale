@@ -15,12 +15,6 @@ dtype_map = {
     "bfloat16": torch.bfloat16,
 }
 
-dsize_map = {
-    "float16": 2,
-    "float32": 4,
-    "bfloat16": 2,
-}
-
 
 def init_distributed(return_tp_group=False):
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
