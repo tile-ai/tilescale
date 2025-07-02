@@ -1326,6 +1326,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       }
     }
     os << ")";
+  } else if (op->op.same_as(tl::Quiet())) {
+    os << "nvshmem_quiet()";
   } else if (op->op.same_as(tl::Fence())) {
     os << "nvshmem_fence()";
   } else if (op->op.same_as(tl::SyncAll())) {
