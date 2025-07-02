@@ -2,12 +2,12 @@
 # Licensed under the MIT License.
 
 import torch
-# TODO: remove this
-import triton_dist.pynvshmem as pynvshmem
+import triton_dist.pynvshmem as pynvshmem # TODO: remove this
 import datetime
 import os
 from typing import List, Union, Tuple, Callable, Sequence
 from contextlib import contextmanager
+from cuda import cuda, cudart
 
 dtype_map = {
     "float16": torch.float16,
@@ -92,3 +92,82 @@ def _make_tensor(
 def generate_data(configs):
     while True:
         yield (_make_tensor(*args) if args else None for args in configs)
+
+
+def dist_print(*args, **kwargs):
+    """A wrapped distributed version of the built-in `print` function.
+    Args:
+        allowed_ranks (List[int] or "all"): The ranks that are allowed to print. Default: [0].
+        prefix (bool): Whether to add a prefix indicating the rank number. Default: False.
+        need_sync (bool): Whether to synchronize all ranks before printing. Default: False.
+    Note:
+        This function requires the environment variables "RANK" and "WORLD_SIZE" to be set.
+    Example:
+    ```
+    dist_print("Hello, world!", allowed_ranks=[0, 1], prefix=True, need_sync=True)
+    ```
+    """
+    rank = int(os.getenv("RANK", 0))
+    world_size = int(os.getenv("WORLD_SIZE", 1))
+    prefix = False
+    if "allowed_ranks" in kwargs:
+        allowed_ranks = kwargs["allowed_ranks"]
+        if isinstance(allowed_ranks, str) and allowed_ranks == "all":
+            allowed_ranks = list(range(world_size))
+
+        del kwargs["allowed_ranks"]
+    else:
+        allowed_ranks = [0]
+    if "prefix" in kwargs:
+        prefix = kwargs["prefix"]
+
+        del kwargs["prefix"]
+
+    need_sync = False
+    if "need_sync" in kwargs:
+        need_sync = kwargs["need_sync"]
+
+        del kwargs["need_sync"]
+
+    for allowed in allowed_ranks:
+        if need_sync:
+            torch.distributed.barrier()
+        if rank == allowed:
+            if prefix:
+                print(f"[rank:{rank}]", end="")
+            print(*args, **kwargs)
+            
+
+def perf_fn(fn: Callable, warmup: int, rep: int):
+    """Benchmark a function `fn` by running it `warmup` times for warm-up and then `rep` times for measurement.
+    Returns the output of the last run and the average time per run in milliseconds.
+    Args:
+        fn (Callable): The function to benchmark.
+        warmup (int): The number of warm-up runs.
+        rep (int): The number of measurement runs.
+    Returns:
+        output: The output of the last run of `fn`.
+        float: The average time per run in milliseconds.
+    """
+    st = torch.cuda.Event(enable_timing=True)
+    ed = torch.cuda.Event(enable_timing=True)
+    for i in range(warmup + rep):
+        if i == warmup:
+            st.record()
+        output = fn()
+    ed.record()
+    st.wait()
+    ed.wait()
+    torch.cuda.current_stream().synchronize()
+    return output, st.elapsed_time(ed) / rep
+
+
+def CUDA_CHECK(err):
+    if isinstance(err, cuda.CUresult):
+        if err != cuda.CUresult.CUDA_SUCCESS:
+            raise RuntimeError(f"Cuda Error: {err}: {cuda.cuGetErrorName(err)}")
+    elif isinstance(err, cudart.cudaError_t):
+        if err != cudart.cudaError_t.cudaSuccess:
+            raise RuntimeError(f"Cuda Error: {err}: {cudart.cudaGetErrorString(err)}")
+    else:
+        raise RuntimeError(f"Unknown error type: {err}")
