@@ -2,7 +2,7 @@
 # Licensed under the MIT License.
 
 import torch
-import triton_dist.pynvshmem as pynvshmem # TODO: remove this
+import triton_dist.pynvshmem as pynvshmem  # TODO: remove this
 import datetime
 import os
 from typing import List, Union, Tuple, Callable, Sequence
@@ -10,9 +10,13 @@ from contextlib import contextmanager
 from cuda import cuda, cudart
 
 dtype_map = {
-    "float16": torch.float16,
-    "float32": torch.float32,
     "bfloat16": torch.bfloat16,
+    "float16": torch.float16,
+    "float8_e4m3fn": torch.float8_e4m3fn,
+    "float8_e5m2": torch.float8_e5m2,
+    "s8": torch.int8,
+    "s32": torch.int32,
+    "float32": torch.float32,
 }
 
 
@@ -136,7 +140,7 @@ def dist_print(*args, **kwargs):
             if prefix:
                 print(f"[rank:{rank}]", end="")
             print(*args, **kwargs)
-            
+
 
 def perf_fn(fn: Callable, warmup: int, rep: int):
     """Benchmark a function `fn` by running it `warmup` times for warm-up and then `rep` times for measurement.
