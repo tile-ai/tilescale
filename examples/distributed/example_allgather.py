@@ -4,7 +4,6 @@
 import argparse
 import torch
 import torch.distributed as dist
-import triton_dist
 import pynvshmem
 import tilelang
 import tilelang.language as T
@@ -20,6 +19,7 @@ def allgather(PE_num, M, N, dtype="float16", threads=128):
             A: T.Tensor((M_per_rank, N), dtype),  # type: ignore
             B: T.Tensor((M, N), dtype),  # type: ignore
     ):
+        # Each block is responsible for sending (block_M, N) to exact one rank.
         with T.Kernel(M_per_rank // block_M, PE_num - 1, threads=threads) as (bx, by):
             mype = T.get_pe()
             npes = T.get_pe_num()
@@ -72,7 +72,7 @@ if __name__ == '__main__':
 
     local_data = torch.randn([M_per_rank, N], dtype=torch_dtype).cuda()
 
-    # Benchmark Torch
+    # Torch
     def torch_ag():
         out = torch.empty((M, N), dtype=torch_dtype).cuda()
         dist.all_gather_into_tensor(out, local_data, group=TP_GROUP)
@@ -82,7 +82,7 @@ if __name__ == '__main__':
     ref, t = perf_fn(torch_ag, warmup, repeat)
     print(f"rank {RANK} torch all_gather avg time: {t} ms")
 
-    # Benchmark Tilelang-dist
+    # Tilelang-dist
     def tilelang_ag():
         ag_buffer = pynvshmem.nvshmem_create_tensor([M_per_rank, N], torch_dtype)
         ag_buffer.copy_(local_data)
