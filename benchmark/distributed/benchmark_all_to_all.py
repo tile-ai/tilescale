@@ -7,12 +7,12 @@ import os
 import tilelang
 import tilelang.language as T
 from tilelang.profiler import TensorSupplyType
-from tilelang.distributed.utils import init_distributed
+from tilelang.distributed.utils import init_distributed, dtype_map
 from triton_dist.utils import group_profile
 import argparse
 import random
 from triton_dist.kernels.nvidia import fast_all_to_all, all_to_all_post_process
-from .utils import create_all_to_all_context, AllToAllContext, DTYPE_MAP
+from .utils import create_all_to_all_context, AllToAllContext
 from typing import Optional
 
 tilelang.disable_cache()
@@ -229,7 +229,7 @@ def main():
         args.G,
         WORLD_SIZE,
         experts_per_rank,
-        DTYPE_MAP[args.dtype],
+        dtype_map[args.dtype],
         torch.float,
     )
 
