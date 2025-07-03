@@ -1308,6 +1308,16 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       }
     }
     os << ")";
+  } else if (op->op.same_as(tl::GetmemNbiBlock())) {
+    os << "nvshmemx_getmem_nbi_block(";
+    this->PrintExpr(op->args[0], os);
+    os << ", ";
+    this->PrintExpr(op->args[1], os);
+    os << ", ";
+    this->PrintExpr(op->args[2], os);
+    os << ", ";
+    this->PrintExpr(op->args[3], os);
+    os << ")";
   } else if (op->op.same_as(tl::SignalWaitUntil())) {
     os << "nvshmem_signal_wait_until(";
     for (int i = 0; i < op->args.size(); i++) {

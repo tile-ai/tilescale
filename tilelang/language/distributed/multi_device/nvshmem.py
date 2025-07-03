@@ -66,8 +66,15 @@ def fence():
     return tir.call_intrin("handle", tir.op.Op.get("tl.Fence"))
 
 
-def getmem_nbi_block(*args):
-    return tir.call_intrin("handle", tir.op.Op.get("tl.GetmemNbiBlock"), *args)
+def getmem_nbi_block(dest, src, nelems, pe):
+    """Get data from remote memory to local memory at block granularity without blocking.
+    Args:
+        dest: Symmetric address of the destination data object.
+        src: Symmetric address of the object containing the data to be copied.
+        nelems: Number of elements to be transferred (in bytes).
+        pe: The PE ID of the source PE.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.GetmemNbiBlock"), dest, src, nelems, pe)
 
 
 def getmem_block(*args):
