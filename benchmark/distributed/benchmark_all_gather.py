@@ -69,7 +69,6 @@ def allgather(PE_num, M, N, dtype="float16", threads=128):
             T.putmem_nbi_block(
                 T.address_of(B[global_base, 0]), T.address_of(A_shared[0, 0]),
                 block_M * N * dtype_map[dtype].itemsize, peer)
-            #todo: need some sync?
 
     return a2a_split
 
@@ -147,6 +146,7 @@ if __name__ == '__main__':
         out = pynvshmem.nvshmem_create_tensor([M, N], torch_dtype)
         out[RANK * M_per_rank:(RANK + 1) * M_per_rank, :].copy_(local_data)
         kernel(ag_buffer, out)
+        pynvshmem.nvshmem_barrier_all()
         return out
 
     dist.barrier(TP_GROUP)
