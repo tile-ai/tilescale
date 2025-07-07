@@ -17,7 +17,7 @@ tilelang.disable_cache()
 
 
 # Copied from Triton-distributed/tutorials/02-intra-node-allgather.py
-# This is the default AG impl. in Triton-dist given full-mesh NVLink
+# This is the default AllGather impl. in Triton-dist given full-mesh NVLink
 def cp_engine_producer_all_gather_full_mesh_pull(
     rank,
     num_ranks,
@@ -51,26 +51,23 @@ def cp_engine_producer_all_gather_full_mesh_pull(
 def allgather(PE_num, M, N, dtype="float16", threads=128):
     M_per_rank = M // PE_num
     block_M = 4
-
+        
     @T.prim_func
-    def a2a_split(
+    def a2a_pull(
             A: T.Tensor((M_per_rank, N), dtype),  # type: ignore
             B: T.Tensor((M, N), dtype),  # type: ignore
     ):
         with T.Kernel(M_per_rank // block_M, PE_num - 1, threads=threads) as (bx, by):
             mype = T.get_pe()
             npes = T.get_pe_num()
-
-            A_shared = T.alloc_shared((block_M, N), dtype)
-            local_base = bx * block_M
-            global_base = M_per_rank * mype + local_base
-            T.copy(A[local_base:local_base + block_M, :], A_shared)
             peer = (mype + by + 1) % npes
-            T.putmem_nbi_block(
-                T.address_of(B[global_base, 0]), T.address_of(A_shared[0, 0]),
+            
+            T.getmem_nbi_block(
+                T.address_of(B[peer*M_per_rank+bx*block_M, 0]), T.address_of(A[bx*block_M, 0]),
                 block_M * N * dtype_map[dtype].itemsize, peer)
+            # We don't need a barrier for the pull mode
 
-    return a2a_split
+    return a2a_pull
 
 
 def parse_args():
@@ -90,6 +87,7 @@ def parse_args():
 
 if __name__ == '__main__':
     WORLD_SIZE, RANK, LOCAL_RANK, TP_GROUP = init_distributed(return_tp_group=True)
+    torch.cuda.set_device(RANK)
     assert WORLD_SIZE <= 8, "This benchmark is designed for intra-node communication"
 
     args = parse_args()
@@ -146,7 +144,7 @@ if __name__ == '__main__':
         out = pynvshmem.nvshmem_create_tensor([M, N], torch_dtype)
         out[RANK * M_per_rank:(RANK + 1) * M_per_rank, :].copy_(local_data)
         kernel(ag_buffer, out)
-        pynvshmem.nvshmem_barrier_all()
+        
         return out
 
     dist.barrier(TP_GROUP)

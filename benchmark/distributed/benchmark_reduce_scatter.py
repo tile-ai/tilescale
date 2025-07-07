@@ -7,13 +7,16 @@ import argparse
 import torch
 import torch.distributed as dist
 import triton_dist
+from triton_dist.kernels.nvidia.reduce_scatter import (
+    reduce_scatter_ring_push_1d_intra_node_ce,
+    reduce_scatter_ring_push_1d_intra_node_sm,
+    reduce_scatter_ring_push_1d_intra_node_sm_rma
+)
 import triton_dist.pynvshmem as pynvshmem #TODO: use our own pynvshmem
 import tilelang
 import tilelang.language as T
 from tilelang.distributed.utils import init_distributed, dtype_map, perf_fn, dist_print
 from typing import List
-from cuda import cuda
-from triton_dist.utils import CUDA_CHECK
 
 tilelang.disable_cache()
 
@@ -104,14 +107,21 @@ if __name__ == '__main__':
     print(f"rank {RANK} torch reduce_scatter avg time: {t} ms")
     
     # Benchmark Triton-dist
-    from triton_impl.intra_rs import reducer_scatter_intra_node 
-    def triton_rs():
-        scatter_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node([M, N], torch_dtype)
-        sync_buf = pynvshmem.nvshmem_create_tensor([PE_num,], torch.int32)
-        sync_buf.fill_(0)
-        pynvshmem.nvshmem_barrier_all()
-        output = reducer_scatter_intra_node(local_data, scatter_bufs, sync_buf, RANK, PE_num)
-        pynvshmem.nvshmem_barrier_all()
+    def triton_rs(mode: str = "ce"):
+        input_buffer = pynvshmem.nvshmem_create_tensor([M, N], torch_dtype)
+        input_buffer.copy_(local_data)
+        input_flag = torch.ones((WORLD_SIZE, ), device="cuda", dtype=torch.int32)
+        symm_reduce_buffers = pynvshmem.nvshmem_create_tensor_list_intra_node([M, N], torch_dtype)
+        symm_reduce_flags = pynvshmem.nvshmem_create_tensor_list_intra_node((PE_num, ), torch.int32)
+        output = reduce_scatter_ring_push_1d_intra_node_ce(
+            RANK,
+            PE_num,
+            input_buffer,
+            input_flag,
+            symm_reduce_buffers,
+            symm_reduce_flags,
+        )
+        pynvshmem.nvshmemx_barrier_all_on_stream(torch.cuda.current_stream().cuda_stream)
         return output
     
     dist.barrier(TP_GROUP)
@@ -128,7 +138,7 @@ if __name__ == '__main__':
 
     dist.barrier(TP_GROUP)
     out, t = perf_fn(tilelang_rs, warmup, repeat)
-    print(f"rank {RANK} tilelang all_gather avg time: {t} ms")
+    print(f"rank {RANK} tilelang reduce_scatter avg time: {t} ms")
 
     # Check correctness
     assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
