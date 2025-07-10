@@ -46,6 +46,11 @@ endif()
 
 find_package(NVSHMEM REQUIRED)
 
+if(NOT CMAKE_CUDA_ARCHITECTURES)
+  set(CMAKE_CUDA_ARCHITECTURES native)
+endif()
+
+
 pybind11_add_module(pynvshmem src/pynvshmem.cc)
 include_directories(${CUDA_INCLUDE_DIRS})
 message(STATUS "CUDA include directories: ${CUDA_INCLUDE_DIRS}")
