@@ -154,18 +154,41 @@ nvshmem_create_tensor_list(const std::vector<int64_t> &shape,
 }
 
 PYBIND11_MODULE(_pynvshmem, m) {
+  /* Basic queries */
+  m.def("nvshmem_my_pe", []() -> int {
+    check_nvshmem_init();
+    return nvshmem_my_pe();
+  });
+  m.def("nvshmem_n_pes", []() -> int {
+    check_nvshmem_init();
+    return nvshmem_n_pes();
+  });
+  m.def("nvshmem_team_my_pe", [](int team) {
+    check_nvshmem_init();
+    return nvshmem_team_my_pe(team);
+  });
+  m.def("nvshmem_team_n_pes", [](int team) {
+    check_nvshmem_init();
+    return nvshmem_team_n_pes(team);
+  });
+
   m.def("nvshmemx_cumodule_init", [](intptr_t module) {
     CHECK_NVSHMEMX(nvshmemx_cumodule_init((CUmodule)module));
   });
   m.def("nvshmemx_cumodule_finalize", [](intptr_t module) {
     CHECK_NVSHMEMX(nvshmemx_cumodule_finalize((CUmodule)module));
   });
+
   m.def("nvshmem_malloc", [](size_t size) {
     void *ptr = nvshmem_malloc(size);
     if (ptr == nullptr) {
       throw std::runtime_error("nvshmem_malloc failed");
     }
     return (intptr_t)ptr;
+  });
+  m.def("nvshmem_free", [](intptr_t ptr) {
+    check_nvshmem_init();
+    nvshmem_free((void *)ptr);
   });
   m.def("nvshmem_ptr", [](intptr_t ptr, int peer) {
     return (intptr_t)nvshmem_ptr((void *)ptr, peer);
@@ -193,15 +216,13 @@ PYBIND11_MODULE(_pynvshmem, m) {
     memcpy(&id, id_str.data(), sizeof(id));
     CHECK_NVSHMEMX(nvshmemx_init_attr(NVSHMEMX_INIT_WITH_UNIQUEID, &init_attr));
   });
+
+  /* Single-element put */
 #define NVSHMEMI_TYPENAME_P_PYBIND(TYPENAME, TYPE)                             \
   m.def("nvshmem_" #TYPENAME "_p", &TYPENAME##_p);
   NVSHMEMI_REPT_FOR_STANDARD_RMA_TYPES(NVSHMEMI_TYPENAME_P_PYBIND)
 #undef NVSHMEMI_TYPENAME_P_PYBIND
-  m.def("nvshmem_create_tensor",
-        [](const std::vector<int64_t> shape, py::object dtype) {
-          auto cast_dtype = torch::python::detail::py_object_to_dtype(dtype);
-          return create_tensor(shape, cast_dtype);
-        });
+
   m.def("nvshmem_barrier_all", []() {
     check_nvshmem_init();
     nvshmem_barrier_all();
@@ -209,6 +230,13 @@ PYBIND11_MODULE(_pynvshmem, m) {
   m.def("nvshmem_barrier_all_on_stream", [](intptr_t stream) {
     nvshmemx_barrier_all_on_stream((cudaStream_t)stream);
   });
+
+  /* Tensor creation */
+  m.def("nvshmem_create_tensor",
+        [](const std::vector<int64_t> shape, py::object dtype) {
+          auto cast_dtype = torch::python::detail::py_object_to_dtype(dtype);
+          return create_tensor(shape, cast_dtype);
+        });
   m.def(
       "nvshmem_create_tensor_list_intra_node",
       [](const std::vector<int64_t> &shape, py::object dtype) {
