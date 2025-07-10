@@ -2,7 +2,7 @@
 # Licensed under the MIT License.
 
 import torch
-import triton_dist.pynvshmem as pynvshmem  # TODO: remove this
+import pynvshmem
 import datetime
 import os
 from typing import List, Union, Tuple, Callable, Sequence

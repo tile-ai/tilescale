@@ -4,14 +4,12 @@
 import argparse
 import torch
 import torch.distributed as dist
-import triton_dist
-import triton_dist.pynvshmem as pynvshmem  #TODO: use our own pynvshmem
+import pynvshmem  
 import tilelang
 import tilelang.language as T
-from tilelang.distributed.utils import init_distributed, dtype_map, perf_fn, dist_print
+from tilelang.distributed.utils import init_distributed, dtype_map, perf_fn, CUDA_CHECK
 from typing import List
 from cuda import cuda
-from triton_dist.utils import CUDA_CHECK
 
 tilelang.disable_cache()
 
@@ -26,7 +24,7 @@ def cp_engine_producer_all_gather_full_mesh_pull(
     ag_stream: torch.cuda.Stream,
     barrier_buffers: List[torch.Tensor],
 ):
-    M_per_rank, N = local_tensor.shape
+    M_per_rank, _ = local_tensor.shape
 
     rank_orders = [(rank + i) % num_ranks for i in range(num_ranks)]
 

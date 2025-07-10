@@ -2,13 +2,10 @@
 # Licensed under the MIT License.
 
 import torch
-import triton_dist.pynvshmem as pynvshmem
-import os
+import pynvshmem
 import tilelang
 import tilelang.language as T
-from tilelang.profiler import TensorSupplyType
 from tilelang.distributed.utils import init_distributed, dtype_map
-from triton_dist.utils import group_profile
 import argparse
 import random
 from triton_dist.kernels.nvidia import fast_all_to_all, all_to_all_post_process
@@ -315,7 +312,7 @@ def main():
     assert exp_indices.size(0) == token_num and exp_indices.size(1) == args.topk
     exp_indices = exp_indices.to("cuda")
     input = (
-        torch.rand(token_num, args.N, dtype=torch.float32).to(DTYPE_MAP[args.dtype]).to("cuda"))
+        torch.rand(token_num, args.N, dtype=torch.float32).to(dtype_map[args.dtype]).to("cuda"))
     scale_tensor = torch.rand(token_num, dtype=torch.float32).to("cuda")
 
     torch.cuda.synchronize()

@@ -12,7 +12,7 @@ from triton_dist.kernels.nvidia.reduce_scatter import (
     reduce_scatter_ring_push_1d_intra_node_sm,
     reduce_scatter_ring_push_1d_intra_node_sm_rma
 )
-import triton_dist.pynvshmem as pynvshmem #TODO: use our own pynvshmem
+import pynvshmem 
 import tilelang
 import tilelang.language as T
 from tilelang.distributed.utils import init_distributed, dtype_map, perf_fn, dist_print

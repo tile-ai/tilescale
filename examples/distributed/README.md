@@ -9,4 +9,8 @@ For example,
 
 ## Prerequisites
 
-Before running the examples, you need to install the `pynvshmem` package:
+Before running the examples, you need to install the `pynvshmem` package, which provides wrapped Python API for NVSHMEM.
+```bash 
+cd tilelang/distributed/pynvshmem
+pip install -e . -v # build in editable mode
+```

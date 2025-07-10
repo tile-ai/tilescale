@@ -82,7 +82,7 @@ void check_nvshmem_init() {
 NVSHMEMI_REPT_FOR_STANDARD_RMA_TYPES(NVSHMEMI_TYPENAME_P_IMPL_PYBIND)
 #undef NVSHMEMI_TYPENAME_P_IMPL_PYBIND
 
-inline torch::Tensor create_tensor(const std::vector<int64_t> &shape,
+inline torch::Tensor nvshmem_create_tensor(const std::vector<int64_t> &shape,
                                    c10::ScalarType dtype) {
   check_nvshmem_init();
   auto option_gpu =
@@ -98,7 +98,7 @@ inline torch::Tensor create_tensor(const std::vector<int64_t> &shape,
 }
 
 std::vector<torch::Tensor>
-nvshmem_create_tensor_list(const std::vector<int64_t> &shape,
+nvshmem_create_tensor_list_intra_node(const std::vector<int64_t> &shape,
                            c10::ScalarType dtype) {
   check_nvshmem_init();
   auto current_device = c10::cuda::current_device();
@@ -119,8 +119,8 @@ nvshmem_create_tensor_list(const std::vector<int64_t> &shape,
   void *ptr = nvshmem_malloc(size);
   // std::cerr << "exit nvshmem_malloc " << ptr << "\n";
 
-  CUDA_CHECK(cudaMemset(ptr, 0, size)); // memset the allocated buffer
-  PYNVSHMEM_CHECK(ptr != nullptr);
+  // CUDA_CHECK(cudaMemset(ptr, 0, size)); // memset the allocated buffer
+  CHECK(ptr != nullptr) << " nvshmem_malloc failed for malloc " << size;
   int rank_offset = rank - local_rank;
   for (int i = 0; i < local_world_size; i++) {
     // runs this call nvshmem failure, don't know why
@@ -153,6 +153,7 @@ nvshmem_create_tensor_list(const std::vector<int64_t> &shape,
   return tensors;
 }
 
+
 PYBIND11_MODULE(_pynvshmem, m) {
   /* Basic queries */
   m.def("nvshmem_my_pe", []() -> int {
@@ -172,6 +173,7 @@ PYBIND11_MODULE(_pynvshmem, m) {
     return nvshmem_team_n_pes(team);
   });
 
+  /* CUmodule related */
   m.def("nvshmemx_cumodule_init", [](intptr_t module) {
     CHECK_NVSHMEMX(nvshmemx_cumodule_init((CUmodule)module));
   });
@@ -179,6 +181,7 @@ PYBIND11_MODULE(_pynvshmem, m) {
     CHECK_NVSHMEMX(nvshmemx_cumodule_finalize((CUmodule)module));
   });
 
+  /* Memory related */
   m.def("nvshmem_malloc", [](size_t size) {
     void *ptr = nvshmem_malloc(size);
     if (ptr == nullptr) {
@@ -196,6 +199,8 @@ PYBIND11_MODULE(_pynvshmem, m) {
   m.def("nvshmemx_mc_ptr", [](nvshmemx_team_t team, intptr_t ptr) {
     return (intptr_t)nvshmemx_mc_ptr(team, (void *)ptr);
   });
+
+  /* Unique ID related */
   m.def("nvshmemx_get_uniqueid", []() {
     nvshmemx_uniqueid_t id;
     CHECK_NVSHMEMX(nvshmemx_get_uniqueid(&id));
@@ -217,17 +222,18 @@ PYBIND11_MODULE(_pynvshmem, m) {
     CHECK_NVSHMEMX(nvshmemx_init_attr(NVSHMEMX_INIT_WITH_UNIQUEID, &init_attr));
   });
 
-  /* Single-element put */
+  /* Single-element put for all dtypes */
 #define NVSHMEMI_TYPENAME_P_PYBIND(TYPENAME, TYPE)                             \
   m.def("nvshmem_" #TYPENAME "_p", &TYPENAME##_p);
   NVSHMEMI_REPT_FOR_STANDARD_RMA_TYPES(NVSHMEMI_TYPENAME_P_PYBIND)
 #undef NVSHMEMI_TYPENAME_P_PYBIND
 
+  /* Barrier related */
   m.def("nvshmem_barrier_all", []() {
     check_nvshmem_init();
     nvshmem_barrier_all();
   });
-  m.def("nvshmem_barrier_all_on_stream", [](intptr_t stream) {
+  m.def("nvshmemx_barrier_all_on_stream", [](intptr_t stream) {
     nvshmemx_barrier_all_on_stream((cudaStream_t)stream);
   });
 
@@ -235,13 +241,49 @@ PYBIND11_MODULE(_pynvshmem, m) {
   m.def("nvshmem_create_tensor",
         [](const std::vector<int64_t> shape, py::object dtype) {
           auto cast_dtype = torch::python::detail::py_object_to_dtype(dtype);
-          return create_tensor(shape, cast_dtype);
+          return nvshmem_create_tensor(shape, cast_dtype);
         });
   m.def(
       "nvshmem_create_tensor_list_intra_node",
       [](const std::vector<int64_t> &shape, py::object dtype) {
-        return nvshmem_create_tensor_list(
+        return nvshmem_create_tensor_list_intra_node(
             shape, torch::python::detail::py_object_to_dtype(std::move(dtype)));
       },
       py::arg("shape"), py::arg("dtype"));
+
+  /* RMA */
+  m.def("nvshmem_putmem",
+        [](intptr_t dest, const intptr_t source, size_t nelems, int pe) {
+          check_nvshmem_init();
+          nvshmem_putmem((void *)dest, (const void *)source, nelems, pe);
+        });
+  m.def("nvshmem_getmem",
+        [](intptr_t dest, const intptr_t source, size_t nelems, int pe) {
+          check_nvshmem_init();
+          nvshmem_getmem((void *)dest, (const void *)source, nelems, pe);
+        });
+
+  m.def("nvshmemx_putmem_on_stream",
+        [](intptr_t dest, const intptr_t source, size_t nelems, int pe,
+           intptr_t stream) {
+          check_nvshmem_init();
+          nvshmemx_putmem_on_stream((void *)dest, (const void *)source, nelems,
+                                    pe, (cudaStream_t)stream);
+        });
+  m.def("nvshmemx_getmem_on_stream",
+        [](intptr_t dest, const intptr_t source, size_t nelems, int pe,
+           intptr_t stream) {
+          check_nvshmem_init();
+          nvshmemx_getmem_on_stream((void *)dest, (const void *)source, nelems,
+                                    pe, (cudaStream_t)stream);
+        });
+  m.def("nvshmemx_putmem_signal_on_stream",
+        [](intptr_t dest, const intptr_t source, size_t nelems,
+           intptr_t sig_addr, uint64_t signal, int sig_op, int pe,
+           intptr_t stream) {
+          check_nvshmem_init();
+          nvshmemx_putmem_signal_on_stream((void *)dest, (const void *)source,
+                                           nelems, (uint64_t *)sig_addr, signal,
+                                           sig_op, pe, (cudaStream_t)stream);
+        });
 }

@@ -24,8 +24,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 if use_distributed:
-    # TODO: remove this
-    import triton_dist.pynvshmem as pynvshmem
+    import pynvshmem
     logger.info("Using distributed profiler")
 else:
     logger.info("Not using distributed profiler")
