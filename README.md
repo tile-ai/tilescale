@@ -30,7 +30,9 @@ At each layer, the associated memory may be shared among all units or distribute
 
 ## Tile-based Programming Interface
 Following the hierarchical hardware architecture, TileScale exposes a hierarchical programming interface. The fundamental unit of computation in TileScale is at the *tile* granularity. TileScale provides consistent tile-level compute, memory, and communication operators corresponding to each hardware scales.
-
+<div align="center">    <img src="./images/interface.png" alt="TileScale Programming Interface" width=80% />
+</div>
+  
 * *Compute*: A compute primitive takes input tensor tiles at certain memory layer and produces output tensor tiles. The same compute primitive can be used at different scale level, which will be translated to different implementations. A primitive at a high-level scale can be implemented by the lower-level-scale primitives. For example, a block-scale operator can be implemented by a group of warp-scale or thread-scale primitives.
   
 * *Memory*: The memory primitives are used to copy data tiles at certain memory layer, as well as to copy data tile between different memory layers.
@@ -39,20 +41,23 @@ Following the hierarchical hardware architecture, TileScale exposes a hierarchic
 
 A primitive for a certain scale level may have multiple implementations. For example, a copy primitive could be implemented using TMA or LSU, while a remote copy across GPUs might be implemented using copy engines, TMA, or LSU. TileScale provides default implementations for each primitive, along with a compilation process to tune the best implementation. Users can also specify particular implementations through arguments in the tile primitives.
 With this hierarchical interface, user can easily customize the computation at certain scale level. For example, we can leverage the DSMEM feature to implement a general cluster-scale GEMM primitive. 
-![](./images/interface.png "TileScale Programming Interface")
+  
 
 ## System Overview and Design
-![](./images/overview.png "TileScale system overview")
+<div align="center">    <img src="./images/overview.png" alt="TileScale system overview" width=50% />
+</div>
 The frontend of TileScale provides all the tile primitives, Python bindings, and related programming syntax. The middle layer consists of three modules: compiler, tile kernels, and cost model. The compiler module lowers the frontend program into an intermediate representation (IR), applies optimization passes, and lowers tile primitives to lower-level primitives. For example, a block-scale GEMM primitive can be either directly mapped to a pre-implemented kernel or lowered to low-level code.
 The tile-kernel module is a library that contains all the implementations of tile primitives.
 The cost model builds a performance database and provides lightweight performance feedback for specific optimization plans. This feedback is used by the compiler module to optimize the program.
 Finally, the backend module defines a configurable hardware architecture following the HDA abstraction. Unlike existing compilers that target few specific hardware, TileScale can compile a program to any user-defined architecture.
 
 ### Memory management
-![](./images/view.png "T.alloc and T.view")
+
 A tensor tile can be allocated at a specified memory layer for a certain scale compute. For example, the above example allocates a block-scale tile that physically resides in L0 (i.e., register) memory. This means the tile will be partitioned into each individual thread's registers, similar to the concept of a fragment in CUDA.
 To use the tile at different levels of scale, we can use the T.view primitive to reference the specific partition of the tile within the corresponding scale. In the above example, it could be viewed as a warpgroup-, warp-, or thread-scale tile.
 The layout and partition dimensions are either automatically inferred through a layout inference pass or specified by the user.
+<div align="center">    <img src="./images/view.png" alt="T.alloc and T.view" width=50% />
+</div>
 
 ### Parallel task scheduling
 TileScale introduces a *T.Scale* primitive to control which hardware scale the current computations are conducted on. 
