@@ -118,7 +118,7 @@ def gemm(
         with T.Scale("device"):
             A_global = T.view(A, layout=T.FullCol)
             B_global = T.view(B, layout=T.FullRow)
-            C_global = T.view(C, layout=T.Replicate)
+            C_global = T.view(C, layout=T.Replica)
             
         with T.Scale("block"):
             A_local = T.alloc((block_M, block_K), dtype, level="l0")
@@ -134,8 +134,9 @@ def gemm(
                     T.copy(A_local_wg, A_global[by * block_M, k * block_K])
                     T.copy(B_local_wg, B_global[k * block_K, bx * block_N])
                     T.gemm(A_local_wg, B_local_wg, C_local_wg)
-                # Allreduce C_local on L1
-                T.allreduce(C_local)
+                    
+                    # Allreduce C_local_wg through software-defined channel on L1
+                    T.allreduce(C_local_wg)
             T.copy(C_global[by * block_M, bx * block_N], C_local)
 
         with T.Scale("device") as dev_id, dev_num:
