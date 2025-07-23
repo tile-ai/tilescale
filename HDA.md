@@ -13,24 +13,40 @@
 #     arch_level_3: Node contains 8 GPUs
 hw_spec:
   pe:
-      - {name: pe_level_0, num_units: 1}
-      - {name: pe_level_1, num_units: 32}
-      - {name: pe_level_2, num_units: 4}
+      - {name: pe_level_0, num_sub_units: 1}
+      - {name: pe_level_1, num_sub_units: 32}
+      - {name: pe_level_2, num_sub_units: 4}
   pe_groups:
-      - {name: arch_level_0, num_units: 2}
-      - {name: arch_level_1, num_units: 9}
-      - {name: arch_level_2, num_units: 8}
-      - {name: arch_level_3, num_units: 8}
+      - {name: arch_level_0, num_sub_units: 2}
+      - {name: arch_level_1, num_sub_units: 9}
+      - {name: arch_level_2, num_sub_units: 8}
+      - {name: arch_level_3, num_sub_units: 8}
 
 hw_abstr:
   - {name: thread, target: pe_level_0}
-  - {name: warp, target: pe_level_1, infer_lambda: 'lambda _t, _b: _b // 32'}
-  - {name: warp_group, target: pe_level_2, infer_lambda: 'lambda _t, _b: _b // 4'}
-  - {name: block, target: pe_level_2, }
+  - {name: warp, target: pe_level_1}
+  - {name: warp_group, target: pe_level_2}
+  - {name: block, target: pe_level_2}
   - {name: cta_pair, target: arch_level_0}
   - {name: tbc, target: arch_level_1}
   - {name: gpu, target: arch_level_2}
   - {name: node, target: arch_level_3}
+
+hints:
+  warp:
+    - lambda _scales: _scales.thread // 32
+  warp_group:
+    - lambda _scales: _scales.warp // 4
+    - lambda _scales: _scales.thread // 128
+  block:
+    - lambda _scales: _scales.cta_pair * 2
+  cta_pair:
+    - ...
+
+constrains:
+  - lambda _scales: _scales.warp_group == _scales.warp // 4
+  - lambda _scales: _scales.warp == _scales.thread // 32
+  - ...
 ```
 ``` python
 from dataclasses import dataclass
@@ -38,13 +54,14 @@ from dataclasses import dataclass
 @dataclass
 class ComputeUnit():
     name: str
-    num_units: int
+    num_sub_units: int
 
 @dataclass
 class ScaleView():
     name: str
     target: str
-    infer_lambda: str
+    hints_lambdas: list[str]
+    constrains_lambdas: list[str]
     instance_num: int
     is_flatten: bool = False
 
@@ -58,6 +75,10 @@ class HardwareAbstraction:
     scales: list[ScaleView]
 
 @dataclass
+class ScalesInstance(HardwareAbstraction):
+    ...
+
+@dataclass
 class HDA:
     hw_spec: HardwareSpecification
     hw_abstr: HardwareAbstraction
@@ -66,7 +87,7 @@ class HDA:
     def from_yaml(yaml_file: str) -> 'HDA':
         ...
 
-    def instantiate(self, scale_views: list[ScaleView]) -> Instance:
+    def instantiate(self, scale_views: list[ScaleView]) -> ScalesInstance:
         ...
 ```
 
@@ -80,8 +101,10 @@ launched_instance = h100_hda.instantiate(scale_views=[
 ])
 with launched_instance:
     with T.Scale("block"):
-        with T.Scale("thread"):
-            ...
+        # Although the warp_group is not explicitly specified, it is automatically inferred from the hints
+        with T.Scale("warp_group"):
+            with T.Scale("thread"):
+                ...
 # Example 2: Launch 4096 blocks for the entire node, each block contains 256 threads
 launched_instance = h100_hda.instantiate(scale_views=[
     ScaleView(name="block", instance_num=4096, is_flatten=True),
