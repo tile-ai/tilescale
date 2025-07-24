@@ -17,10 +17,10 @@ hw_spec:
       - {name: pe_level_1, num_sub_units: 32}
       - {name: pe_level_2, num_sub_units: 4}
   pe_groups:
-      - {name: arch_level_0, num_sub_units: 2}
-      - {name: arch_level_1, num_sub_units: 9}
-      - {name: arch_level_2, num_sub_units: 8}
-      - {name: arch_level_3, num_sub_units: 8}
+      - {name: arch_level_0, num_sub_units: 2, topology: switch}
+      - {name: arch_level_1, num_sub_units: 9, topology: switch}
+      - {name: arch_level_2, num_sub_units: 8, topology: switch}
+      - {name: arch_level_3, num_sub_units: 8, topology: switch}
 
 hw_abstr:
   - {name: thread, target: pe_level_0}
@@ -55,6 +55,7 @@ from dataclasses import dataclass
 class ComputeUnit():
     name: str
     num_sub_units: int
+    topology: str  # switch, link, ring
 
 @dataclass
 class ScaleView():
@@ -63,6 +64,7 @@ class ScaleView():
     hints_lambdas: list[str]
     constrains_lambdas: list[str]
     instance_num: int
+    topology: str
     is_flatten: bool = False
 
 @dataclass
@@ -76,7 +78,11 @@ class HardwareAbstraction:
 
 @dataclass
 class ScalesInstance(HardwareAbstraction):
-    ...
+    def remove_scale(self, scale_name: str) -> tuple['ScalesInstance', ScaleView]:
+        ...
+
+    def insert_scale(self, scale_name: str, scale_layer: int, topology: str) -> 'ScalesInstance':
+        ...
 
 @dataclass
 class HDA:
@@ -136,9 +142,19 @@ with launched_instance:
             with T.Scale("warp"):
                 with T.Scale("thread"):
                     ...
-```
+# Example 5: Launch a kernel with a virtualized 2D mesh to perform a connon-style matrix multiplication
+launched_instance = h100_hda.instantiate(scale_views=[
+    ScaleView(name="block", instance_num=-1, is_flatten=True),
+    ScaleView(name="warp_group", instance_num=3),
+    ScaleView(name="warp", instance_num=4),
+    ScaleView(name="thread", instance_num=32),
+])
+tmp_instance, node_layer = launched_instance.remove_scale("node")
+node_x_layer, node_y_layer = node_layer.split([4, 4], ["link", "link"])
+launched_instance = tmp_instance.insert_scale("node_x_layer", -1).insert_scale("node_y_layer", -1)
 
-``` yaml
-# Example 2:
-# HDA description of Cerebras
+with launched_instance:
+    with T.Scale("node_x_layer"):
+        with T.Scale("node_y_layer"):
+            ...  # 2D mesh of virtualized 4x4 nodes
 ```
