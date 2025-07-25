@@ -11,26 +11,84 @@
 #     arch_level_1: GPC (Graphics Processing Cluster) contains 9 TPCs
 #     arch_level_2: GPU contains 8 GPCs
 #     arch_level_3: Node contains 8 GPUs
+memory:
+  - {name: register, capacity: 64 * 1024, trans, is_cache, ...}
+  - {name: shared, capacity: 224 * 1024}
+  - {name: l2, capacity: 50 * 1024 * 1024}
+  - {name: global, capacity: 80 * 1024 * 1024 * 1024} # 80GB
+
+compute_units:
+    # Instruction or compute hardward
+  sfu:
+    - ...
+  fma:
+    - ...
+  alu:
+    - ...
+  tensor_core:
+     - {instruction: "mma.m16n8k16", flopc: 128, in_dtype: float16, out_dtype: float16}
+     - ...
+  # B200 UTCMMA
+  ...:
+     - ...
+
+networks:
+  - {name: sm2sm, topology: switch, bandwidth: xxx, target: sm}
+  # ID - portmap, adjacent matrix
+  - {name: gpu2gpu, topology: customized, target: gpu, connections: [[xxx, xxx], [xxx, xxx]]}
+
+architecture:
+  - {name: core, num_units: 1, memory: [register], compute_units: [sfu, fma, alu]}
+  - {name: subcore, num_units: 32, memory: [], compute_units: [tensor_core]}
+  - {name: sm, num_units: 4, memory: [shared], compute_units: []}
+  - {name: tpc, num_units: 2, memory: [], compute_units: [], network: []}
+  - {name: gpc, num_units: 9, memory: [], compute_units: [], network: [sm2sm]}
+  - {name: gpu, num_units: 8, memory: [global, l2], compute_units: []}
+  - {name: node, num_units: 8, memory: [], compute_units: [], network: [gpu2gpu]}
+
+# TileScale Interface
+# instruction_granularity:
+tile_primitives:
+  - {name: thread, target: core}
+  - {name: warp, target: subcore}
+  - {name: warp_group, target: sm}
+  - {name: block, target: sm}
+  - {name: cta_pair, target: tpc}
+  - {name: tbc, target: gpc}
+  - {name: gpu, target: gpu}
+  - {name: node, target: node}
+```
+``` python
+class ComputeUnit():
+    name: str
+    num_units: int
+
+class Memory():
+    ...
+
+class Network():
+    name: str
+    topology: str
+    bandwidth: int
+    ...
+```
+``` yaml
 hw_spec:
   pe:
-      - {name: pe_level_0, num_sub_units: 1}
-      - {name: pe_level_1, num_sub_units: 32}
-      - {name: pe_level_2, num_sub_units: 4}
+      - {name: pe_level_0, num_sub_units: 1, int32/float...}
+      - {name: pe_level_1, num_sub_units: 32, ...}
+      - {name: pe_level_2, num_sub_units: 4, ...}
   pe_groups:
+      # using graph
       - {name: arch_level_0, num_sub_units: 2, topology: switch}
       - {name: arch_level_1, num_sub_units: 9, topology: switch}
       - {name: arch_level_2, num_sub_units: 8, topology: switch}
       - {name: arch_level_3, num_sub_units: 8, topology: switch}
 
-hw_abstr:
-  - {name: thread, target: pe_level_0}
-  - {name: warp, target: pe_level_1}
-  - {name: warp_group, target: pe_level_2}
-  - {name: block, target: pe_level_2}
-  - {name: cta_pair, target: arch_level_0}
-  - {name: tbc, target: arch_level_1}
-  - {name: gpu, target: arch_level_2}
-  - {name: node, target: arch_level_3}
+
+
+memory_def
+  - l0/l1/l2/l3
 
 hints:
   warp:
@@ -98,14 +156,15 @@ class HDA:
 ```
 
 ``` python
-h100_hda = HDA.from_yaml("h100.yaml")
 # Example 1: Launch 512 blocks per GPU, each block contains 256 threads
-launched_instance = h100_hda.instantiate(scale_views=[
-    ScaleView(name="gpu", instance_num=-1),                         # -1 means auto-inferring from the hw_spec
-    ScaleView(name="block", instance_num=512, is_flatten=True),     # flatten means collapsing the intermediate scales
-    ScaleView(name="thread", instance_num=256, is_flatten=True),
-])
-with launched_instance:
+with T.Kernel(
+    target=HDA.from_yaml("h100.yaml"),
+    launch_config={
+        "gpu": -1,
+        "block": [512, 1, 1],
+        "thread": [256, 1, 1]
+    },
+):
     with T.Scale("block"):
         # Although the warp_group is not explicitly specified, it is automatically inferred from the hints
         with T.Scale("warp_group"):
