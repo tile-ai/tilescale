@@ -1,4 +1,3 @@
-import os
 import tilelang
 import tilelang.language as T
 from tilelang.profiler import TensorSupplyType

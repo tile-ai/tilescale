@@ -1,4 +1,4 @@
-# Test for basic nvshmem queries 
+# Test for basic nvshmem queries
 
 import torch
 import torch.distributed
@@ -8,7 +8,7 @@ import datetime
 
 if __name__ == '__main__':
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-    assert WORLD_SIZE > 2 
+    assert WORLD_SIZE > 2
     RANK = int(os.environ.get("RANK", 0))
     LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
 

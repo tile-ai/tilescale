@@ -1,6 +1,4 @@
 import torch
-import pynvshmem
-import os
 import tilelang
 import tilelang.language as T
 from gemm_rs_utils import GEMMReduceScatterTensorParallelContext
@@ -10,7 +8,7 @@ tilelang.disable_cache()
 
 def gemm_rs_kernel(world_size, M, N, local_K, dtype="float16"):
 
-    local_chunk = T.ceildiv(M, world_size)
+    local_chunk = T.ceildiv(M, world_size)  # noqa: F841
 
     @T.prim_func
     def main(
@@ -28,13 +26,13 @@ def gemm_rs_kernel(world_size, M, N, local_K, dtype="float16"):
 
 def gemm_rs_op(input, weight, ctx: GEMMReduceScatterTensorParallelContext, persistent: bool = True):
     world_size = ctx.rs_ctx.world_size
-    local_world_size = ctx.rs_ctx.local_world_size
+    local_world_size = ctx.rs_ctx.local_world_size  # noqa: F841
     rs_stream = ctx.rs_stream
     output_dtype = ctx.output_dtype
-    num_gemm_sms = ctx.num_gemm_sms
+    num_gemm_sms = ctx.num_gemm_sms  # noqa: F841
 
     orig_M = input.shape[0]
-    orig_M_per_rank = orig_M // world_size
+    orig_M_per_rank = orig_M // world_size  # noqa: F841
     M, local_K = input.shape
     N = weight.shape[0]
     assert N == ctx.rs_ctx.N
@@ -47,7 +45,7 @@ def gemm_rs_op(input, weight, ctx: GEMMReduceScatterTensorParallelContext, persi
 
     output = torch.empty((local_M, N), dtype=output_dtype, device=input.device)
     workspace = torch.zeros((world_size,), dtype=torch.int32, device=input.device)
-    gemm_out = ctx.get_gemm_out_buf(input)
+    gemm_out = ctx.get_gemm_out_buf(input)  # noqa: F841
     scatter_signal = ctx.rs_ctx.scatter_signal_buf
 
     if persistent:

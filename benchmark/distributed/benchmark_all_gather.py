@@ -1,7 +1,7 @@
 import argparse
 import torch
 import torch.distributed as dist
-import pynvshmem  
+import pynvshmem
 import tilelang
 import tilelang.language as T
 from tilelang.distributed.utils import init_distributed, dtype_map, perf_fn, CUDA_CHECK
@@ -46,7 +46,7 @@ def cp_engine_producer_all_gather_full_mesh_pull(
 def allgather(PE_num, M, N, dtype="float16", threads=128):
     M_per_rank = M // PE_num
     block_M = 4
-        
+
     @T.prim_func
     def a2a_pull(
             A: T.Tensor((M_per_rank, N), dtype),  # type: ignore
@@ -56,10 +56,10 @@ def allgather(PE_num, M, N, dtype="float16", threads=128):
             mype = T.get_pe()
             npes = T.get_pe_num()
             peer = (mype + by + 1) % npes
-            
+
             T.getmem_nbi_block(
-                T.address_of(B[peer*M_per_rank+bx*block_M, 0]), T.address_of(A[bx*block_M, 0]),
-                block_M * N * dtype_map[dtype].itemsize, peer)
+                T.address_of(B[peer * M_per_rank + bx * block_M, 0]),
+                T.address_of(A[bx * block_M, 0]), block_M * N * dtype_map[dtype].itemsize, peer)
             # We don't need a barrier for the pull mode
 
     return a2a_pull
@@ -138,7 +138,7 @@ if __name__ == '__main__':
         out = pynvshmem.nvshmem_create_tensor([M, N], torch_dtype)
         out[RANK * M_per_rank:(RANK + 1) * M_per_rank, :].copy_(local_data)
         kernel(ag_buffer, out)
-        
+
         return out
 
     dist.barrier(TP_GROUP)
@@ -147,7 +147,8 @@ if __name__ == '__main__':
     # Tested on 4A100 with full-mesh NVLink, comparable with Triton-dist and ~20x faster than Torch
 
     # Check correctness
-    assert torch.allclose(tl_out, torch_out, atol=0, rtol=0), f'max error: {(tl_out - torch_out).abs().max()}'
+    assert torch.allclose(
+        tl_out, torch_out, atol=0, rtol=0), f'max error: {(tl_out - torch_out).abs().max()}'
     print(f"rank {RANK} check passed.✅")
-    
+
     dist.destroy_process_group()

@@ -1,7 +1,6 @@
 import torch
 import pynvshmem
 
-
 DTYPE_MAP = {
     "bfloat16": torch.bfloat16,
     "float16": torch.float16,

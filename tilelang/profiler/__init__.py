@@ -133,6 +133,7 @@ class Profiler:
                     raise ValueError(f"Unknown supply type: {self.supply_type}")
                 ins.append(tensor)
         return ins
+
     def _get_params(self, with_output=False):
         params = []
         for i in range(len(self.params)):
@@ -262,7 +263,7 @@ class Profiler:
                 ]
 
     def run_once(self, func: Optional[Callable] = None):
-        if USE_DISTRIBUTED:
+        if USE_DISTRIBUTED:  # noqa: SIM108
             # self.init_distributed()
             ins = self._get_distributed_inputs()
         else:

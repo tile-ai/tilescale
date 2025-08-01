@@ -1,7 +1,6 @@
 """The language interface for tl programs."""
 
 from tvm import tir
-import tilelang.language as T
 
 
 def get_pe():

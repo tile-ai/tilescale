@@ -61,9 +61,9 @@ def pathlib_wrapper(func):
 
 @pathlib_wrapper
 def nvshmem_deps():
-    nvshmem_home = Path(os.environ.get("NVSHMEM_SRC", root_path/"../../../3rdparty/nvshmem_src"))
-    include_dirs = [nvshmem_home/"build/src/include"]
-    library_dirs = [nvshmem_home/"build/src/lib"]
+    nvshmem_home = Path(os.environ.get("NVSHMEM_SRC", root_path / "../../../3rdparty/nvshmem_src"))
+    include_dirs = [nvshmem_home / "build/src/include"]
+    library_dirs = [nvshmem_home / "build/src/lib"]
     libraries = ["nvshmem_host", "nvshmem_device"]
     return include_dirs, library_dirs, libraries
 

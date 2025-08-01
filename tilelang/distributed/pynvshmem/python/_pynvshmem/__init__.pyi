@@ -9,8 +9,8 @@ def nvshmemx_cumodule_init(module: np.intp) -> None:
 
 def nvshmemx_cumodule_finalize(module: np.intp) -> None:
     ...
-    
-    
+
+
 def nvshmem_my_pe() -> np.int32:
     ...
 
@@ -29,11 +29,11 @@ def nvshmem_team_n_pes(team: np.int32) -> np.int32:
 
 def nvshmem_malloc(size: np.uint) -> np.intp:
     ...
-    
+
 
 def nvshmem_ptr(ptr, peer):
     ...
-    
+
 
 def nvshmemx_mc_ptr(team, ptr):
     """ DON'T CALL this function if NVLS is not used on NVSHMEM 3.2.5!!!
@@ -71,19 +71,19 @@ def nvshmem_putmem(dest: np.intp, source: np.intp, nelems: int, pe: int):
     ...
 
 
-def nvshmemx_getmem_on_stream(dest: np.intp, source: np.intp, nelems: int, pe: int, stream: np.intp):
+def nvshmemx_getmem_on_stream(dest: np.intp, source: np.intp, nelems: int, pe: int,
+                              stream: np.intp):
     ...
 
 
-def nvshmemx_putmem_on_stream(dest: np.intp, source: np.intp, nelems: int, pe: int, stream: np.intp):
+def nvshmemx_putmem_on_stream(dest: np.intp, source: np.intp, nelems: int, pe: int,
+                              stream: np.intp):
     ...
 
 
-def nvshmemx_putmem_signal_on_stream(dest: np.intp, source: np.intp, nelems: int, sig_add: np.intp, signal: int,
-                                     sig_op: int, pe: int, stream: np.intp):
+def nvshmemx_putmem_signal_on_stream(dest: np.intp, source: np.intp, nelems: int, sig_add: np.intp,
+                                     signal: int, sig_op: int, pe: int, stream: np.intp):
     ...
-
-
 
 
 # torch related

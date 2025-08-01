@@ -24,7 +24,7 @@ def _CUDA_CHECK(err):
             raise RuntimeError(f"Cuda Error: {err}: {cudart.cudaGetErrorString(err)}")
     else:
         raise RuntimeError(f"Unknown error type: {err}")
-    
+
 
 def broadcast_cpu(tensor: torch.Tensor, src: int, group: torch.distributed.ProcessGroup):
     if not tensor.is_cuda:
@@ -50,15 +50,12 @@ def init_nvshmem_by_uniqueid(group: torch.distributed.ProcessGroup):
     nvshmemx_init_attr_with_uniqueid(rank, nranks, unique_id)  # noqa: F405
     nvshmem_barrier_all()
     torch.cuda.synchronize()
-    
+
 
 """Host-side signaling functions."""
 
-def write_i32(
-    tensor: torch.Tensor, 
-    value: int,
-    stream: Optional[torch.cuda.Stream] = None
-):
+
+def write_i32(tensor: torch.Tensor, value: int, stream: Optional[torch.cuda.Stream] = None):
     """Atomic write an int32 value to a tensor.
     Args:
         tensor (torch.Tensor): The tensor to write to, must be of dtype torch.int32.
@@ -71,20 +68,16 @@ def write_i32(
     assert tensor.numel() == 1, "tensor must have exactly one element"
     if stream is None:
         stream = torch.cuda.current_stream()
-    (err, ) = cuda.cuStreamWriteValue32(
-            stream.cuda_stream,
-            tensor.data_ptr(),
-            value,
-            cuda.CUstreamWriteValue_flags.CU_STREAM_WRITE_VALUE_DEFAULT,
-        )
+    (err,) = cuda.cuStreamWriteValue32(
+        stream.cuda_stream,
+        tensor.data_ptr(),
+        value,
+        cuda.CUstreamWriteValue_flags.CU_STREAM_WRITE_VALUE_DEFAULT,
+    )
     _CUDA_CHECK(err)
 
 
-def write_u64(
-    tensor: torch.Tensor, 
-    value: int,
-    stream: Optional[torch.cuda.Stream] = None
-):
+def write_u64(tensor: torch.Tensor, value: int, stream: Optional[torch.cuda.Stream] = None):
     """Atomic write an uint64 value to a tensor.
     Args:
         tensor (torch.Tensor): The tensor to write to, must be of dtype torch.uint64.
@@ -97,12 +90,12 @@ def write_u64(
     assert tensor.numel() == 1, "tensor must have exactly one element"
     if stream is None:
         stream = torch.cuda.current_stream()
-    (err, ) = cuda.cuStreamWriteValue64(
-            stream.cuda_stream,
-            tensor.data_ptr(),
-            value,
-            cuda.CUstreamWriteValue_flags.CU_STREAM_WRITE_VALUE_DEFAULT,
-        )
+    (err,) = cuda.cuStreamWriteValue64(
+        stream.cuda_stream,
+        tensor.data_ptr(),
+        value,
+        cuda.CUstreamWriteValue_flags.CU_STREAM_WRITE_VALUE_DEFAULT,
+    )
     _CUDA_CHECK(err)
 
 
@@ -123,7 +116,6 @@ NVSHMEM_TEAM_GPU_LEADERS_INDEX = 5
 NVSHMEM_TEAMS_MIN = 6
 NVSHMEM_TEAM_INDEX_MAX = sys.maxsize
 
-
 # class nvshmemi_cmp_type(Enum):
 NVSHMEM_CMP_EQ = 0
 NVSHMEM_CMP_NE = 1
@@ -132,7 +124,6 @@ NVSHMEM_CMP_LE = 3
 NVSHMEM_CMP_LT = 4
 NVSHMEM_CMP_GE = 5
 NVSHMEM_CMP_SENTINEL = sys.maxsize
-
 
 # class nvshmemi_amo_t(Enum):
 NVSHMEMI_AMO_ACK = 1

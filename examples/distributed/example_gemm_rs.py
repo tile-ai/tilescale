@@ -1,11 +1,7 @@
 import torch
-import random
 import argparse
 import os
-from functools import partial
 import tilelang
-import tilelang.language as T
-from tilelang.profiler import TensorSupplyType
 from tilelang.distributed.utils import init_distributed, generate_data
 from gemm_rs_kernel import gemm_rs
 from gemm_rs_utils import create_gemm_rs_context

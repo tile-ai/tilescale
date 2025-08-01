@@ -79,7 +79,7 @@ def parse_args():
 def generate_random_exp_indices(token_num, total_num_experts, topk):
     exp_indices = []
     exp_list = list(range(total_num_experts))
-    for tid in range(token_num):
+    for _ in range(token_num):
         top_selected = random.sample(exp_list, topk)
         exp_indices.append(top_selected)
     return torch.Tensor(exp_indices).int()

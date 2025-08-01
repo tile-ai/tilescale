@@ -38,8 +38,8 @@ class PassConfigKey(str, Enum):
 
     TL_ENABLE_AGGRESSIVE_SHARED_MEMORY_MERGE = "tl.enable_aggressive_shared_memory_merge"
     """Enable aggressive merge of shared memory allocations. Default: False"""
-    
-    TL_DISABLE_RDC = "tl.disable_rdc"  
+
+    TL_DISABLE_RDC = "tl.disable_rdc"
     """Disable RDC (Relocatable Device Code) compilation in distributed programming. Default: False"""
     # (wt) Introduced to temporarily avoid the bug in https://github.com/tile-ai/tilelang/issues/659
 

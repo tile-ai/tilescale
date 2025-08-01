@@ -4,7 +4,7 @@ import torch.distributed as dist
 import pynvshmem
 import tilelang
 import tilelang.language as T
-from tilelang.distributed.utils import init_distributed, dtype_map, perf_fn, dist_print
+from tilelang.distributed.utils import init_distributed, dtype_map, perf_fn
 
 
 def allgather(PE_num, M, N, dtype="float16", threads=128):
@@ -35,9 +35,7 @@ def allgather(PE_num, M, N, dtype="float16", threads=128):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--M", type=int,
-        default=8192)
+    parser.add_argument("--M", type=int, default=8192)
     parser.add_argument("--N", type=int, default=12288)
     parser.add_argument(
         "--dtype", type=str, default="float16", choices=["float16", "float32", "bfloat16"])

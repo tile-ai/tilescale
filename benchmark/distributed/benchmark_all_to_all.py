@@ -1,5 +1,4 @@
 import torch
-import pynvshmem
 import tilelang
 import tilelang.language as T
 from tilelang.distributed.utils import init_distributed, dtype_map
@@ -137,7 +136,7 @@ def parse_args():
 def generate_random_exp_indices(token_num, total_num_experts, topk):
     exp_indices = []
     exp_list = list(range(total_num_experts))
-    for tid in range(token_num):
+    for _ in range(token_num):
         top_selected = random.sample(exp_list, topk)
         exp_indices.append(top_selected)
     return torch.Tensor(exp_indices).int()
@@ -187,7 +186,7 @@ def calc_gather_index(
     ntokens, topk = scatter_index.shape
     gather_index = torch.zeros(row_end - row_start, dtype=torch.int32, device=scatter_index.device)
     topk_index = torch.zeros(row_end - row_start, dtype=torch.int32, device=scatter_index.device)
-    grid = lambda META: (triton.cdiv(ntokens * topk, META["BLOCK_SIZE"]),)
+    grid = lambda META: (triton.cdiv(ntokens * topk, META["BLOCK_SIZE"]),)  # noqa: E731
     _kernel[grid](
         scatter_index,
         gather_index,

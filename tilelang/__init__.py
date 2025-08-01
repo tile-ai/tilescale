@@ -5,6 +5,7 @@ import ctypes
 import logging
 from tqdm import tqdm
 
+
 class TqdmLoggingHandler(logging.Handler):
     """Custom logging handler that directs log output to tqdm progress bar to avoid interference."""
 
@@ -52,8 +53,7 @@ _init_logger()
 
 logger = logging.getLogger(__name__)
 
-
-from .env import SKIP_LOADING_TILELANG_SO, USE_DISTRIBUTED
+from .env import SKIP_LOADING_TILELANG_SO, USE_DISTRIBUTED  # noqa: F401
 from .env import enable_cache, disable_cache, is_cache_enabled  # noqa: F401
 
 import tvm
