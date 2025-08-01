@@ -72,6 +72,7 @@ if __name__ == '__main__':
     assert torch.cuda.get_device_capability()[0] >= 9, '❗This benchmark requires sm_90 or higher'
 
     WORLD_SIZE, RANK, LOCAL_RANK, TP_GROUP = init_distributed(return_tp_group=True)
+    torch.cuda.set_device(LOCAL_RANK)
     assert WORLD_SIZE <= 8, "This benchmark is designed for intra-node RS"
 
     args = parse_args()

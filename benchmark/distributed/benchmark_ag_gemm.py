@@ -19,7 +19,8 @@ import tilelang
 import tilelang.language as T
 from tilelang.carver.arch import driver
 from tilelang.distributed.utils import init_distributed, dtype_map, perf_fn
-from triton_dist.kernels.nvidia.allgather_gemm import ag_gemm
+from triton_dist.kernels.nvidia.allgather_gemm import ag_gemm, create_ag_gemm_context
+from triton_dist.utils import init_nvshmem_by_torch_process_group
 from functools import partial
 
 tilelang.disable_cache()
@@ -39,7 +40,7 @@ def matmut_transpose(rank,
                      block_N,
                      block_K,
                      dtype="float16",
-                     threads=128,
+                     threads=256,
                      persistent=False) -> tilelang.JITKernel:
     accum_dtype = "float32"
     signal_dtype = "uint64"  # NVSHMEM requires uint64 for signal
@@ -58,27 +59,26 @@ def matmut_transpose(rank,
             signal: T.Tensor((num_ranks), signal_dtype),  # type: ignore
             C: T.Tensor((M, N_per_rank), dtype),  # type: ignore
     ):
-        with T.Kernel(M_blocks, N_blocks, threads=threads) as (bx, by):
+        with T.Kernel(N_blocks, M_blocks, threads=threads) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_N, block_K), dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             C_shared = T.alloc_shared((block_M, block_N), dtype)
 
             # thread-block swizzle for allgather
-            T.use_swizzle(10, order="column")
-            bx = (bx + rank * M_blocks_per_rank) % M_blocks
-
+            T.use_swizzle(10, order="column", offset=rank * M_blocks_per_rank)
+            
             T.clear(C_local)
 
-            src_rank = bx // M_blocks_per_rank
+            src_rank = by // M_blocks_per_rank
             T.signal_wait_until(T.address_of(signal[src_rank]), T.NVSHMEM_CMP_EQ, 1)
             for k in T.Pipelined(K_stages, num_stages=3):
-                T.copy(A[bx * block_M, k * block_K], A_shared)
-                T.copy(B[by * block_N, k * block_K], B_shared)
+                T.copy(A[by * block_M, k * block_K], A_shared)
+                T.copy(B[bx * block_N, k * block_K], B_shared)
                 T.gemm(A_shared, B_shared, C_local, transpose_B=True)
 
             T.copy(C_local, C_shared)
-            T.copy(C_shared, C[bx * block_M, by * block_N])
+            T.copy(C_shared, C[by * block_M, bx * block_N])
 
     @T.prim_func
     def persistent_kernel(
@@ -94,9 +94,6 @@ def matmut_transpose(rank,
             C_shared = T.alloc_shared((block_M, block_N), dtype)
 
             for bx, by in T.Persistent([M_blocks, N_blocks], sm_num, block_id):
-                # thread-block swizzle for allgather
-                bx = (bx + rank * M_blocks_per_rank) % M_blocks
-
                 T.clear(C_local)
 
                 src_rank = bx // M_blocks_per_rank
@@ -144,9 +141,9 @@ def overlapped_ag_gemm(
         M=M,
         N_per_rank=N_per_rank,
         K=K,
-        block_M=128,
-        block_N=128,
-        block_K=128,
+        block_M=128,  
+        block_N=256,
+        block_K=64,
         dtype=dtype,
         threads=threads,
         persistent=persistent)
@@ -194,7 +191,7 @@ def parse_args():
     parser.add_argument("--K", type=int, default=12288)
     parser.add_argument(
         "--dtype", type=str, default="float16", choices=["float16", "float32", "bfloat16"])
-    parser.add_argument("--threads", type=int, default=128, help="number of threads in a block")
+    parser.add_argument("--threads", type=int, default=256, help="number of threads in a block")
     parser.add_argument(
         "--persistent", action='store_true', default=False, help="use persistent GEMM consumers")
     parser.add_argument("--print_source", action="store_true", help="print kernel source code")
@@ -205,8 +202,9 @@ def parse_args():
 
 if __name__ == '__main__':
     assert torch.cuda.get_device_capability()[0] >= 9, '❗This benchmark requires sm_90 or higher'
-
+    
     WORLD_SIZE, RANK, LOCAL_RANK, TP_GROUP = init_distributed(return_tp_group=True)
+    torch.cuda.set_device(LOCAL_RANK)
     assert WORLD_SIZE <= 8, "This benchmark is designed for intra-node AG-GEMM"
 
     args = parse_args()
@@ -233,19 +231,24 @@ if __name__ == '__main__':
     print(f"rank {RANK} torch AG-GEMM avg time: {torch_t} ms")
 
     # Benchmark Triton-dist (overlapped)
+    init_nvshmem_by_torch_process_group(TP_GROUP)
+    ag_intranode_stream = torch.cuda.Stream(priority=-1)
+
+    ctx = create_ag_gemm_context(A, B, RANK, PE_num, max_M=M, for_correctness=False, ag_intranode_stream=ag_intranode_stream)
     def triton_ag_gemm(persistent, autotune):
-        return ag_gemm(A, B, rank=RANK, num_ranks=PE_num, persistent=persistent, autotune=autotune)
+        return ag_gemm(A, B, ctx=ctx, rank=RANK, num_ranks=PE_num, persistent=persistent, autotune=autotune)
 
     dist.barrier(TP_GROUP)
     triton_ag_gemm = partial(triton_ag_gemm, persistent=False, autotune=False)
     tt_out, tt_t = perf_fn(triton_ag_gemm, warmup, repeat)
     print(f"rank {RANK} triton AG-GEMM avg time: {tt_t} ms")
+    
 
     # Benchmark Tilelang-dist (overlapped)
     if args.persistent:
-        print("Use persistent AG-GEMM consumers...")
+        print("Use persistent GEMM consumers...")
     else:
-        print("Use non-persistent AG-GEMM consumers...")
+        print("Use non-persistent GEMM consumers...")
 
     def tilelang_ag_gemm():
         return overlapped_ag_gemm(A, B, rank=RANK, num_ranks=PE_num, persistent=args.persistent)

@@ -82,6 +82,7 @@ def parse_args():
 
 if __name__ == '__main__':
     WORLD_SIZE, RANK, LOCAL_RANK, TP_GROUP = init_distributed(return_tp_group=True)
+    torch.cuda.set_device(LOCAL_RANK)
     assert WORLD_SIZE <= 8, "This benchmark is designed for intra-node communication"
 
     args = parse_args()
