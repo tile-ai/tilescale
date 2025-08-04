@@ -20,7 +20,6 @@ import tilelang.language as T
 from tilelang.carver.arch import driver
 from tilelang.distributed.utils import init_distributed, dtype_map, perf_fn
 from triton_dist.kernels.nvidia.allgather_gemm import ag_gemm, create_ag_gemm_context
-from triton_dist.utils import init_nvshmem_by_torch_process_group
 from functools import partial
 
 tilelang.disable_cache()
@@ -67,11 +66,11 @@ def matmut_transpose(rank,
 
             # thread-block swizzle for allgather
             T.use_swizzle(10, order="column", offset=rank * M_blocks_per_rank)
-            
+
             T.clear(C_local)
 
             src_rank = by // M_blocks_per_rank
-            T.signal_wait_until(T.address_of(signal[src_rank]), T.NVSHMEM_CMP_EQ, 1)
+            T.signal_wait_until(T.address_of(signal[src_rank]), T.CmpType.EQ, 1)
             for k in T.Pipelined(K_stages, num_stages=3):
                 T.copy(A[by * block_M, k * block_K], A_shared)
                 T.copy(B[bx * block_N, k * block_K], B_shared)
@@ -97,7 +96,7 @@ def matmut_transpose(rank,
                 T.clear(C_local)
 
                 src_rank = bx // M_blocks_per_rank
-                T.signal_wait_until(T.address_of(signal[src_rank]), T.NVSHMEM_CMP_EQ, 1)
+                T.signal_wait_until(T.address_of(signal[src_rank]), T.CmpType.EQ, 1)
 
                 for k in T.Pipelined(K_stages, num_stages=3):
                     T.copy(A[bx * block_M, k * block_K], A_shared)
@@ -141,7 +140,7 @@ def overlapped_ag_gemm(
         M=M,
         N_per_rank=N_per_rank,
         K=K,
-        block_M=128,  
+        block_M=128,
         block_N=256,
         block_K=64,
         dtype=dtype,
@@ -166,7 +165,7 @@ def overlapped_ag_gemm(
 
     with torch.cuda.stream(ag_stream):
         ag_buffer[rank][rank * M_per_rank:(rank + 1) * M_per_rank, :].copy_(A)
-        pynvshmem.write_u64(signal_buffer[rank], 1, ag_stream)
+        pynvshmem.write64_on_stream(signal_buffer[rank], 1, ag_stream)
         pynvshmem.nvshmemx_barrier_all_on_stream(
             ag_stream.cuda_stream)  # Ensure visible to all ranks
         rank_orders = [(rank + i) % num_ranks for i in range(1, num_ranks)]
@@ -174,7 +173,7 @@ def overlapped_ag_gemm(
             dst = ag_buffer[rank][src_rank * M_per_rank:(src_rank + 1) * M_per_rank, :]
             src = ag_buffer[src_rank][src_rank * M_per_rank:(src_rank + 1) * M_per_rank, :]
             dst.copy_(src)
-            pynvshmem.write_u64(signal_buffer[src_rank], 1, ag_stream)
+            pynvshmem.write64_on_stream(signal_buffer[src_rank], 1, ag_stream)
 
     with torch.cuda.stream(gemm_stream):
         out = consumer(ag_buffer[rank], B, signal_buffer)
@@ -202,9 +201,8 @@ def parse_args():
 
 if __name__ == '__main__':
     assert torch.cuda.get_device_capability()[0] >= 9, '❗This benchmark requires sm_90 or higher'
-    
+
     WORLD_SIZE, RANK, LOCAL_RANK, TP_GROUP = init_distributed(return_tp_group=True)
-    torch.cuda.set_device(LOCAL_RANK)
     assert WORLD_SIZE <= 8, "This benchmark is designed for intra-node AG-GEMM"
 
     args = parse_args()
@@ -231,18 +229,19 @@ if __name__ == '__main__':
     print(f"rank {RANK} torch AG-GEMM avg time: {torch_t} ms")
 
     # Benchmark Triton-dist (overlapped)
-    init_nvshmem_by_torch_process_group(TP_GROUP)
     ag_intranode_stream = torch.cuda.Stream(priority=-1)
 
-    ctx = create_ag_gemm_context(A, B, RANK, PE_num, max_M=M, for_correctness=False, ag_intranode_stream=ag_intranode_stream)
+    ctx = create_ag_gemm_context(
+        A, B, RANK, PE_num, max_M=M, for_correctness=False, ag_intranode_stream=ag_intranode_stream)
+
     def triton_ag_gemm(persistent, autotune):
-        return ag_gemm(A, B, ctx=ctx, rank=RANK, num_ranks=PE_num, persistent=persistent, autotune=autotune)
+        return ag_gemm(
+            A, B, ctx=ctx, rank=RANK, num_ranks=PE_num, persistent=persistent, autotune=autotune)
 
     dist.barrier(TP_GROUP)
     triton_ag_gemm = partial(triton_ag_gemm, persistent=False, autotune=False)
     tt_out, tt_t = perf_fn(triton_ag_gemm, warmup, repeat)
     print(f"rank {RANK} triton AG-GEMM avg time: {tt_t} ms")
-    
 
     # Benchmark Tilelang-dist (overlapped)
     if args.persistent:

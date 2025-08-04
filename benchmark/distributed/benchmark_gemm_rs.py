@@ -8,34 +8,34 @@ import torch.distributed as dist
 import pynvshmem
 import tilelang
 import tilelang.language as T
-from tilelang.carver.arch import driver
+# from tilelang.carver.arch import driver
 from tilelang.distributed.utils import init_distributed, dtype_map, perf_fn
 
 tilelang.disable_cache()
 
 
-@tilelang.jit(
-    pass_configs={"tl.disable_rdc": True}
-    #FIXME: https://github.com/tile-ai/tilelang/issues/659
-)
+@tilelang.jit(pass_configs={"tl.disable_rdc": True}
+              #FIXME: https://github.com/tile-ai/tilelang/issues/659
+             )
 def fused_gemm_scatter(rank,
-                     num_ranks,
-                     M,
-                     N,
-                     K_per_rank,
-                     block_M,
-                     block_N,
-                     block_K,
-                     dtype="float16",
-                     threads=128,
-                     persistent=False) -> tilelang.JITKernel:
+                       num_ranks,
+                       M,
+                       N,
+                       K_per_rank,
+                       block_M,
+                       block_N,
+                       block_K,
+                       dtype="float16",
+                       threads=128,
+                       persistent=False) -> tilelang.JITKernel:
     accum_dtype = "float32"
 
     assert M % block_M == 0 and N % block_N == 0 and K_per_rank % block_K == 0
-    M_blocks, N_blocks, K_stages = T.ceildiv(M, block_M), T.ceildiv(N, block_N), T.ceildiv(K_per_rank, block_K)
+    M_blocks, N_blocks, K_stages = T.ceildiv(M, block_M), T.ceildiv(N, block_N), T.ceildiv(
+        K_per_rank, block_K)
     M_blocks_per_rank = M_blocks // num_ranks
 
-    sm_num = driver.get_num_sms()  # Get # of SMs for persistent kernel
+    # sm_num = driver.get_num_sms()  # Get # of SMs for persistent kernel
 
     @T.prim_func
     def nonpersistent_kernel(
@@ -51,7 +51,7 @@ def fused_gemm_scatter(rank,
 
             # thread-block swizzle for allgather
             T.use_swizzle(M_blocks, order="column")
-            
+
             T.clear(C_local)
 
             for k in T.Pipelined(K_stages, num_stages=3):
@@ -60,15 +60,12 @@ def fused_gemm_scatter(rank,
                 T.gemm(A_shared, B_shared, C_local, transpose_B=True)
 
             T.copy(C_local, C_shared)
+            T.copy(C_shared, C[by, bx, :, :])
             peer = by // M_blocks_per_rank
             T.putmem_nbi_block(
-                T.address_of(C[by, bx, 0, 0]),
-                T.address_of(C_shared[0, 0]), 
-                block_M * block_N * dtype_map[dtype].itemsize, 
-                peer
-            )
-            
-            
+                T.address_of(C[by, bx, 0, 0]), T.address_of(C[by, bx, 0, 0]),
+                block_M * block_N * dtype_map[dtype].itemsize, peer)
+
     assert not persistent
     return nonpersistent_kernel
 
@@ -94,13 +91,13 @@ def overlapped_gemm_rs(
     Returns:
         torch.Tensor: Output tensor of shape (M_per_rank, N).
     """
-    
+
     M, K_per_rank = input.shape
     N, _ = weight.shape
     assert weight.shape[1] == K_per_rank, "Weight tensor's second dimension must match K_per_rank"
     M_per_rank = M // num_ranks
     M_blocks, N_blocks = M // block_M, N // block_N
-    
+
     # Prepare kernels and buffers
     fused_gemm_scatter_kernel = fused_gemm_scatter(
         rank=rank,
@@ -113,13 +110,10 @@ def overlapped_gemm_rs(
         block_K=block_K,
         dtype=dtype,
         threads=threads,
-        persistent=persistent
-    )
-    
+        persistent=persistent)
+
     gemm_output = pynvshmem.nvshmem_create_tensor_list_intra_node(
-        [M_blocks, N_blocks, block_M, block_N], 
-        dtype=input.dtype
-    )
+        [M_blocks, N_blocks, block_M, block_N], dtype=input.dtype)
     output = torch.empty((M_per_rank, N), dtype=input.dtype, device="cuda")
     fused_gemm_scatter_kernel(input, weight, gemm_output[rank])
     dist.barrier(TP_GROUP)
@@ -163,16 +157,15 @@ if __name__ == '__main__':
     weight = torch.randn([N, K_per_rank], dtype=torch_dtype, device="cuda")
 
     # Benchmark Torch (non-overlapped baseline)
-    # def torch_gemm_rs():
-    #     local_output = input @ weight.T
-    #     rs_output = torch.empty((M // PE_num, N), dtype=torch_dtype, device="cuda")
-    #     dist.reduce_scatter_tensor(rs_output, local_output, group=TP_GROUP)
-    #     return rs_output
+    def torch_gemm_rs():
+        local_output = input @ weight.T
+        rs_output = torch.empty((M // PE_num, N), dtype=torch_dtype, device="cuda")
+        dist.reduce_scatter_tensor(rs_output, local_output, group=TP_GROUP)
+        return rs_output
 
-    # dist.barrier(TP_GROUP)
-    # torch_out, torch_t = perf_fn(torch_gemm_rs, warmup, repeat)
-    # print(f"rank {RANK} torch GEMM-RS avg time: {torch_t} ms")
-    # print(torch_out.shape)
+    dist.barrier(TP_GROUP)
+    torch_out, torch_t = perf_fn(torch_gemm_rs, warmup, repeat)
+    print(f"rank {RANK} torch GEMM-RS avg time: {torch_t} ms")
 
     # TODO(wt) Add Triton-dist baseline (overlapped)
 
@@ -183,7 +176,8 @@ if __name__ == '__main__':
         print("Use non-persistent GEMM producers...")
 
     def tilelang_gemm_rs():
-        return overlapped_gemm_rs(input, weight, rank=RANK, num_ranks=PE_num, persistent=args.persistent)
+        return overlapped_gemm_rs(
+            input, weight, rank=RANK, num_ranks=PE_num, persistent=args.persistent)
 
     dist.barrier(TP_GROUP)
     tl_out, tl_t = perf_fn(tilelang_gemm_rs, warmup, repeat)

@@ -13,7 +13,7 @@ tilelang.disable_cache()
 
 #TODO: Bench on 4/8 H100
 #TODO: split N?
-'''
+'''init_nvshmem_by_torch_process_group(_TP_GROUP)
 Note: Minor numerical differences exist between Triton/TileLang and Torch (~1e-2) 
 due to the order reductions are handled in different implementations.
 (No error when #PE = 2)
@@ -72,7 +72,6 @@ if __name__ == '__main__':
     assert torch.cuda.get_device_capability()[0] >= 9, '❗This benchmark requires sm_90 or higher'
 
     WORLD_SIZE, RANK, LOCAL_RANK, TP_GROUP = init_distributed(return_tp_group=True)
-    torch.cuda.set_device(LOCAL_RANK)
     assert WORLD_SIZE <= 8, "This benchmark is designed for intra-node RS"
 
     args = parse_args()

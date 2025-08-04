@@ -49,12 +49,12 @@ def all_to_all(max_m, hidden, num_tot_experts, WORLD_SIZE, threads=128, dtype="f
                 T.signal_op(
                     T.address_of(signal_buf[mype[0]]),
                     99,
-                    T.NVSHMEM_SIGNAL_SET,
+                    T.Amo.SIGNAL_SET,
                     peer,
                 )
                 T.signal_wait_until(
                     T.address_of(signal_buf[peer]),
-                    T.NVSHMEM_CMP_EQ,
+                    T.CmpType.EQ,
                     99,
                 )
 

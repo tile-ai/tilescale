@@ -20,8 +20,8 @@ class BarrierAllContext:
         # TODO: implement these for intra-node
         # if self.is_intra_node:
         #     self.rank = pynvshmem.nvshmem_my_pe()
-        #     self.local_rank = pynvshmem.nvshmem_team_my_pe(pynvshmem.NVSHMEMX_TEAM_NODE)
-        #     self.num_local_ranks = pynvshmem.nvshmem_team_n_pes(pynvshmem.NVSHMEMX_TEAM_NODE)
+        #     self.local_rank = pynvshmem.nvshmem_team_my_pe(pynvshmem.Team.NODE)
+        #     self.num_local_ranks = pynvshmem.nvshmem_team_n_pes(pynvshmem.Team.NODE)
         #     self.symm_barrier = pynvshmem.nvshmem_create_tensor((1, ), torch.int32)
         #     self.symm_barrier.fill_(0)
         #     pynvshmem.nvshmem_barrier_all()

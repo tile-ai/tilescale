@@ -54,7 +54,7 @@ def summa(MESH, M, N, K, block_M, block_N, block_K, dtype="float16"):
                     if tx == 0:
                         T.signal_wait_until(
                             T.address_of(A_signal_from[0]),
-                            T.NVSHMEM_CMP_GE,
+                            T.CmpType.GE,
                             total_tiles * MESH * ko,
                         )
                     if block_id < T.ceildiv(M_local, A_rows_per_block):
@@ -63,7 +63,7 @@ def summa(MESH, M, N, K, block_M, block_N, block_K, dtype="float16"):
                                 T.address_of(A[(ko + 1) % 2, A_rows_per_block * block_id, 0]),
                                 T.address_of(A[ko % 2, A_rows_per_block * block_id, 0]),
                                 A_rows_per_block * K_local * dtype_map[dtype].itemsize,
-                                T.address_of(A_signal_to[0]), 1, T.NVSHMEM_SIGNAL_ADD,
+                                T.address_of(A_signal_to[0]), 1, T.Amo.SIGNAL_ADD,
                                 pe_mn * MESH + peer_k)
 
                 # broadcast B
@@ -71,7 +71,7 @@ def summa(MESH, M, N, K, block_M, block_N, block_K, dtype="float16"):
                     if tx == 0:
                         T.signal_wait_until(
                             T.address_of(B_signal_from[0]),
-                            T.NVSHMEM_CMP_GE,
+                            T.CmpType.GE,
                             total_tiles * MESH * ko,
                         )
                     if block_id < T.ceildiv(N_local, B_cols_per_block):
@@ -80,18 +80,18 @@ def summa(MESH, M, N, K, block_M, block_N, block_K, dtype="float16"):
                                 T.address_of(B[(ko + 1) % 2, B_cols_per_block * block_id, 0]),
                                 T.address_of(B[ko % 2, B_cols_per_block * block_id, 0]),
                                 B_cols_per_block * K_local * dtype_map[dtype].itemsize,
-                                T.address_of(B_signal_to[0]), 1, T.NVSHMEM_SIGNAL_ADD,
+                                T.address_of(B_signal_to[0]), 1, T.Amo.SIGNAL_ADD,
                                 pe_mn * MESH + peer_k)
 
                 # TODO: check if __syncthreads() is needed
                 T.signal_wait_until(
                     T.address_of(A_signal_to[0]),
-                    T.NVSHMEM_CMP_GE,
+                    T.CmpType.GE,
                     (ko + 1) * T.ceildiv(M_local, A_rows_per_block),
                 )
                 T.signal_wait_until(
                     T.address_of(B_signal_to[0]),
-                    T.NVSHMEM_CMP_GE,
+                    T.CmpType.GE,
                     (ko + 1) * T.ceildiv(N_local, B_cols_per_block),
                 )
 
@@ -114,7 +114,7 @@ def summa(MESH, M, N, K, block_M, block_N, block_K, dtype="float16"):
                             T.signal_op(
                                 T.address_of(A_signal_from[0]),
                                 1,
-                                T.NVSHMEM_SIGNAL_ADD,
+                                T.Amo.SIGNAL_ADD,
                                 a_sender,
                             )
                             # Tell next B sender
@@ -122,7 +122,7 @@ def summa(MESH, M, N, K, block_M, block_N, block_K, dtype="float16"):
                             T.signal_op(
                                 T.address_of(B_signal_from[0]),
                                 1,
-                                T.NVSHMEM_SIGNAL_ADD,
+                                T.Amo.SIGNAL_ADD,
                                 b_sender,
                             )
 

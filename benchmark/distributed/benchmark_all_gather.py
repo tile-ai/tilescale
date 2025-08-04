@@ -4,9 +4,8 @@ import torch.distributed as dist
 import pynvshmem
 import tilelang
 import tilelang.language as T
-from tilelang.distributed.utils import init_distributed, dtype_map, perf_fn, CUDA_CHECK
+from tilelang.distributed.utils import init_distributed, dtype_map, perf_fn
 from typing import List
-from cuda import cuda
 
 tilelang.disable_cache()
 
@@ -34,13 +33,11 @@ def cp_engine_producer_all_gather_full_mesh_pull(
             src = remote_tensor_buffers[src_rank][src_rank * M_per_rank:(src_rank + 1) *
                                                   M_per_rank, :]
             dst.copy_(src)
-            (err,) = cuda.cuStreamWriteValue32(
-                ag_stream.cuda_stream,
-                barrier_buffers[rank][src_rank].data_ptr(),
+            pynvshmem.write64_on_stream(
+                barrier_buffers[rank][src_rank],
                 1,
-                cuda.CUstreamWriteValue_flags.CU_STREAM_WRITE_VALUE_DEFAULT,
+                stream=ag_stream,
             )
-            CUDA_CHECK(err)
 
 
 def allgather(PE_num, M, N, dtype="float16", threads=128):
@@ -82,7 +79,6 @@ def parse_args():
 
 if __name__ == '__main__':
     WORLD_SIZE, RANK, LOCAL_RANK, TP_GROUP = init_distributed(return_tp_group=True)
-    torch.cuda.set_device(LOCAL_RANK)
     assert WORLD_SIZE <= 8, "This benchmark is designed for intra-node communication"
 
     args = parse_args()

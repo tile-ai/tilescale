@@ -179,7 +179,7 @@ def signal_wait_until(sig_addr, cmp, cmp_val):
         cmp: The comparison operation to be performed on the signal value.
         cmp_val (uint64_t): The value to compare against the signal value.
     """
-    #TODO: handle return value(which is uint64_t*)?
+    # Actually nvshmem_signal_wait_until returns a uint64_t* value, but we simply ignore it
     return tir.call_intrin("handle", tir.op.Op.get("tl.SignalWaitUntil"), sig_addr, cmp, cmp_val)
 
 

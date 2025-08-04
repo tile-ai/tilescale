@@ -3,6 +3,7 @@ import torch
 import torch.distributed
 from cuda import cuda, cudart
 from typing import Optional
+from enum import IntEnum
 
 try:
     from _pynvshmem import *  # noqa: F403
@@ -55,16 +56,16 @@ def init_nvshmem_by_uniqueid(group: torch.distributed.ProcessGroup):
 """Host-side signaling functions."""
 
 
-def write_i32(tensor: torch.Tensor, value: int, stream: Optional[torch.cuda.Stream] = None):
-    """Atomic write an int32 value to a tensor.
+def write32_on_stream(tensor: torch.Tensor, value: int, stream: Optional[torch.cuda.Stream] = None):
+    """Atomic write an 32-bit value to a tensor.
     Args:
-        tensor (torch.Tensor): The tensor to write to, must be of dtype torch.int32.
+        tensor (torch.Tensor): The tensor to write to.
         value (int): The value to write.
         stream (Optional[torch.cuda.Stream]): The CUDA stream to use for the operation.
             If None, the current stream will be used.
     """
-    assert isinstance(tensor, torch.Tensor) and tensor.dtype == torch.int32, \
-        f"tensor must be a torch.Tensor with dtype torch.int32, but got {tensor.dtype}"
+    assert isinstance(tensor, torch.Tensor) and tensor.dtype in (torch.int32, torch.uint32), \
+        f"tensor must be a torch.Tensor with 32-bit dtype, but got {tensor.dtype}"
     assert tensor.numel() == 1, "tensor must have exactly one element"
     if stream is None:
         stream = torch.cuda.current_stream()
@@ -77,16 +78,16 @@ def write_i32(tensor: torch.Tensor, value: int, stream: Optional[torch.cuda.Stre
     _CUDA_CHECK(err)
 
 
-def write_u64(tensor: torch.Tensor, value: int, stream: Optional[torch.cuda.Stream] = None):
-    """Atomic write an uint64 value to a tensor.
+def write64_on_stream(tensor: torch.Tensor, value: int, stream: Optional[torch.cuda.Stream] = None):
+    """Atomic write an 64-bit value to a tensor.
     Args:
-        tensor (torch.Tensor): The tensor to write to, must be of dtype torch.uint64.
+        tensor (torch.Tensor): The tensor to write to.
         value (int): The value to write.
         stream (Optional[torch.cuda.Stream]): The CUDA stream to use for the operation.
             If None, the current stream will be used.
     """
-    assert isinstance(tensor, torch.Tensor) and tensor.dtype == torch.uint64, \
-        f"tensor must be a torch.Tensor with dtype torch.uint64, but got {tensor.dtype}"
+    assert isinstance(tensor, torch.Tensor) and tensor.dtype in (torch.int64, torch.uint64), \
+        f"tensor must be a torch.Tensor with 64-bit dtype, but got {tensor.dtype}"
     assert tensor.numel() == 1, "tensor must have exactly one element"
     if stream is None:
         stream = torch.cuda.current_stream()
@@ -99,52 +100,62 @@ def write_u64(tensor: torch.Tensor, value: int, stream: Optional[torch.cuda.Stre
     _CUDA_CHECK(err)
 
 
-# team node
-NVSHMEM_TEAM_INVALID = -1
-NVSHMEM_TEAM_WORLD = 0
-NVSHMEM_TEAM_WORLD_INDEX = 0
-NVSHMEM_TEAM_SHARED = 1
-NVSHMEM_TEAM_SHARED_INDEX = 1
-NVSHMEMX_TEAM_NODE = 2
-NVSHMEM_TEAM_NODE_INDEX = 2
-NVSHMEMX_TEAM_SAME_MYPE_NODE = 3
-NVSHMEM_TEAM_SAME_MYPE_NODE_INDEX = 3
-NVSHMEMI_TEAM_SAME_GPU = 4
-NVSHMEM_TEAM_SAME_GPU_INDEX = 4
-NVSHMEMI_TEAM_GPU_LEADERS = 5
-NVSHMEM_TEAM_GPU_LEADERS_INDEX = 5
-NVSHMEM_TEAMS_MIN = 6
-NVSHMEM_TEAM_INDEX_MAX = sys.maxsize
+### Distributed enums ###
 
-# class nvshmemi_cmp_type(Enum):
-NVSHMEM_CMP_EQ = 0
-NVSHMEM_CMP_NE = 1
-NVSHMEM_CMP_GT = 2
-NVSHMEM_CMP_LE = 3
-NVSHMEM_CMP_LT = 4
-NVSHMEM_CMP_GE = 5
-NVSHMEM_CMP_SENTINEL = sys.maxsize
 
-# class nvshmemi_amo_t(Enum):
-NVSHMEMI_AMO_ACK = 1
-NVSHMEMI_AMO_INC = 2
-NVSHMEMI_AMO_SET = 3
-NVSHMEMI_AMO_ADD = 4
-NVSHMEMI_AMO_AND = 5
-NVSHMEMI_AMO_OR = 6
-NVSHMEMI_AMO_XOR = 7
-NVSHMEMI_AMO_SIGNAL = 8
-NVSHMEM_SIGNAL_SET = 9
-NVSHMEM_SIGNAL_ADD = 10
-NVSHMEMI_AMO_SIGNAL_SET = NVSHMEM_SIGNAL_SET  # Note - NVSHMEM_SIGNAL_SET == 9
-NVSHMEMI_AMO_SIGNAL_ADD = NVSHMEM_SIGNAL_ADD  # Note - NVSHMEM_SIGNAL_ADD == 10
-NVSHMEMI_AMO_END_OF_NONFETCH = 11  # end of nonfetch atomics
-NVSHMEMI_AMO_FETCH = 12
-NVSHMEMI_AMO_FETCH_INC = 13
-NVSHMEMI_AMO_FETCH_ADD = 14
-NVSHMEMI_AMO_FETCH_AND = 15
-NVSHMEMI_AMO_FETCH_OR = 16
-NVSHMEMI_AMO_FETCH_XOR = 17
-NVSHMEMI_AMO_SWAP = 18
-NVSHMEMI_AMO_COMPARE_SWAP = 19
-NVSHMEMI_AMO_OP_SENTINEL = sys.maxsize
+class Team(IntEnum):
+    INVALID = -1
+    WORLD = 0
+    WORLD_INDEX = 0
+    SHARED = 1
+    SHARED_INDEX = 1
+    NODE = 2
+    NODE_INDEX = 2
+    SAME_MYPE_NODE = 3
+    SAME_MYPE_NODE_INDEX = 3
+    SAME_GPU = 4
+    SAME_GPU_INDEX = 4
+    GPU_LEADERS = 5
+    GPU_LEADERS_INDEX = 5
+    TEAMS_MIN = 6
+    TEAM_INDEX_MAX = sys.maxsize
+
+
+class CmpType(IntEnum):
+    EQ = 0
+    NE = 1
+    GT = 2
+    LE = 3
+    LT = 4
+    GE = 5
+    SENTINEL = sys.maxsize
+
+
+class Amo(IntEnum):
+    """Atomic Memory Operation (AMO) types.
+    Note: Signal ops (NVSHMEMI_AMO_SIGNAL_SET and NVSHMEMI_AMO_SIGNAL_ADD) are
+    included as a part of the AMO operations.
+    """
+
+    AMO_ACK = 1
+    AMO_INC = 2
+    AMO_SET = 3
+    AMO_ADD = 4
+    AMO_AND = 5
+    AMO_OR = 6
+    AMO_XOR = 7
+    AMO_SIGNAL = 8
+    SIGNAL_SET = 9
+    SIGNAL_ADD = 10
+    AMO_SIGNAL_SET = 9  # the same as SIGNAL_SET
+    AMO_SIGNAL_ADD = 10  # the same as SIGNAL_ADD
+    AMO_END_OF_NONFETCH = 11  # end of nonfetch atomics
+    AMO_FETCH = 12
+    AMO_FETCH_INC = 13
+    AMO_FETCH_ADD = 14
+    AMO_FETCH_AND = 15
+    AMO_FETCH_OR = 16
+    AMO_FETCH_XOR = 17
+    AMO_SWAP = 18
+    AMO_COMPARE_SWAP = 19
+    AMO_OP_SENTINEL = sys.maxsize

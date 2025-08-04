@@ -9,10 +9,24 @@
 #include <tvm/tir/expr.h>
 #include <tvm/tir/op.h>
 
+#include <stdlib.h>
 #include <string>
 #include <unordered_map>
 
 #include "target/source/codegen_c.h"
+
+/*
+ * Utility function for judging whether distributed mode is enabled.
+ * This is used to determine whether to include distributed.h in the generated
+ * code.
+ */
+static inline bool use_distributed() {
+  const char *env = std::getenv("TILELANG_USE_DISTRIBUTED");
+  if (env) {
+    return std::string(env) == "1";
+  }
+  return false;
+}
 
 namespace tvm {
 namespace codegen {
@@ -101,7 +115,7 @@ private:
   // whether need cooperative_groups.h
   bool need_cooperative_groups_{false};
   // whether need distributed.h
-  bool use_distributed_{false};
+  bool use_distributed_{use_distributed()};
   // Op attribute map
   OpAttrMap<bool> op_need_warp_shuffle_ =
       Op::GetAttrMap<bool>("cuda.need_warp_shuffle");
