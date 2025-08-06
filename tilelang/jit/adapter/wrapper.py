@@ -194,6 +194,7 @@ class TLCUDASourceWrapper(object):
         "uint16": "uint16_t",
         "uchar": "uint8_t",
         "uint64": "uint64_t",
+        "int4": "int4",
     }
 
     backend = "tl"
