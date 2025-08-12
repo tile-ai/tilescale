@@ -40,9 +40,16 @@ def combine(
         num_ranks: the number of ranks.
         
     Returns:
-        recv_x: the reduced token from its dispatched ranks.
+        recv_x: the reduced token from its dispatched ranks. 
         recv_topk_weights: the reduced top-k weights from its dispatch ranks.
+    
+    ## Info of Tensors in Handle:
+        - **rank_prefix_matrix**: `[num_ranks, num_ranks]`, `torch.int32`
+        - **channel_prefix_matrix**: `[num_ranks, num_channels]`, `torch.int32`
+        - **src_idx**: `[num_tokens]`, `torch.int32`
+        - **send_head**: `[num_recv_tokens, num_ranks]`, `torch.int32`
     """
+    
     config = Config.get_combine_config(group_size) if config is not None else config
     
     # TODO: Implement internode combine here
@@ -50,7 +57,7 @@ def combine(
     # NOTE: the second `_` is for the sending side, so we should use the third one
     rank_prefix_matrix, _, channel_prefix_matrix, src_idx, is_recv_token_in_rank, send_head = handle
     bias_0, bias_1 = unpack_bias(bias)
-    
+
     # Check inputs
     assert x.dim() == 2 and x.is_contiguous()
     assert src_idx.dim() == 1 and src_idx.is_contiguous() and src_idx.dtype == torch.int32
