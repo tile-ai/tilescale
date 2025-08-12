@@ -1,4 +1,4 @@
-# DeepEp in TileLang
+# DeepEP in TileLang
 
 To install and compare with DeepEP, please refer to https://github.com/deepseek-ai/DeepEP.
 
