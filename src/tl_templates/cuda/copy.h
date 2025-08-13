@@ -161,7 +161,7 @@ TL_DEVICE void st_na_global(const int4 *ptr, const int4& value) {
 }
 
 #define LD_FUNC(ptr) ld_nc_global(ptr)
-#define ST_FUNC(prt, value) st_na_global(prt, value)
+#define ST_FUNC(ptr, value) st_na_global(ptr, value)
 
 template <int N, int UNROLL_FACTOR, typename dtype_t>
 TL_DEVICE void cp_unrolled(dtype_t const* const dst_addr, dtype_t const* const src_addr) {
