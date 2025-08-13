@@ -7,6 +7,7 @@ from tilelang.profiler import do_bench
 from typing import Optional, Tuple
 import sys
 from argparse import ArgumentParser
+from utils import gen_inputs
 
 tilelang.disable_cache()
 
@@ -161,23 +162,6 @@ def get_dispatch_layout_kernel(
     return main
 
 
-# Check: DeepEP/tests/test_intranode.py:test_main
-def gen_topk_idx(num_tokens: int, num_topk: int, num_experts: int):
-    """Generate a random topk_idx tensor for testing.
-    Arguments:
-        num_tokens: the number of tokens.
-        num_topk: the number of top-k experts to select for each token.
-        num_experts: the number of experts.
-    Returns:
-        topk_idx: `[num_tokens, num_topk]` with `torch.int64`, the expert indices selected by each token,
-            `-1` means no selections.
-    """
-    assert num_topk <= num_experts, "num_topk must be less than or equal to num_experts"
-    scores = torch.randn((num_tokens, num_experts), dtype=torch.float32, device='cuda').abs() + 1
-    topk_idx = torch.topk(scores, num_topk, dim=-1, largest=True, sorted=False)[1]
-    return topk_idx
-
-
 def test_get_dispatch_layout(
     num_tokens: int,
     num_topk: int,
@@ -195,7 +179,7 @@ def test_get_dispatch_layout(
         raise e
 
     # Validate correctness
-    topk_idx = gen_topk_idx(num_tokens, num_topk, num_experts)
+    topk_idx = gen_inputs(num_tokens, 1, num_topk, num_experts, num_ranks)[1]
     buffer = deep_ep_cpp.Buffer(0, num_ranks, 0, 0, False, False)
     ref_num_tokens_per_rank, _, ref_num_tokens_per_expert, ref_is_token_in_rank, _ = buffer.get_dispatch_layout(
         topk_idx, num_experts, None, False, False)
