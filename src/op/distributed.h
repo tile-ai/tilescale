@@ -37,9 +37,19 @@ const Op &IntPE();
 const Op &BarrierAll();
 
 /*!
+ * \brief tvm intrinsics for global barrier synchronization in a team
+ */
+const Op &Barrier();
+
+/*!
  * \brief tvm intrinsics for block-level barrier synchronization
  */
 const Op &BarrierAllBlock();
+
+/*!
+ * \brief tvm intrinsics for block-level barrier synchronization in a team
+ */
+const Op &BarrierBlock();
 
 /*!
  * \brief tvm intrinsics for warp-level barrier synchronization
@@ -47,9 +57,20 @@ const Op &BarrierAllBlock();
 const Op &BarrierAllWarp();
 
 /*!
+ * \brief tvm intrinsics for warp-level barrier synchronization in a team
+ */
+const Op &BarrierWarp();
+
+
+/*!
  * \brief tvm intrinsics for global synchronization
  */
 const Op &SyncAll();
+
+/*!
+ * \brief tvm intrinsics for global synchronization in a team
+ */
+const Op &Sync();
 
 /*!
  * \brief tvm intrinsics for block-level synchronization
@@ -57,9 +78,19 @@ const Op &SyncAll();
 const Op &SyncAllBlock();
 
 /*!
+ * \brief tvm intrinsics for block-level synchronization in a team
+ */
+const Op &SyncBlock();
+
+/*!
  * \brief tvm intrinsics for warp-level synchronization
  */
 const Op &SyncAllWarp();
+
+/*!
+ * \brief tvm intrinsics for warp-level synchronization in 
+ */
+const Op &SyncWarp();
 
 /*!
  * \brief tvm intrinsics for quiet operation

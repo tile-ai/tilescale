@@ -1376,12 +1376,54 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::Fence())) {
     this->use_distributed_ = true;
     os << "nvshmem_fence()";
-  } else if (op->op.same_as(tl::SyncAll())) {
-    this->use_distributed_ = true;
-    os << "nvshmem_sync_all()";
   } else if (op->op.same_as(tl::BarrierAll())) {
     this->use_distributed_ = true;
     os << "nvshmem_barrier_all()";
+  } else if (op->op.same_as(tl::Barrier())) {
+    this->use_distributed_ = true;
+    os << "nvshmem_barrier(";
+    this->PrintExpr(op->args[0], os);  // team id
+    os << ")";
+  } else if (op->op.same_as(tl::BarrierAllBlock())) {
+    this->use_distributed_ = true;
+    os << "nvshmemx_barrier_all_block()";
+  } else if (op->op.same_as(tl::BarrierBlock())) {
+    this->use_distributed_ = true;
+    os << "nvshmemx_barrier_block(";
+    this->PrintExpr(op->args[0], os);  // team id
+    os << ")";
+  } else if (op->op.same_as(tl::BarrierAllWarp())) {
+    this->use_distributed_ = true;
+    os << "nvshmemx_barrier_all_warp()";
+  } else if (op->op.same_as(tl::BarrierWarp())) {
+    this->use_distributed_ = true;
+    os << "nvshmemx_barrier_warp(";
+    this->PrintExpr(op->args[0], os);  // team id
+    os << ")";
+  } else if (op->op.same_as(tl::SyncAll())) {
+    this->use_distributed_ = true;
+    os << "nvshmem_sync_all()";
+  } else if (op->op.same_as(tl::Sync())) {
+    this->use_distributed_ = true;
+    os << "nvshmem_sync(";
+    this->PrintExpr(op->args[0], os);  // team id
+    os << ")";
+  } else if (op->op.same_as(tl::SyncAllBlock())) {
+    this->use_distributed_ = true;
+    os << "nvshmemx_sync_all_block()";
+  } else if (op->op.same_as(tl::SyncBlock())) {
+    this->use_distributed_ = true;
+    os << "nvshmemx_sync_block(";
+    this->PrintExpr(op->args[0], os);  // team id
+    os << ")";
+  } else if (op->op.same_as(tl::SyncAllWarp())) {
+    this->use_distributed_ = true;
+    os << "nvshmemx_sync_all_warp()";
+  } else if (op->op.same_as(tl::SyncWarp())) {
+    this->use_distributed_ = true;
+    os << "nvshmemx_sync_warp(";
+    this->PrintExpr(op->args[0], os);  // team id
+    os << ")";
   } else {
     CodeGenC::VisitExpr_(op, os);
   }
