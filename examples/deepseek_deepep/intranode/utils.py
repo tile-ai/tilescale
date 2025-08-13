@@ -90,6 +90,7 @@ def create_moe_recv_counters(num_ranks: int) -> Tuple[torch.Tensor, torch.Tensor
     num_rdma_ranks = max(1, num_ranks // NUM_MAX_NVL_PEERS)  # noqa: F841
     num_nvl_ranks = min(num_ranks, NUM_MAX_NVL_PEERS)  # noqa: F841
 
+    # We use pinned memory to avoid overhead
     moe_recv_counter = torch.tensor(
         -1, dtype=torch.int64, device='cuda', pin_memory=True)  # MoE counter
     moe_recv_expert_counter = torch.tensor(
@@ -151,15 +152,13 @@ def inplace_unique(x: torch.Tensor, num_slots: int):
     x[:, :].fill_(-1)
     valid_len = min(num_slots, x.size(1))
     x[:, :valid_len] = sorted_bin_idx[:, :valid_len]
-    
-    
-def deepep_bench(
-    fn: Callable,
-    warmup: int = 50, 
-    rep: int = 50,
-    post_fn: Optional[Callable] = None,
-    mode: Literal['mean', 'gmean'] = 'mean'
-) -> float:
+
+
+def deepep_bench(fn: Callable,
+                 warmup: int = 50,
+                 rep: int = 50,
+                 post_fn: Optional[Callable] = None,
+                 mode: Literal['mean', 'gmean'] = 'mean') -> float:
     """DeepEP's way to benchmark a function with warmup and repetition.
 
     Args:
@@ -170,11 +169,11 @@ def deepep_bench(
         mode (Literal[&#39;mean&#39;, &#39;gmean&#39;], optional): The return mode of the result. Defaults to 'mean'.
 
     Returns:
-        float: The benchmark result repported in milliseconds.
+        float: The benchmark result reported in milliseconds.
     """
     # Flush L2 cache with 256 MB data
     torch.cuda.synchronize()
-    cache = torch.empty(int(256e6), dtype=torch.int8, device='cuda')
+    cache = torch.empty(int(256e6 // 4), dtype=torch.int32, device='cuda')
 
     # Warmup
     for _ in range(warmup):
@@ -196,11 +195,4 @@ def deepep_bench(
     torch.cuda.synchronize()
 
     times = torch.tensor([s.elapsed_time(e) / 1e3 for s, e in zip(start_events, end_events)])[1:]
-    return {
-        'mean': times.mean().item(),
-        'gmean': times.log().mean().exp().item()    
-    }[mode]
-    
-
-if __name__ == '__main__':
-    gen_inputs(4,4,4,8,2)
+    return {'mean': times.mean().item(), 'gmean': times.log().mean().exp().item()}[mode]
