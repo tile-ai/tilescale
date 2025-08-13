@@ -278,6 +278,15 @@ TVM_DLL const Op &tvm_rdna_wmma();
  */
 TVM_DLL const Op &tvm_rdna_wmma_store();
 
+/*!
+ * \brief Copy between two global memory buffers with unrolled loop.
+ *
+ * void copy_unrolled(dst, src, size, unroll_factor);
+ *
+ */
+TVM_DLL const Op &copy_unrolled();
+
+
 } // namespace tl
 } // namespace tvm
 
