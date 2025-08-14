@@ -1,0 +1,62 @@
+# HDA description of DGX-B200 (8x SXM B200s, each with 148 SMs)
+memory:
+  register: {capacity: 64 * 1024, trans_per_cycle: None, is_cache: True, frequency: None}
+  shared: {capacity: 224 * 1024, trans_per_cycle: None, is_cache: False, frequency: None}
+  l2: {capacity: 50 * 1024 * 1024, trans_per_cycle: None, is_cache: True, frequency: None}
+  global: {capacity: 80 * 1024 * 1024 * 1024, trans_per_cycle: None, is_cache: False, frequency: None}
+
+instruction_units:
+  sfu:
+    - {}  # TODO: add sfu instruction units
+  fma:
+    - {}  # TODO: add fma instruction units
+  alu:
+    - {}  # TODO: add alu instruction units
+  tensor_core:
+    - {}  # TODO: add tensor_core instruction units
+  tma:
+    - {}  # TODO: add tma instruction units
+  dma:
+    - {}  # TODO: add dma instruction units
+  sharp:
+    - {}  # TODO: add in-net-compute instruction units
+
+networks:
+  sm2sm: {topology: switch, bandwidth: None, bind_arch: sm}
+  gpu2gpu: {topology: customized, bandwidth: None, bind_arch: gpu, connections: [[], []]}
+
+architectures:
+  core:
+    - {prev_arch: None, num_units: 1, memory: [register], instruction_units: [sfu, fma, alu]}
+  subcore:
+    - {prev_arch: core, num_units: 32, memory: [], instruction_units: [tensor_core, tma]}
+  sm:
+    - {prev_arch: subcore, num_units: 4, memory: [shared], instruction_units: []}
+  tpc:
+    - {prev_arch: sm, num_units: 2, memory: [], instruction_units: [], network: [sm2sm]}
+  gpc:
+    - {prev_arch: tpc, num_units: 16, memory: [], instruction_units: [], network: [sm2sm]}
+  gpu:
+    - {prev_arch: tpc, num_units: 74, memory: [global, l2], instruction_units: [dma]}
+    - {prev_arch: gpc, num_units: 8, memory: [global, l2], instruction_units: [dma]}
+  node:
+    - {prev_arch: gpu, num_units: 8, memory: [], instruction_units: [sharp], network: [gpu2gpu]}
+
+tile_primitives:
+  numa_mode:
+    - {scale_level: thread, target: core}
+    - {scale_level: warp, target: subcore}
+    - {scale_level: warp_group, target: sm}
+    - {scale_level: block, target: sm}
+    - {scale_level: cta_pair, target: tpc}
+    - {scale_level: tbc, target: gpc}
+    - {scale_level: gpu, target: gpu}
+    - {scale_level: node, target: node}
+  uma_mode:
+    - {scale_level: thread, target: core}
+    - {scale_level: warp, target: subcore}
+    - {scale_level: warp_group, target: sm}
+    - {scale_level: block, target: sm}
+    - {scale_level: cta_pair, target: tpc}
+    - {scale_level: gpu, target: gpu}
+    - {scale_level: node, target: node}

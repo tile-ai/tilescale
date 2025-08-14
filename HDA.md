@@ -17,9 +17,10 @@ memory:
   - {name: l2, capacity: 50 * 1024 * 1024}
   - {name: global, capacity: 80 * 1024 * 1024 * 1024} # 80GB
 
-compute_units:
+instruction_units:
     # Instruction or compute hardward
-  sfu:
+  # compute units
+  sfu: # instruction set
     - ...
   fma:
     - ...
@@ -31,6 +32,13 @@ compute_units:
   # B200 UTCMMA
   ...:
      - ...
+  # data cp units
+  tma:
+     - ...
+  dma:
+     - ...
+  in-net-compute:
+     - ...
 
 networks:
   - {name: sm2sm, topology: switch, bandwidth: xxx, target: sm}
@@ -38,25 +46,25 @@ networks:
   - {name: gpu2gpu, topology: customized, target: gpu, connections: [[xxx, xxx], [xxx, xxx]]}
 
 architecture:
-  - {name: core, num_units: 1, memory: [register], compute_units: [sfu, fma, alu]}
-  - {name: subcore, num_units: 32, memory: [], compute_units: [tensor_core]}
-  - {name: sm, num_units: 4, memory: [shared], compute_units: []}
-  - {name: tpc, num_units: 2, memory: [], compute_units: [], network: []}
-  - {name: gpc, num_units: 9, memory: [], compute_units: [], network: [sm2sm]}
-  - {name: gpu, num_units: 8, memory: [global, l2], compute_units: []}
-  - {name: node, num_units: 8, memory: [], compute_units: [], network: [gpu2gpu]}
+  - {name: core, num_units: 1, memory: [register], instruction_units: [sfu, fma, alu]}
+  - {name: subcore, num_units: 32, memory: [], instruction_units: [tensor_core]}
+  - {name: sm, num_units: 4, memory: [shared], instruction_units: []}
+  - {name: tpc, num_units: 2, memory: [], instruction_units: [], network: []}
+  - {name: gpc, num_units: 9, memory: [], instruction_units: [], network: [sm2sm]}
+  - {name: gpu, num_units: 8, memory: [global, l2], instruction_units: []}
+  - {name: node, num_units: 8, memory: [], instruction_units: [], network: [gpu2gpu]}
 
 # TileScale Interface
 # instruction_granularity:
 tile_primitives:
-  - {name: thread, target: core}
-  - {name: warp, target: subcore}
-  - {name: warp_group, target: sm}
-  - {name: block, target: sm}
-  - {name: cta_pair, target: tpc}
-  - {name: tbc, target: gpc}
-  - {name: gpu, target: gpu}
-  - {name: node, target: node}
+  - {scale_level: thread, target: core}
+  - {scale_level: warp, target: subcore}
+  - {scale_level: warp_group, target: sm}
+  - {scale_level: block, target: sm}
+  - {scale_level: cta_pair, target: tpc}
+  - {scale_level: tbc, target: gpc}
+  - {scale_level: gpu, target: gpu}
+  - {scale_level: node, target: node}
 ```
 ``` python
 class ComputeUnit():
