@@ -1,18 +1,52 @@
 # HDA description of DGX-B200 (8x SXM B200s, each with 148 SMs)
 memory:
-  register: {capacity: 64 * 1024, trans_per_cycle: None, is_cache: True, frequency: None}
-  shared: {capacity: 224 * 1024, trans_per_cycle: None, is_cache: False, frequency: None}
-  l2: {capacity: 50 * 1024 * 1024, trans_per_cycle: None, is_cache: True, frequency: None}
-  global: {capacity: 80 * 1024 * 1024 * 1024, trans_per_cycle: None, is_cache: False, frequency: None}
+  #TODO:
+  # each thread can only access 256*32bit register, the whole SM has 256 * 1024 bytes
+  register: {capacity: 256 * 4, trans_per_cycle: 16, is_cache: False, frequency: 1.965 * 1e9}
+  # reg write tmem 1024 bytes/s, reg read tmem 512 bytes/s
+  # C += A * B, 2 cycle [64-8-16], A C in Tmem, (A + 2C)/2= (2*64*16+ 2*4*64*8)/2 = 3072 bytes/s with Tensor Cores
+  tmem: {capacity: 256 * 1024, trans_per_cycle: 3072, is_cache: False, frequency: 1.965 * 1e9}
+  shared: {capacity: 228 * 1024, trans_per_cycle: 128, is_cache: False, frequency: 1.965 * 1e9}
+  # 5120 * 1.9 ~= 20TB/s
+  l2: {capacity: 126.5 * 1024 * 1024, trans_per_cycle: 10240, is_cache: True, frequency: 1.965 * 1e9}
+  # 8 stack, each stack with 1024-bit interface, total peak BW = 8*1024bit/s * 3.996 * 1e9 *2 ~= 8TB/s
+  global: {capacity: 180 * 1024 * 1024 * 1024, trans_per_cycle: 1024, is_cache: False, frequency: 3.996 * 1e9}
 
+# II means instruction interval, i.e., the number of cycles between two instructions
 instruction_units:
+# when talking about # of units, we default view at the lowest scale where the unit completely exists
   sfu:
-    - {}  # TODO: add sfu instruction units
+    - {inst_name: exp, unit:16, II: 1, dtype: fp32}
+    - {inst_name: recp, unit:16, II: 1, dtype: fp32}
+    - {inst_name: sqrt, unit:16, II: 1, dtype: fp32}
   fma:
-    - {}  # TODO: add fma instruction units
+    - {inst_name: fma, unit:128, II: 1, dtype: fp32}
+    - {inst_name: fma, unit:128, II: 2, dtype: fp64}
+    - {inst_name: fma, unit:128, II: 1, dtype: fp16}
+    - {inst_name: fmul, unit:128, II: 1, dtype: fp32}
+    - {inst_name: fmul, unit:128, II: 2, dtype: fp64}
+    - {inst_name: fmul, unit:128, II: 1, dtype: fp16}
+    - {inst_name: fadd, unit:128, II: 1, dtype: fp32}
+    - {inst_name: fadd, unit:128, II: 2, dtype: fp64}
+    - {inst_name: fadd, unit:128, II: 1, dtype: fp16}
   alu:
     - {}  # TODO: add alu instruction units
   tensor_core:
+    # warp level
+    - {inst_name: mma.sync, unit: 4, II: 8, shape: [16, 8, 16], dtype: fp16}
+    # cta1 level
+    - {inst_name: tcgen05.mma.cta_group::1, unit: 1, II: 2, shape: [64, 8, 16], dtype: fp16}
+    # cta2 level, or tpc level
+     # TODO: unit 1 or 0.5?
+    - {inst_name: tcgen05.mma.cta_group::2, unit: 1, II: 8, shape: [128, 32, 16], dtype: fp16}
+    # warp level
+    - {inst_name: mma.sync, unit: 4, II: 8, shape: [16, 8, 32], dtype: fp8}
+    # cta1 level, or sm level
+    - {inst_name: tcgen05.mma.cta_group::1, unit: 1, II: 2, shape: [64, 8, 32], dtype: fp8}
+    # cta2 level, or tpc level
+    # TODO: unit 1 or 0.5?
+    - {inst_name: tcgen05.mma.cta_group::2, unit: 1, II: 8, shape: [128, 32, 32], dtype: fp8}
+
     - {}  # TODO: add tensor_core instruction units
   tma:
     - {}  # TODO: add tma instruction units
