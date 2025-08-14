@@ -23,34 +23,113 @@ def int_p(dest, value, pe):
     return tir.call_intrin("handle", tir.op.Op.get("tl.IntPE"), dest, value, pe)
 
 
+## Collective synchronization
+
 def barrier_all():
-    """Synchronizes all processing elements (PEs), 
+    """Barrier all processing elements (PEs), 
     ensuring completion of all previously issued memory stores and remote memory updates."""
     return tir.call_intrin("handle", tir.op.Op.get("tl.BarrierAll"))
 
 
-def barrier_all_block(*args):
-    return tir.call_intrin("handle", tir.op.Op.get("tl.BarrierAllBlock"), *args)
+def barrier(team):
+    """Barrier all processing elements (PEs) within a team, 
+    ensuring completion of all previously issued memory stores and remote memory updates.
+    
+    Args:
+        team: The team ID to barrier.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.Barrier"), team)
 
 
-def barrier_all_warp(*args):
-    return tir.call_intrin("handle", tir.op.Op.get("tl.BarrierAllWarp"), *args)
+def barrier_all_block():
+    """Barrier all blocks, 
+    ensuring completion of all previously issued memory stores and remote memory updates.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.BarrierAllBlock"))
+
+
+def barrier_block(team):
+    """Barrier all blocks within a team, 
+    ensuring completion of all previously issued memory stores and remote memory updates.
+    
+    Args: 
+        team: The team ID to barrier.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.BarrierBlock"), team)
+
+
+def barrier_all_warp():
+    """Barrier all warps, 
+    ensuring completion of all previously issued memory stores and remote memory updates.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.BarrierAllWarp"))
+
+
+def barrier_warp(team):
+    """Barrier all warps within a team, 
+    ensuring completion of all previously issued memory stores and remote memory updates.
+    
+    Args: 
+        team: The team ID to barrier.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.BarrierWarp"), team)
 
 
 def sync_all():
-    """Synchronizes all processing elements (PEs). 
-    In contrast with `barrier_all`, 
+    """Synchronize all processing elements (PEs). In contrast with `barrier_all`, 
     `sync_all` only ensures completion and visibility of previously issued memory stores, 
     and does not ensure completion of remote memory updates issued via NVSHMEM routines."""
     return tir.call_intrin("handle", tir.op.Op.get("tl.SyncAll"))
 
 
-def sync_all_block(*args):
-    return tir.call_intrin("handle", tir.op.Op.get("tl.SyncAllBlock"), *args)
+def sync(team):
+    """Synchronize all processing elements (PEs) in a team. 
+    In contrast with `barrier_all`, 
+    `sync_all` only ensures completion and visibility of previously issued memory stores, 
+    and does not ensure completion of remote memory updates issued via NVSHMEM routines.
+    
+    Args:
+        team: The team ID to synchronize.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.Sync"), team)
 
 
-def sync_all_warp(*args):
-    return tir.call_intrin("handle", tir.op.Op.get("tl.SyncAllWarp"), *args)
+def sync_all_block():
+    """Synchronize all blocks. In contrast with `barrier_all`, 
+    `sync_all` only ensures completion and visibility of previously issued memory stores, 
+    and does not ensure completion of remote memory updates issued via NVSHMEM routines."""
+    return tir.call_intrin("handle", tir.op.Op.get("tl.SyncAllBlock"))
+
+
+def sync_block(team):
+    """Synchronize all blocks in a team. 
+    In contrast with `barrier_all`, 
+    `sync_all` only ensures completion and visibility of previously issued memory stores, 
+    and does not ensure completion of remote memory updates issued via NVSHMEM routines.
+    
+    Args:
+        team: The team ID to synchronize.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.SyncBlock"), team)
+
+
+def sync_all_warp():
+    """Synchronize all warps. In contrast with `barrier_all`, 
+    `sync_all` only ensures completion and visibility of previously issued memory stores, 
+    and does not ensure completion of remote memory updates issued via NVSHMEM routines."""
+    return tir.call_intrin("handle", tir.op.Op.get("tl.SyncAllWarp"))
+
+
+def sync_warp(team):
+    """Synchronize all warps in a team. 
+    In contrast with `barrier_all`, 
+    `sync_all` only ensures completion and visibility of previously issued memory stores, 
+    and does not ensure completion of remote memory updates issued via NVSHMEM routines.
+    
+    Args:
+        team: The team ID to synchronize.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.SyncWarp"), team)
 
 
 def quiet():
