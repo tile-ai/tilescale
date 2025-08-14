@@ -333,3 +333,18 @@ def sync_grid():
     """Synchronize all threads in a grid.
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.sync_grid"))
+
+
+def copy_unrolled(dst: PrimExpr, src: PrimExpr, size: int, unroll_factor: int = 4):
+    """Copy between two global memory buffers with unrolled loop.
+
+    Args:
+        dst: tir.Buffer
+            The destination buffer
+        src: tir.Buffer
+            The source buffer
+        unroll_factor: int
+            The unroll factor
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.copy_unrolled"), dst, src, size,
+                           unroll_factor)
