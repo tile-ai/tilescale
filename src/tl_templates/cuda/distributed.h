@@ -30,28 +30,28 @@ TL_DEVICE void memory_fence_sys() {
 // GPU-level load with acquire semantics
 TL_DEVICE int ld_acquire_gpu(const int *ptr) {
     int ret;
-    asm volatile("ld.acquire.gpu.global.s32 %0, [%1];" : "=r"(ret) : "l"(ptr));
+    asm volatile("ld.acquire.gpu.global.s32 %0, [%1];\n" : "=r"(ret) : "l"(ptr));
     return ret;
 }
 
 // System-level load with acquire semantics
 TL_DEVICE uint64_t ld_acquire_sys(const uint64_t *ptr) {
     uint64_t ret;  // ? Why uint64_t?
-    asm volatile("ld.acquire.sys.global.u64 %0, [%1];" : "=l"(ret) : "l"(ptr));
+    asm volatile("ld.acquire.sys.global.u64 %0, [%1];\n" : "=l"(ret) : "l"(ptr));
     return ret;
 }
 
 // GPU-level atomic add with release semantics
 TL_DEVICE int atomic_add_release_gpu(const int* ptr, int value) {
     int ret;
-    asm volatile("atom.add.release.gpu.global.s32 %0, [%1], %2;" : "=r"(ret) : "l"(ptr), "r"(value));
+    asm volatile("atom.add.release.gpu.global.s32 %0, [%1], %2;\n" : "=r"(ret) : "l"(ptr), "r"(value));
     return ret;
 }
 
 // System-level atomic add with acquire semantics
 TL_DEVICE int atomic_add_acquire_sys(const int* ptr, int value) {
     int ret;
-    asm volatile("atom.add.acquire.sys.global.s32 %0, [%1], %2;" : "=r"(ret) : "l"(ptr), "r"(value));
+    asm volatile("atom.add.acquire.sys.global.s32 %0, [%1], %2;\n" : "=r"(ret) : "l"(ptr), "r"(value));
     return ret;
 }
 
