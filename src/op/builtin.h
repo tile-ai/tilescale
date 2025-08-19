@@ -286,6 +286,13 @@ TVM_DLL const Op &tvm_rdna_wmma_store();
  */
 TVM_DLL const Op &copy_unrolled();
 
+/*!
+ * \brief Barrier blocks in a grid
+ *
+ * void barrier_blocks(bar)
+ *
+ */
+TVM_DLL const Op &barrier_blocks();
 
 } // namespace tl
 } // namespace tvm
