@@ -185,19 +185,21 @@ def assert_fullmesh_nvlink(group: dist.ProcessGroup):
     Raises:
         AssertionError: If the NVLink connection doesn't exist between every pair of GPUs.
     """
-    
+
     # Check NVLink connection
     # NOTES: some A100 PCIE GPUs only have pairwise NVLink connection, so that we can only use EP2
     # TODO: check all cases, all local-node GPUs in the group should be connected via NVLink
     if 'PCIE' in torch.cuda.get_device_name():
         assert group.size() <= 2, 'PCIe GPUs only have pairwise NVLink connections'
 
-        import pynvml
+        import pynvml  # noqa: F403
         pynvml.nvmlInit()
 
         devices = os.environ.get('CUDA_VISIBLE_DEVICES', '0,1,2,3,4,5,6,7').strip(',').split(',')
         physical_device_idx = int(devices[torch.cuda.current_device()])
-        physical_device_indices = [0, ] * group.size()
+        physical_device_indices = [
+            0,
+        ] * group.size()
         dist.all_gather_object(physical_device_indices, physical_device_idx, group)
 
         # Check whether they are all connected via NVLink
@@ -207,9 +209,32 @@ def assert_fullmesh_nvlink(group: dist.ProcessGroup):
             for j, peer_handle in enumerate(handles):
                 if i >= j:
                     continue
-                status = pynvml.nvmlDeviceGetP2PStatus(handle, peer_handle, pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
+                status = pynvml.nvmlDeviceGetP2PStatus(handle, peer_handle,
+                                                       pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
                 assert status == pynvml.NVML_P2P_STATUS_OK,\
                     f'GPU {physical_device_indices[i]} and GPU {physical_device_indices[j]} are not connected via NVLink'
 
         # Close NVML
         pynvml.nvmlShutdown()
+
+
+def is_hopper_gpu():
+    return torch.cuda.get_device_capability()[0] == 9
+
+
+def get_heursitic_param():
+    """Returns heuristic parameters (block_M, block_N, block_K, threads, num_stages) 
+    for GEMM kernels based on the current GPU architecture.
+
+    Args:
+        tuple: (block_M, block_N, block_K, threads, num_stages) suitable for the detected GPU.
+
+    Raises:
+        AssertionError: If the GPU is not Hopper or Ampere A100.
+    """
+
+    if is_hopper_gpu():
+        return 128, 256, 64, 256, 3
+    else:
+        assert torch.cuda.get_device_capability() == (8, 0)
+        return 128, 128, 32, 128, 2
