@@ -5,6 +5,7 @@ import os
 from typing import List, Union, Tuple, Callable, Sequence
 from contextlib import contextmanager
 from cuda import cuda, cudart
+from functools import lru_cache
 
 dtype_map = {
     "bfloat16": torch.bfloat16,
@@ -172,3 +173,20 @@ def CUDA_CHECK(err):
             raise RuntimeError(f"Cuda Error: {err}: {cudart.cudaGetErrorString(err)}")
     else:
         raise RuntimeError(f"Unknown error type: {err}")
+
+
+@lru_cache
+def supports_p2p_native_atomic():
+    """Check if native atomic operations are supported for peer-to-peer (P2P) access between CUDA devices 0 and 1."""
+
+    assert torch.cuda.is_available() and torch.cuda.device_count() > 1
+
+    # force create CUDA context
+    (err, ) = cudart.cudaFree(0)
+    CUDA_CHECK(err)
+
+    (err, support) = cudart.cudaDeviceGetP2PAttribute(
+        cudart.cudaDeviceP2PAttr.cudaDevP2PAttrNativeAtomicSupported, 0, 1
+    )
+    CUDA_CHECK(err)
+    return support == 1
