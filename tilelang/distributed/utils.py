@@ -220,11 +220,10 @@ def supports_p2p_native_atomic():
     assert torch.cuda.is_available() and torch.cuda.device_count() > 1
 
     # force create CUDA context
-    (err, ) = cudart.cudaFree(0)
+    (err,) = cudart.cudaFree(0)
     CUDA_CHECK(err)
 
     (err, support) = cudart.cudaDeviceGetP2PAttribute(
-        cudart.cudaDeviceP2PAttr.cudaDevP2PAttrNativeAtomicSupported, 0, 1
-    )
+        cudart.cudaDeviceP2PAttr.cudaDevP2PAttrNativeAtomicSupported, 0, 1)
     CUDA_CHECK(err)
     return support == 1
