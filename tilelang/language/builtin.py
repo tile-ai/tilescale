@@ -1,7 +1,7 @@
 """The language interface for tl programs."""
 
 from tilelang import tvm as tvm
-from tilelang.language import ptx_arrive_barrier, evaluate
+from tilelang.language import ptx_arrive_barrier, evaluate, address_of
 from tilelang.language.kernel import get_thread_bindings, get_block_extents
 from tvm import tir
 from typing import Union, Any
@@ -338,6 +338,18 @@ def sync_grid():
     """Synchronize all threads in a grid.
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.sync_grid"))
+
+
+def barrier_blocks(bar: PrimExpr, expected: int):
+    """Barrier for blocks in a grid.
+
+    Args:
+        bar: PrimExpr
+            The barrier to wait on
+        expected: int
+            The expected number of blocks to wait for before continuing
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.barrier_blocks"), address_of(bar), expected)
 
 
 def copy_unrolled(dst: PrimExpr, src: PrimExpr, size: int, unroll_factor: int = 4):
