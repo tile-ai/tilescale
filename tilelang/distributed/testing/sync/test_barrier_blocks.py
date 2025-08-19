@@ -7,13 +7,10 @@ import torch
 
 @tilelang.jit(out_idx=-1)
 def get_test_barrier_blocks_kernel(num_blocks: int, threads: int):
-    
+
     @T.prim_func
-    def main (
-        A: T.Tensor[(threads), "int32"], 
-        bar: T.Tensor([1], "int32"),
-        B: T.Tensor([num_blocks, threads], "int32")
-    ):
+    def main(A: T.Tensor([threads], "int32"), bar: T.Tensor([1], "int32"),
+             B: T.Tensor([num_blocks, threads], "int32")):
         with T.Kernel(num_blocks, threads=threads) as bid:
             tid = T.get_thread_binding()
             b = T.alloc_shared([threads], "int32")
@@ -23,6 +20,7 @@ def get_test_barrier_blocks_kernel(num_blocks: int, threads: int):
 
             T.copy(A, b)
             T.copy(b, B[bid, :])
+
     return main
 
 
