@@ -24,14 +24,13 @@ def get_test_barrier_blocks_kernel(num_blocks: int, threads: int):
     return main
 
 
-def test_barrier_blocks(num_blocks: int = 256):
-    threads = 128
+def test_barrier_blocks(num_blocks: int = 256, threads: int = 128):
     kernel = get_test_barrier_blocks_kernel(num_blocks, threads)
     bar = torch.tensor([0], dtype=torch.int32, device='cuda')
     input = torch.zeros(threads, dtype=torch.int32, device='cuda')
 
     print('Compilation done..')
-    output = kernel(input, bar)  # shift 1
+    output = kernel(input, bar)
     assert torch.all(output == num_blocks)
     print('Check passed✅')
 
