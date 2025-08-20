@@ -150,7 +150,7 @@ public:
         role = Role::kProducer;
         has_bulk_copy_ = true;
       }
-      if (call->op.same_as(loop_break())) {
+      if (call->op.same_as(loop_break()) || call->op.same_as(barrier_blocks())) {
         role = Role::kBoth;
       }
     }
