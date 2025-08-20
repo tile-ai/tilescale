@@ -76,7 +76,7 @@ if USE_DISTRIBUTED:
         NVSHMEM_SRC = os.environ.get("NVSHMEM_SRC")
     else:
         NVSHMEM_SRC = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),"..", "3rdparty", "nvshmem_src")
+            os.path.dirname(os.path.abspath(__file__)), "..", "3rdparty", "nvshmem_src")
     NVSHMEM_INCLUDE_DIR: str = NVSHMEM_SRC + "/build/src/include"
     NVSHMEM_LIB_PATH: str = NVSHMEM_SRC + "/build/src/lib"
 else:
