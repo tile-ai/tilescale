@@ -6,6 +6,7 @@ from tilelang.language.kernel import get_thread_bindings, get_block_extents
 from tvm import tir
 from typing import Union, Any
 from tvm.tir import PrimExpr, Var, Call
+import tilelang.language as T
 
 
 def create_list_of_mbarrier(*args: Any) -> Call:
@@ -340,18 +341,6 @@ def sync_grid():
     return tir.call_intrin("handle", tir.op.Op.get("tl.sync_grid"))
 
 
-def barrier_blocks(bar: PrimExpr, expected: int):
-    """Barrier for blocks in a grid.
-
-    Args:
-        bar: PrimExpr
-            The barrier to wait on
-        expected: int
-            The expected number of blocks to wait for before continuing
-    """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.barrier_blocks"), address_of(bar), expected)
-
-
 def copy_unrolled(dst: PrimExpr, src: PrimExpr, size: int, unroll_factor: int = 4):
     """Copy between two global memory buffers with unrolled loop.
 
@@ -365,3 +354,51 @@ def copy_unrolled(dst: PrimExpr, src: PrimExpr, size: int, unroll_factor: int = 
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.copy_unrolled"), dst, src, size,
                            unroll_factor)
+
+
+# Device-level barrier synchronization
+
+def alloc_barrier_gpu():
+    """Allocate a barrier for GPU-level synchronization.
+
+    Returns:
+        T.Buffer: A single-element TVM buffer object allocated as a barrier
+    """
+    return T.alloc_buffer([1], "uint32", scope="global")
+
+
+def init_barrier_gpu(barrier: PrimExpr, expected: int):
+    """Initialize a barrier for GPU-level synchronization.
+    
+    Args:
+        barrier: The barrier to initialize
+        expected (int): The number of threads that need to arrive at the barrier.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.init_barrier_gpu"), address_of(barrier), expected)
+
+
+def arrive_barrier_gpu(barrier: PrimExpr):
+    """Arrive at a barrier for GPU-level synchronization.
+
+    Args:
+        barrier: The barrier to arrive at
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.arrive_barrier_gpu"), address_of(barrier))
+
+
+def wait_barrier_gpu(barrier: PrimExpr):
+    """Wait at a barrier for GPU-level synchronization.
+
+    Args:
+        barrier: The barrier to wait at
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.wait_barrier_gpu"), address_of(barrier))
+
+
+def sync_barrier_gpu(barrier: PrimExpr):
+    """Synchronize at a barrier for GPU-level synchronization.
+
+    Args:
+        barrier: The barrier to synchronize at
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.sync_barrier_gpu"), address_of(barrier))

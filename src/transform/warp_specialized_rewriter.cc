@@ -150,9 +150,16 @@ public:
         role = Role::kProducer;
         has_bulk_copy_ = true;
       }
-      if (call->op.same_as(loop_break()) || call->op.same_as(barrier_blocks())) {
+      if (call->op.same_as(loop_break()))
         role = Role::kBoth;
-      }
+      } else if (call->op.same_as(init_barrier_gpu())) {
+        role = Role::kBoth;
+      } else if (call->op.same_as(arrive_barrier_gpu())) {
+        role = Role::kBoth;
+      } else if (call->op.same_as(wait_barrier_gpu())) {
+        role = Role::kBoth;
+      } else if (call->op.same_as(sync_barrier_gpu())) {
+        role = Role::kBoth;
     }
     SetRole(op, role);
   }

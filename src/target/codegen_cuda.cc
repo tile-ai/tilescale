@@ -1158,10 +1158,23 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                     "cooperative_groups::this_grid();\n";
     this->PrintIndent();
     this->stream << "grid.sync();\n";
-  } else if (op->op.same_as(tl::barrier_blocks())) {
+  } else if (op->op.same_as(tl::init_barrier_gpu())) {
+    ICHECK_GE(op->args.size(), 2);
     this->need_sync_ = true;
     this->PrintIndent();
-    this->stream << "tl::barrier_blocks<" << this->PrintExpr(op->args[1]) << ">(" << this->PrintExpr(op->args[0]) << ");\n";
+    this->stream << "tl::init_barrier_gpu<" << this->PrintExpr(op->args[1]) << ">(" << this->PrintExpr(op->args[0]) << ");\n";
+  } else if (op->op.same_as(tl::arrive_barrier_gpu())) {
+    this->need_sync_ = true;
+    this->PrintIndent();
+    this->stream << "tl::arrive_barrier_gpu(" << this->PrintExpr(op->args[0]) << ");\n";
+  } else if (op->op.same_as(tl::wait_barrier_gpu())) {
+    this->need_sync_ = true;
+    this->PrintIndent();
+    this->stream << "tl::wait_barrier_gpu(" << this->PrintExpr(op->args[0]) << ");\n";
+  } else if (op->op.same_as(tl::sync_barrier_gpu())) {
+    this->need_sync_ = true;
+    this->PrintIndent();
+    this->stream << "tl::sync_barrier_gpu(" << this->PrintExpr(op->args[0]) << ");\n";
   } else if (op->op.same_as(tl::loop_break())) {
     this->PrintIndent();
     this->stream << "break;\n";
