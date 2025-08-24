@@ -1,10 +1,14 @@
 import torch
-import pynvshmem
+import torch.distributed as dist
 import datetime
 import os
+import inspect
 from typing import List, Union, Tuple, Callable, Sequence
 from contextlib import contextmanager
 from cuda import cuda, cudart
+import ctypes
+import os
+from tilelang.distributed.common.ipc_ext import create_ipc_handle, sync_ipc_handles
 
 dtype_map = {
     "bfloat16": torch.bfloat16,
@@ -17,7 +21,32 @@ dtype_map = {
 }
 
 
-def init_distributed(return_tp_group=False):
+def init_dist(local_rank: int, num_local_ranks: int):
+    ip = os.getenv('MASTER_ADDR', '127.0.0.1')
+    port = int(os.getenv('MASTER_PORT', '8361'))
+    num_nodes = int(os.getenv('WORLD_SIZE', 1))
+    node_rank = int(os.getenv('RANK', 0))
+
+    sig = inspect.signature(dist.init_process_group)
+    params = {
+        'backend': 'nccl',
+        'init_method': f'tcp://{ip}:{port}',
+        'world_size': num_nodes * num_local_ranks,
+        'rank': node_rank * num_local_ranks + local_rank,
+    }
+    if 'device_id' in sig.parameters:
+        # noinspection PyTypeChecker
+        params['device_id'] = torch.device(f'cuda:{local_rank}')
+    dist.init_process_group(**params)
+    torch.set_default_dtype(torch.bfloat16)
+    torch.set_default_device('cuda')
+    torch.cuda.set_device(local_rank)
+
+    return dist.get_rank(), dist.get_world_size(), dist.new_group(
+        list(range(num_local_ranks * num_nodes)))
+
+
+def init_distributed(return_tp_group=False, init_nvshmem=False):
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
     RANK = int(os.environ.get("RANK", 0))
     LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
@@ -33,12 +62,43 @@ def init_distributed(return_tp_group=False):
     TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
 
     torch.cuda.synchronize()
-    pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
+    if init_nvshmem:
+        import pynvshmem
+        pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
 
     if return_tp_group:
         return WORLD_SIZE, RANK, LOCAL_RANK, TP_GROUP
     else:
         return WORLD_SIZE, RANK, LOCAL_RANK
+
+
+# IPC related functions
+def get_local_ipc_handle(data: torch.Tensor):
+    p = ctypes.c_void_p(data.data_ptr())
+    handle = create_ipc_handle(p.value)
+    return handle
+
+
+def create_dist_tensor(local_rank: int, num_local_ranks: int, data: torch.Tensor, rank: int,
+                       group: dist.ProcessGroup):
+    assert num_local_ranks == group.size()
+    # Synchronize device IDs
+    device_ids = [
+        None,
+    ] * group.size()
+    local_device_id = local_rank
+    dist.all_gather_object(device_ids, local_device_id, group)
+
+    # Synchronize IPC handles
+    ipc_handles = [
+        None,
+    ] * group.size()
+    local_ipc_handle = get_local_ipc_handle(data)
+    dist.all_gather_object(ipc_handles, local_ipc_handle, group)
+    buffer_ptrs_gpu = torch.empty(group.size(), dtype=torch.uint64, device="cuda")
+    sync_ipc_handles(rank, device_ids,
+                     ctypes.c_void_p(buffer_ptrs_gpu.data_ptr()).value, ipc_handles, None)
+    return buffer_ptrs_gpu
 
 
 @contextmanager

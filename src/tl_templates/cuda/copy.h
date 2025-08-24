@@ -183,4 +183,26 @@ TL_DEVICE void cp_unrolled(dtype_t const* const dst_addr, dtype_t const* const s
     ST_FUNC(__dst + __i, LD_FUNC(__src + __i));
 }
 
+template <int N, int UNROLL_FACTOR, typename dtype_t>
+TL_DEVICE void cp_unrolled(uint64_t dst_addr_uint64, dtype_t const* const src_addr) {
+    dtype_t* dst_addr = reinterpret_cast<dtype_t*>(dst_addr_uint64);
+
+    int lane_id;
+    asm("mov.s32 %0, %laneid;" : "=r"(lane_id));
+    constexpr int kLoopStride = 32 * (UNROLL_FACTOR);
+    typename std::remove_reference<decltype(LD_FUNC((src_addr) + 0))>::type unrolled_values[(UNROLL_FACTOR)];
+    auto __src = (src_addr);
+    auto __dst = (dst_addr);
+    for (int __i = (lane_id); __i < ((N) / kLoopStride) * kLoopStride; __i += kLoopStride) {
+      _Pragma("unroll")
+      for (int __j = 0; __j < (UNROLL_FACTOR); ++ __j)
+        unrolled_values[__j] = LD_FUNC(__src + __i + __j * 32);
+      _Pragma("unroll")
+      for (int __j = 0; __j < (UNROLL_FACTOR); ++ __j)
+        ST_FUNC(__dst + __i + __j * 32, unrolled_values[__j]);
+    }
+    for (int __i = ((N) / kLoopStride) * kLoopStride + (lane_id); __i < (N); __i += 32)
+      ST_FUNC(__dst + __i, LD_FUNC(__src + __i));
+}
+
 } // namespace tl
