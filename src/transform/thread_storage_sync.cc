@@ -20,7 +20,8 @@
 /*!
  * \file thread_storage_sync.cc
  */
-#include <tvm/runtime/registry.h>
+#include <tvm/ffi/function.h>
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/expr.h>
@@ -30,47 +31,14 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "./common/thread_sync_types.h"
 #include "./storage_access.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
 
-struct ThreadBoundKey {
-  int64_t tx_min, tx_max, ty_min, ty_max, tz_min, tz_max;
-  bool operator==(const ThreadBoundKey &other) const {
-    return tx_min == other.tx_min && tx_max == other.tx_max &&
-           ty_min == other.ty_min && ty_max == other.ty_max &&
-           tz_min == other.tz_min && tz_max == other.tz_max;
-  }
-};
-
-namespace std {
-template <> struct hash<ThreadBoundKey> {
-  size_t operator()(const ThreadBoundKey &k) const {
-    size_t h = std::hash<int64_t>()(k.tx_min);
-    h = h * 31 + std::hash<int64_t>()(k.tx_max);
-    h = h * 31 + std::hash<int64_t>()(k.ty_min);
-    h = h * 31 + std::hash<int64_t>()(k.ty_max);
-    h = h * 31 + std::hash<int64_t>()(k.tz_min);
-    h = h * 31 + std::hash<int64_t>()(k.tz_max);
-    return h;
-  }
-};
-} // namespace std
 namespace tvm {
 namespace tl {
-
-// There are 16 Named Barriers provided by Hardware starting in Hopper
-// Their IDs are in the range 0-15
-// Number of threads syncing using the barrier must be a multiple of warp-size
-// ID 0 should not be used for safety, as other driver APIs (i.e. __syncthreads)
-// may use it and conflict with other uses.
-enum class ReservedNamedBarriers {
-  kSyncThreads = 0,
-  kReduce_0 = 1,
-  kReduce_1 = 2,
-  kFirstUsedBarrier = kReduce_1 + 1
-};
 
 using namespace tir;
 using arith::IRMutatorWithAnalyzer;
@@ -82,7 +50,6 @@ public:
 
   // The syncs inserted before each statement
   std::unordered_set<const Object *> syncs_inserted_;
-  std::unordered_map<const Object *, int> partial_syncs_inserted_;
 
 protected:
   bool Enabled(const VarNode *buf, const StorageScope &scope) const final {
@@ -94,19 +61,18 @@ protected:
     // Redirect all "shared.dyn" buffer access to the same buffer var
     // so that the accesses can be planned together.
     Var shared_dyn_buf;
-    // for (StmtEntry& entry : seq) {
-    //   for (AccessEntry& access : entry.access) {
-    //     if (access.scope.rank == StorageRank::kShared && access.scope.tag ==
-    //     ".dyn" &&
-    //         access.buffer.defined()) {
-    //       if (!shared_dyn_buf.defined()) {
-    //         shared_dyn_buf = access.buffer;
-    //       } else {
-    //         access.buffer = shared_dyn_buf;
-    //       }
-    //     }
-    //   }
-    // }
+    for (StmtEntry &entry : seq) {
+      for (AccessEntry &access : entry.access) {
+        if (access.scope.rank == StorageRank::kShared &&
+            access.scope.tag == ".dyn" && access.buffer.defined()) {
+          if (!shared_dyn_buf.defined()) {
+            shared_dyn_buf = access.buffer;
+          } else {
+            access.buffer = shared_dyn_buf;
+          }
+        }
+      }
+    }
 
     // Unsynced reads and writes
     std::vector<AccessEntry> reads;
@@ -122,6 +88,7 @@ protected:
         reads.clear();
         writes.clear();
       }
+
       for (const AccessEntry &acc : s.access) {
         if (acc.type == kRead) {
           if (FindConflict(writes, acc, false)) {
@@ -188,7 +155,7 @@ protected:
         }
       }
     }
-    // return the exposed entries, remove unecessary ones.
+    // return the exposed entries, remove unnecessary ones.
     int sync_count = 0;
     // head are before first sync, tail are after last sync
     std::vector<AccessEntry> head, tail;
@@ -258,6 +225,8 @@ private:
     // TODO(tqchen) more standard set based testing.
     bool has_same_index = true;
     bool range_is_equal = true;
+    bool range_is_overlap = true;
+
     for (const auto &kv : prev.thread_range) {
       if (!StructuralEqual()(kv.second, curr.thread_range[kv.first])) {
         range_is_equal = false;
@@ -269,12 +238,91 @@ private:
       // They are not the same indices, should be conflict.
       return true;
     }
+    if (prev.is_pointer_access || curr.is_pointer_access) {
+      // If either access is a pointer access, conservatively assume a
+      // conflict. For example, address_of(A[0, 0]) may refer to an unknown
+      // memory region, so we cannot safely determine if it overlaps with
+      // previous accesses.
+      return true;
+    }
 
     for (size_t i = 0; i < prev.buffer_indices.size(); i++) {
+      auto prev_dtype = prev.dtype;
+      auto curr_dtype = curr.dtype;
+
       const auto &prev_indice = prev.buffer_indices[i];
       const auto &curr_indice = curr.buffer_indices[i];
+
       if (!ExprDeepEqual()(prev_indice, curr_indice)) {
+        PrimExpr prev_indice_bytes =
+            analyzer_.Simplify(prev_indice * prev_dtype.bytes());
+        PrimExpr curr_indice_bytes =
+            analyzer_.Simplify(curr_indice * curr_dtype.bytes());
+
         has_same_index = false;
+
+        // If both are const, we can check if they are disjoint
+        // by checking if the bounds are disjoint
+        // [1024, 2048], [2048, 3072] are disjoint
+        // [1024, 2048], [1024, 1024] are not disjoint
+        auto prev_bound = analyzer_.const_int_bound(prev_indice_bytes);
+        auto curr_bound = analyzer_.const_int_bound(curr_indice_bytes);
+        if (prev_bound.defined() && curr_bound.defined()) {
+          if ((prev_bound->min_value) > (curr_bound->max_value) ||
+              (curr_bound->min_value) > (prev_bound->max_value)) {
+            range_is_overlap = false;
+            break;
+          }
+        }
+
+        // if we can prove prev_indice < curr_indice or prev_indice >
+        // curr_indice, then they are not overlap
+        auto prev_indices_dtype = prev_indice.dtype();
+        auto curr_indices_dtype = curr_indice.dtype();
+        if (prev_indices_dtype.lanes() != curr_indices_dtype.lanes()) {
+          // can not support different lanes binary op like <, >, <=, >=
+          // skip otherwise it will lead to error
+          continue;
+        }
+
+        // provably disjoint means no overlap, for example:
+        // we can prove that tx - 128 < tx + 128, tx in [0, 128]
+        // However, we should apply tx split because
+        // tx < tx + 32 when tx in [0, 128] is not disjoint
+        // because [0, 128] is not disjoint with [32, 160]
+        // so we should split tx into tx0 and tx1.
+
+        struct ThreadVarInfo {
+          const char *name_prev;
+          const char *name_curr;
+          IterVar iv;
+        } thread_vars[] = {
+            {"tx1", "tx2", tx_},
+            {"ty1", "ty2", ty_},
+            {"tz1", "tz2", tz_},
+        };
+
+        for (const auto &info : thread_vars) {
+          Var prev_var(info.name_prev, info.iv->var.dtype());
+          Var curr_var(info.name_curr, info.iv->var.dtype());
+          analyzer_.Bind(prev_var, info.iv->dom);
+          analyzer_.Bind(curr_var, info.iv->dom);
+          prev_indice_bytes =
+              Substitute(prev_indice_bytes, {{info.iv->var, prev_var}});
+          curr_indice_bytes =
+              Substitute(curr_indice_bytes, {{info.iv->var, curr_var}});
+        }
+
+        bool provably_disjoint =
+            analyzer_.CanProve(prev_indice_bytes < curr_indice_bytes,
+                               arith::ProofStrength::kSymbolicBound) ||
+            analyzer_.CanProve(prev_indice_bytes > curr_indice_bytes,
+                               arith::ProofStrength::kSymbolicBound);
+
+        if (provably_disjoint) {
+          range_is_overlap = false;
+          break;
+        }
       }
 
       if (!(has_same_index)) {
@@ -291,54 +339,43 @@ private:
     if (prev.double_buffer_write && curr.type == kRead && !loop_carry) {
       return false;
     }
+
     // If nothing else allows sharing the same buffer, then they are
     // in conflict.
-    return true;
+    // if range_is_overlap is true, then they are in conflict, we should return
+    // true. if range_is_overlap is false, then they are not in conflict, we
+    // should return false.
+    return range_is_overlap;
   }
 
   void VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == "kWarpSpecializationScope") {
-      IfThenElse body = Downcast<IfThenElse>(op->body);
-      auto partitions = Downcast<Array<IntImm>>(op->node);
-      ICHECK(partitions.size() == 2);
-
-      scope_.push_back(std::vector<StmtEntry>());
-      num_partial_threads_ = partitions[0];
-      this->VisitStmt(body->then_case);
-      StmtEntry s;
-      s.stmt = op;
-      s.access = Summarize(std::move(scope_.back()), nullptr);
-      scope_.pop_back();
-
-      num_partial_threads_ = partitions[1];
-      scope_.push_back(std::vector<StmtEntry>());
-      VisitStmt(body->else_case.value());
-      auto v = Summarize(std::move(scope_.back()), nullptr);
-      scope_.pop_back();
-      s.access.insert(s.access.end(), v.begin(), v.end());
-
-      num_partial_threads_ = NullOpt;
-    } else {
-      TileLangStorageAccessVisitor::VisitStmt_(op);
+    if (op->attr_key == tvm::tir::attr::thread_extent) {
+      IterVar iv = Downcast<IterVar>(op->node);
+      if (iv->thread_tag == "threadIdx.x") {
+        tx_ = iv;
+      } else if (iv->thread_tag == "threadIdx.y") {
+        ty_ = iv;
+      } else if (iv->thread_tag == "threadIdx.z") {
+        tz_ = iv;
+      }
     }
+    TileLangStorageAccessVisitor::VisitStmt_(op);
   }
 
   void insert_syncs(const Object *obj) {
-    // ICHECK_EQ(condition_counter(), 0) << "Cannot insert syncs inside
-    // condition";
     if (syncs_inserted_.count(obj))
       return;
-    if (num_partial_threads_.defined()) {
-      syncs_inserted_.insert(obj);
-      partial_syncs_inserted_[obj] =
-          static_cast<int>(num_partial_threads_.value()->value);
-    } else {
-      syncs_inserted_.insert(obj);
-    }
+    syncs_inserted_.insert(obj);
   }
 
 private:
-  Optional<IntImm> num_partial_threads_;
+  // Member variables
+  IterVar tx_ =
+      IterVar(Range::FromMinExtent(0, 1), Var("tx"), IterVarType::kDataPar);
+  IterVar ty_ =
+      IterVar(Range::FromMinExtent(0, 1), Var("ty"), IterVarType::kDataPar);
+  IterVar tz_ =
+      IterVar(Range::FromMinExtent(0, 1), Var("tz"), IterVarType::kDataPar);
   // synchronization scope
   StorageScope sync_scope_;
 };
@@ -392,9 +429,8 @@ private:
 class ThreadSyncInserter : public StmtExprMutator {
 public:
   ThreadSyncInserter(StorageScope sync_scope,
-                     const std::unordered_set<const Object *> &syncs,
-                     std::unordered_map<const Object *, int> partial_syncs)
-      : sync_scope_(sync_scope), syncs_(syncs), partial_syncs_(partial_syncs) {}
+                     const std::unordered_set<const Object *> &syncs)
+      : sync_scope_(sync_scope), syncs_(syncs) {}
 
   Stmt VisitStmt(const Stmt &stmt) final {
     if (syncs_.size() == 0)
@@ -403,8 +439,6 @@ public:
       Stmt barrier;
       if (sync_scope_.rank == StorageRank::kGlobal) {
         barrier = MakeGlobalBarrier();
-      } else if (partial_syncs_.count(stmt.get())) {
-        return StmtExprMutator::VisitStmt(stmt);
       } else {
         barrier = Evaluate(Call(DataType::Int(32), builtin::tvm_storage_sync(),
                                 {StringImm(sync_scope_.to_string())}));
@@ -551,7 +585,7 @@ private:
   // data structure.
   StorageScope sync_scope_;
   const std::unordered_set<const Object *> &syncs_;
-  const std::unordered_map<const Object *, int> &partial_syncs_;
+
   // The read write statistics of storage
   std::unordered_map<Var, Entry, ObjectPtrHash, ObjectPtrEqual> rw_stats_;
   // The statistics for global barrier
@@ -707,20 +741,23 @@ private:
   std::unordered_map<ThreadBoundKey, size_t> thread_count_map_;
 };
 
-Stmt TileLangThreadSync(Stmt stmt, std::string storage_scope) {
+PrimFunc TileLangThreadSync(PrimFunc func, std::string storage_scope) {
   StorageScope sync_scope = StorageScope::Create(storage_scope);
-
+  auto *n = func.CopyOnWrite();
+  auto stmt = n->body;
   if (sync_scope.rank == StorageRank::kShared && sync_scope.tag == "") {
     stmt = ThreadSyncAfterWaitQueueInserter(sync_scope)(stmt);
   }
-
   TileLangThreadSyncPlanner planner(sync_scope);
+  for (const auto &[_, buffer] : func->buffer_map) {
+    planner.SetBufferDataToBuffer(buffer->data, buffer);
+  }
   planner(stmt);
 
-  stmt = ThreadSyncInserter(sync_scope, planner.syncs_inserted_,
-                            planner.partial_syncs_inserted_)(std::move(stmt));
-
-  return ThreadPartialSyncRewriter::Rewrite(std::move(stmt));
+  stmt =
+      ThreadSyncInserter(sync_scope, planner.syncs_inserted_)(std::move(stmt));
+  n->body = ThreadPartialSyncRewriter::Rewrite(std::move(stmt));
+  return func;
 }
 
 using namespace tir::transform;
@@ -730,13 +767,16 @@ namespace transform {
 tvm::transform::Pass ThreadSync(String storage_scope) {
   auto pass_func = [storage_scope](PrimFunc f, IRModule m, PassContext ctx) {
     auto *n = f.CopyOnWrite();
-    n->body = tl::TileLangThreadSync(std::move(n->body), storage_scope);
-    return f;
+    return tl::TileLangThreadSync(std::move(f), storage_scope);
+    ;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.ThreadSync", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.ThreadSync").set_body_typed(ThreadSync);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.ThreadSync", ThreadSync);
+});
 
 } // namespace transform
 } // namespace tl

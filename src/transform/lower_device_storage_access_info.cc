@@ -22,7 +22,8 @@
  * \brief Lower the special device storage access.
  */
 #include <tvm/arith/analyzer.h>
-#include <tvm/runtime/registry.h>
+#include <tvm/ffi/function.h>
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/target/target_info.h>
 #include <tvm/tir/buffer.h>
 #include <tvm/tir/builtin.h>
@@ -43,7 +44,8 @@ class StorageAccessInfoLower : public StmtExprMutator {
 public:
   Stmt VisitStmt_(const AllocateNode *op) final {
     auto scope = StorageScope::Create(GetPtrStorageScope(op->buffer_var));
-    if (scope.tag.length() != 0 && scope.tag != ".dyn" && scope.tag != ".var") {
+    if (scope.tag.length() != 0 && scope.tag != ".dyn" && scope.tag != ".var" &&
+        scope.tag != ".barrier") {
       auto info = GetMemoryInfo(GetPtrStorageScope(op->buffer_var));
       ICHECK(info.defined())
           << "Cannot find memory info of " << scope.to_string();
@@ -141,8 +143,11 @@ Pass LowerDeviceStorageAccessInfo() {
                             {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.LowerDeviceStorageAccessInfo")
-    .set_body_typed(LowerDeviceStorageAccessInfo);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.LowerDeviceStorageAccessInfo",
+                        LowerDeviceStorageAccessInfo);
+});
 
 } // namespace transform
 } // namespace tl

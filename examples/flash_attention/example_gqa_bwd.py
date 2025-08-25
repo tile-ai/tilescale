@@ -1,7 +1,6 @@
 import torch
 import torch.nn.functional as F
 import tilelang
-from tilelang.autotuner import *
 import tilelang.language as T
 import argparse
 
@@ -302,9 +301,9 @@ def ref_program(Q, K, V, is_causal, groups=1):
     return output
 
 
-def main(BATCH: int = 8,
+def main(BATCH: int = 1,
          H: int = 32,
-         N_CTX: int = 1024,
+         N_CTX: int = 256,
          D_HEAD_QK: int = 192,
          D_HEAD_V: int = 128,
          groups: int = 16,
@@ -340,11 +339,10 @@ def main(BATCH: int = 8,
     dK_ref, K.grad = K.grad.clone(), None
     dV_ref, V.grad = V.grad.clone(), None
 
-    assert torch.allclose(O, O_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(O, O_ref, rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(dV, dV_ref, rtol=1e-2, atol=1e-2)
-    assert torch.allclose(dV, dV_ref, rtol=1e-2, atol=1e-2)
-    assert torch.allclose(dK, dK_ref, rtol=1e-2, atol=1e-2)
-    assert torch.allclose(dQ, dQ_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(dK, dK_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(dQ, dQ_ref, rtol=1e-2, atol=1e-2)
 
     def run():
         O_ref.backward(dO, retain_graph=True)

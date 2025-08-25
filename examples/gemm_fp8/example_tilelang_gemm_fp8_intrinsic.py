@@ -1,5 +1,4 @@
 import torch
-import torch.backends
 from tilelang import tvm as tvm
 import tilelang.testing
 from tvm import DataType
@@ -40,8 +39,8 @@ def tl_matmul(
 ):
     assert in_dtype in [
         "float16",
-        "e4m3_float8",
-        "e5m2_float8",
+        "float8_e4m3",
+        "float8_e5m2",
         "int8",
     ], "Currently only float16 and int8 are supported"
     assert out_dtype in [
@@ -52,7 +51,7 @@ def tl_matmul(
 
     micro_size_x = micro_size_y = micro_size_k = 16
 
-    is_float8 = in_dtype in ["e4m3_float8", "e5m2_float8"]
+    is_float8 = in_dtype in ["float8_e4m3", "float8_e5m2"]
     if out_dtype == "int32" or is_float8:
         micro_size_k = 32
 
@@ -216,8 +215,8 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
 
 
 def main():
-    assert_tl_matmul_correctness(128, 128, 128, "e4m3_float8", "float32", "float32")
-    assert_tl_matmul_correctness(128, 128, 128, "e5m2_float8", "float32", "float32")
+    assert_tl_matmul_correctness(128, 128, 128, "float8_e4m3", "float32", "float32")
+    assert_tl_matmul_correctness(128, 128, 128, "float8_e5m2", "float32", "float32")
 
 
 if __name__ == "__main__":

@@ -50,8 +50,12 @@ def get_configs(args, kwargs):
     if with_roller:
         from tilelang.carver.template import MatmulTemplate
         from tilelang.carver.arch import CUDA
+        from tilelang.carver.arch import CDNA
         from tilelang.carver.roller.rasterization import NoRasterization
-        arch = CUDA("cuda")
+        import torch
+
+        arch = CDNA("hip") if torch.version.hip is not None else CUDA("cuda")
+
         topk = 10
 
         carve_template = MatmulTemplate(
@@ -152,7 +156,7 @@ def matmul(
 
     # Use half-precision for input data to reduce memory bandwidth,
     # accumulate in float for better numerical accuracy
-    dtype = "e4m3_float8"
+    dtype = "float8_e4m3"
     accum_dtype = "float"
 
     @T.prim_func

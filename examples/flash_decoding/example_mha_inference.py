@@ -44,7 +44,7 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
     @T.macro
     def MMA1(
         V: T.Tensor(shape_kv, dtype),
-        V_shared: T.SharedBuffer([block_M, dim], dtype),
+        V_shared: T.SharedBuffer([block_N, dim], dtype),
         acc_s_cast: T.FragmentBuffer([block_M, block_N], dtype),
         acc_o: T.FragmentBuffer([block_M, dim], accum_dtype),
         k: T.int32,
@@ -305,7 +305,6 @@ def main():
     BLOCK_N = 64  # if D_HEAD <= 128 else 32
     kernel = flashattn(BATCH, H, Q_CTX, KV_CTX, D_HEAD, causal, BLOCK_M, BLOCK_N)
     ref_fn = partial(ref_program, causal=causal)
-    print(kernel.get_kernel_source())
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
     profiler.assert_allclose(ref_fn, rtol=0.01, atol=0.01)
     print("All checks passed!")
