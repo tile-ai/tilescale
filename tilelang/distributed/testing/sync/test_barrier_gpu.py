@@ -8,17 +8,17 @@ tilelang.disable_cache()
 
 
 @tilelang.jit(out_idx=-1)
-def get_test_barrier_blocks_kernel(num_blocks: int, threads: int):
+def get_test_barrier_gpu_kernel(num_blocks: int, threads: int):
 
     @T.prim_func
-    def main(A: T.Tensor([threads], "int32"),
-             bar: T.Tensor([1], 'uint32'),
-             B: T.Tensor([num_blocks, threads], "int32")):
-        # bar = T.alloc_barrier_gpu()
+    def main(
+            A: T.Tensor([threads], "int32"),
+            bar: T.Tensor([1], 'uint32'),  # TODO(wt): auto alloc global bar
+            B: T.Tensor([num_blocks, threads], "int32")):
         with T.Kernel(num_blocks, threads=threads) as bid:
             tid = T.get_thread_binding()
             T.init_barrier_gpu(bar, num_blocks)
-            
+
             b = T.alloc_shared([threads], "int32")
             T.atomic_add(A[tid], 1)
 
@@ -30,8 +30,8 @@ def get_test_barrier_blocks_kernel(num_blocks: int, threads: int):
     return main
 
 
-def test_barrier_blocks(num_blocks: int = 64, threads: int = 128, print_source: bool = False):
-    kernel = get_test_barrier_blocks_kernel(num_blocks, threads)
+def test_barrier_gpu(num_blocks: int = 64, threads: int = 128, print_source: bool = False):
+    kernel = get_test_barrier_gpu_kernel(num_blocks, threads)
     input = torch.zeros(threads, dtype=torch.int32, device='cuda')
     bar = torch.zeros(1, dtype=torch.uint32, device='cuda')
     if print_source:
@@ -56,4 +56,4 @@ if __name__ == "__main__":
     args = parse_args()
     assert args.blocks <= driver.get_num_sms(
     ), f'Launched {args.blocks} blocks, which is larger than the number of SM ({driver.get_num_sms()}) on the current device and may cause deadlock!'
-    test_barrier_blocks(args.blocks, args.threads, args.print_source)
+    test_barrier_gpu(args.blocks, args.threads, args.print_source)
