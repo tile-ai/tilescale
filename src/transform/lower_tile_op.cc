@@ -158,12 +158,32 @@ private:
 class LowerTileOpPass : arith::IRMutatorWithAnalyzer {
 public:
   static PrimFunc Substitute(PrimFunc f) {
+    // TODO: insert meta_data and rank automatically
+    Var meta_data_var_;
+    bool has_meta_data_ = false;
+    for (int i = 0; i < f->params.size(); i++) {
+      if (f->buffer_map[f->params[i]]->buffer_type == BufferType::kMetaData) {
+        ICHECK(!has_meta_data_) << "LowerTileOpPass: Only one meta_data buffer is allowed";
+        meta_data_var_ = f->params[i];
+        has_meta_data_ = true;
+      }
+    }
+
     arith::Analyzer analyzer;
     LowerTileOpPass substituter(&analyzer);
     // Trace the buffer map for tvm_access_ptr
     substituter.buffer_map_.insert(f->buffer_map.begin(), f->buffer_map.end());
     for (const auto &[_, buffer] : f->buffer_map) {
       substituter.buffer_data_to_buffer_.Set(buffer->data, buffer);
+    }
+    if (has_meta_data_) {
+      int cnt = 0;
+      substituter.meta_data_buffer_ = f->buffer_map[meta_data_var_];
+      for (int i = 0; i < f->params.size(); i++) {
+        if (f->buffer_map[f->params[i]]->buffer_type == BufferType::kDistributed) {
+          substituter.buffer_to_meta_data_index_.Set(f->buffer_map[f->params[i]], cnt++);
+        }      
+      }
     }
     auto target = f->GetAttr<Target>(tvm::attr::kTarget);
     ICHECK(target.defined()) << "LowerTileOpPass: Require the target attribute";
@@ -434,7 +454,7 @@ private:
 
     auto lowered = tile_op->Lower(
         LowerArgs{target_, thread_bounds, thread_var_->var, callback,
-                  layout_map_, buffer_remap_, disable_tma_lower},
+                  layout_map_, buffer_remap_, disable_tma_lower, meta_data_buffer_, buffer_to_meta_data_index_},
         analyzer_);
     return IRMutatorWithAnalyzer::VisitStmt(lowered);
   }
@@ -468,6 +488,8 @@ private:
   // Mapping from data Var of a Buffer to Buffer, for lookup
   std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_map_;
   Map<Var, Var> var_remap_;
+  Buffer meta_data_buffer_;
+  Map<Buffer, PrimExpr> buffer_to_meta_data_index_;
 };
 
 namespace transform {

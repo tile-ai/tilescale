@@ -50,6 +50,8 @@ struct LowerArgs {
   LayoutMap layout_map;
   Map<Buffer, Buffer> buffer_remap;
   bool disable_tma_lower;
+  Buffer meta_data_buffer;
+  Map<Buffer, PrimExpr> buffer_to_meta_data_index;
 };
 
 struct LayoutInferArgs {
