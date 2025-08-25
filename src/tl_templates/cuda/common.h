@@ -48,6 +48,15 @@ using int4_t = int4;
     }                                                                          \
   } while (0)
 
+#define TILELANG_DEVICE_ASSERT(cond)                                           \
+  do {                                                                         \
+    if (!(cond)) {                                                             \
+      printf("assertion failed: %s:%d: condition: %s", __FILE__, __LINE__,     \
+             #cond);                                                           \
+      return -1;                                                               \
+    }                                                                          \
+  } while (0)
+
 // abs function for bfloat_t and half_t since there is no implicit convertion
 // method
 TL_PATCH TL_DEVICE half_t __habs(const half_t x) {
