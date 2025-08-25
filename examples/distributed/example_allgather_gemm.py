@@ -4,11 +4,10 @@ import os
 import tilelang
 import tilelang.language as T
 from tilelang.profiler import TensorSupplyType
+from tilelang.distributed.utils import init_distributed
 
-PE_num = 8
 
-
-def allgather_gemm(M, N, K, block_M, block_N, block_K, dtype="float16"):
+def allgather_gemm(PE_num, M, N, K, block_M, block_N, block_K, dtype="float16"):
 
     accum_dtype = "float"
 
@@ -38,9 +37,9 @@ def allgather_gemm(M, N, K, block_M, block_N, block_K, dtype="float16"):
                 peer[0] = (mype[0] + 1 + k) % npes[0]
                 T.putmem_signal_nbi_block(
                     T.address_of(A_ag[mype[0] * M, 0]), T.address_of(A[0, 0]),
-                    block_M * block_K * 2, T.address_of(signal[k]), k, 9, peer[0])
+                    block_M * block_K * 2, T.address_of(signal[k]), k + 1, 9, peer[0])
             for k in T.serial(PE_num - 1):
-                T.signal_wait_until(T.address_of(signal[k]), 0, k)
+                T.signal_wait_until(T.address_of(signal[k]), 0, k + 1)
 
             for bk in T.serial(PE_num):
                 T.clear(C_local)
@@ -53,12 +52,14 @@ def allgather_gemm(M, N, K, block_M, block_N, block_K, dtype="float16"):
     return main
 
 
+tilelang.disable_cache()
 M, N, K, block_M, block_N, block_K = 64, 64, 64, 64, 64, 64
 dtype = torch.float16
 
 RANK = int(os.environ.get("RANK", 0))
-
-func = allgather_gemm(M, N, K, block_M, block_N, block_K)
+WORLD_SIZE, RANK, LOCAL_RANK, TP_GROUP = init_distributed(return_tp_group=True)
+PE_num = WORLD_SIZE
+func = allgather_gemm(PE_num, M, N, K, block_M, block_N, block_K)
 kernel = tilelang.compile(func, out_idx=-1)
 
 # Get CUDA Source
@@ -83,7 +84,7 @@ def ref_program(A, B):
 C_ref = ref_program(A_tensor, B_tensor)
 print("C_ref:", C_ref)
 
-profiler.init_distributed()
+#profiler.init_distributed()
 A_local = pynvshmem.nvshmem_create_tensor([M, K], dtype)
 A_local[:].copy_(A_tensor[M * RANK:M * (RANK + 1), :])
 
