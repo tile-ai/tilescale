@@ -162,7 +162,8 @@ public:
     Var meta_data_var_;
     bool has_meta_data_ = false;
     for (int i = 0; i < f->params.size(); i++) {
-      if (f->params[i]->name_hint == "meta_data_handle") {
+      if (f->buffer_map[f->params[i]]->buffer_type == BufferType::kMetaData) {
+        ICHECK(!has_meta_data_) << "LowerTileOpPass: Only one meta_data buffer is allowed";
         meta_data_var_ = f->params[i];
         has_meta_data_ = true;
       }
@@ -176,9 +177,12 @@ public:
       substituter.buffer_data_to_buffer_.Set(buffer->data, buffer);
     }
     if (has_meta_data_) {
+      int cnt = 0;
       substituter.meta_data_buffer_ = f->buffer_map[meta_data_var_];
       for (int i = 0; i < f->params.size(); i++) {
-        substituter.buffer_to_meta_data_index_.Set(f->buffer_map[f->params[i]], i);
+        if (f->buffer_map[f->params[i]]->buffer_type == BufferType::kDistributed) {
+          substituter.buffer_to_meta_data_index_.Set(f->buffer_map[f->params[i]], cnt++);
+        }      
       }
     }
     auto target = f->GetAttr<Target>(tvm::attr::kTarget);

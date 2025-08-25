@@ -13,10 +13,10 @@ def kernel_(M, N, num_rank, block_M, block_N, threads):
 
     @T.prim_func
     def main(
-            dst: T.Tensor((M, N), "float32"),
+            dst: T.Tensor((M, N), "float32", buffer_type="distributed"),
             src: T.Tensor((M, N), "float32"),
             rank: T.Tensor((1), "int32"),
-            meta_data: T.Tensor((1, num_rank), "uint64"),
+            meta_data: T.Tensor((1, num_rank), "uint64", buffer_type="meta_data"),
     ):
         with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), threads=threads) as (bx, by):
             T.remote_copy(
