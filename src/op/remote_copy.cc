@@ -61,7 +61,7 @@ Stmt RemoteCopyOp::Lower(const LowerArgs &T,
     ICHECK(T.meta_data_buffer.defined()) << "meta_data_buffer is not defined";
     ICHECK(T.buffer_to_meta_data_index.defined()) << "buffer_to_meta_data_index is not defined";
     ICHECK(T.buffer_to_meta_data_index.find(dst_buffer) != T.buffer_to_meta_data_index.end()) << "dst_buffer is not in buffer_to_meta_data_index";
-    new_args.push_back(BufferLoad(T.meta_data_buffer, {T.buffer_to_meta_data_index[dst_buffer], dst_pe}));
+    new_args.push_back(BufferLoad(T.meta_data_buffer, {T.buffer_to_meta_data_index[dst_buffer], dst_pe}) + dst_offset);
   } else {
     new_args.push_back(dst_addr);
   }

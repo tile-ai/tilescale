@@ -333,28 +333,3 @@ def sync_grid():
     """Synchronize all threads in a grid.
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.sync_grid"))
-
-
-def remote_copy(src: PrimExpr,
-                dst: PrimExpr,
-                size: PrimExpr,
-                dst_pe: Optional[PrimExpr] = None,
-                unroll_factor: int = 4):
-    """Copy between two global memory buffers with unrolled loop.
-
-    Args:
-        src: PrimExpr
-            The source address.
-        dst: PrimExpr
-            The destination address.
-        size: PrimExpr
-            The size of the copy.
-        dst_pe: Optional[PrimExpr]
-            The PE index of the destination.
-            If provided, the dst is a symmetric address, otherwise it is a UVA address.
-            If not provided, the dst is a UVA address and dst_pe is None.
-        unroll_factor: int
-            The unroll factor
-    """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.remote_copy"), src, dst, size, dst_pe,
-                           unroll_factor)
