@@ -358,6 +358,7 @@ def copy_unrolled(dst: PrimExpr, src: PrimExpr, size: int, unroll_factor: int = 
 
 # Device-level barrier synchronization
 
+
 def alloc_barrier_gpu():
     """Allocate a barrier for GPU-level synchronization.
 
@@ -374,7 +375,8 @@ def init_barrier_gpu(barrier: PrimExpr, expected: int):
         barrier: The barrier to initialize
         expected (int): The number of threads that need to arrive at the barrier.
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.init_barrier_gpu"), address_of(barrier), expected)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.init_barrier_gpu"), address_of(barrier),
+                           expected)
 
 
 def arrive_barrier_gpu(barrier: PrimExpr):
@@ -402,3 +404,15 @@ def sync_barrier_gpu(barrier: PrimExpr):
         barrier: The barrier to synchronize at
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.sync_barrier_gpu"), address_of(barrier))
+
+
+def barrier_all_blocks_sys(barrier: PrimExpr, rank: int, num_ranks: int):
+    """Synchronize all blocks at a system-level barrier.
+
+    Args:
+        barrier: The barrier to synchronize at, should be [num_ranks, num_ranks] of int32
+        rank: The rank of the current block
+        num_ranks: The number of ranks
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.barrier_all_blocks_sys"),
+                           address_of(barrier), rank, num_ranks)

@@ -348,6 +348,14 @@ TVM_DLL const Op &wait_barrier_gpu();
  */
 TVM_DLL const Op &sync_barrier_gpu();
 
+/*!
+ * \brief Synchronize all blocks at a system-level barrier
+ *
+ * void barrier_all_blocks_sys(barrier, rank, num_ranks)
+ *
+ */
+TVM_DLL const Op &barrier_all_blocks_sys();
+
 } // namespace tl
 } // namespace tvm
 
