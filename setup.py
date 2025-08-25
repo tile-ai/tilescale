@@ -1,11 +1,12 @@
+import fcntl
+import functools
+import hashlib
 import io
 import subprocess
 import shutil
 from setuptools import setup, find_packages, Extension
 from setuptools.command.build_py import build_py
 from setuptools.command.sdist import sdist
-from setuptools.command.develop import develop
-import distutils.dir_util
 from typing import List, Optional
 import re
 import tarfile
@@ -14,17 +15,14 @@ from pathlib import Path
 import os
 import sys
 import site
-import hashlib
 import sysconfig
-import functools
 import urllib.request
-from distutils.version import LooseVersion
+from packaging.version import Version
 import platform
 import multiprocessing
 from setuptools.command.build_ext import build_ext
 import importlib
 import logging
-import fcntl
 
 # Configure logging with basic settings
 logging.basicConfig(
@@ -114,10 +112,11 @@ def get_nvcc_cuda_version():
 
     Adapted from https://github.com/NVIDIA/apex/blob/8b7a1ff183741dd8f9b87e7bafd04cfde99cea28/setup.py
     """
-    nvcc_output = subprocess.check_output(["nvcc", "-V"], universal_newlines=True)
+    nvcc_path = os.path.join(CUDA_HOME, "bin", "nvcc")
+    nvcc_output = subprocess.check_output([nvcc_path, "-V"], universal_newlines=True)
     output = nvcc_output.split()
     release_idx = output.index("release") + 1
-    nvcc_cuda_version = LooseVersion(output[release_idx].split(",")[0])
+    nvcc_cuda_version = Version(output[release_idx].split(",")[0])
     return nvcc_cuda_version
 
 
@@ -128,7 +127,7 @@ def get_rocm_version():
     # Example output: ROCM version: x.y.z-...
     match = re.search(r'ROCm Version: (\d+\.\d+\.\d+)', rocm_output)
     if match:
-        return LooseVersion(match.group(1))
+        return Version(match.group(1))
     else:
         rocm_path = os.environ.get("ROCM_PATH", "/opt/rocm")
         rocm_version_file = os.path.join(rocm_path, "lib", "cmake", "rocm",
@@ -138,9 +137,9 @@ def get_rocm_version():
                 content = f.read()
                 match = re.search(r'set\(PACKAGE_VERSION "(\d+\.\d+\.\d+)"', content)
                 if match:
-                    return LooseVersion(match.group(1))
+                    return Version(match.group(1))
     # return a default
-    return LooseVersion("5.0.0")
+    return Version("5.0.0")
 
 
 def get_tilelang_version(with_cuda=True, with_system_info=True, with_commit_id=False) -> str:
@@ -418,7 +417,7 @@ class TileLangBuilPydCommand(build_py):
             target_dir = os.path.join(self.build_lib, item)
             if os.path.isdir(source_dir):
                 self.mkpath(target_dir)
-                distutils.dir_util.copy_tree(source_dir, target_dir)
+                self.copy_tree(source_dir, target_dir)
             else:
                 target_dir = os.path.dirname(target_dir)
                 if not os.path.exists(target_dir):
@@ -434,7 +433,7 @@ class TileLangBuilPydCommand(build_py):
             target_dir = os.path.join(self.build_lib, PACKAGE_NAME, item)
             if os.path.isdir(source_dir):
                 self.mkpath(target_dir)
-                distutils.dir_util.copy_tree(source_dir, target_dir)
+                self.copy_tree(source_dir, target_dir)
             else:
                 target_dir = os.path.dirname(target_dir)
                 if not os.path.exists(target_dir):
@@ -511,7 +510,7 @@ class TileLangBuilPydCommand(build_py):
             target_dir = os.path.join(self.build_lib, PACKAGE_NAME, item)
             if os.path.isdir(source_dir):
                 self.mkpath(target_dir)
-                distutils.dir_util.copy_tree(source_dir, target_dir)
+                self.copy_tree(source_dir, target_dir)
             else:
                 target_dir = os.path.dirname(target_dir)
                 if not os.path.exists(target_dir):
@@ -528,7 +527,7 @@ class TileLangBuilPydCommand(build_py):
             target_dir = os.path.join(self.build_lib, PACKAGE_NAME, item)
             if os.path.isdir(source_dir):
                 self.mkpath(target_dir)
-                distutils.dir_util.copy_tree(source_dir, target_dir)
+                self.copy_tree(source_dir, target_dir)
             else:
                 target_dir = os.path.dirname(target_dir)
                 if not os.path.exists(target_dir):
@@ -544,7 +543,7 @@ class TileLangBuilPydCommand(build_py):
             target_dir = os.path.join(self.build_lib, PACKAGE_NAME, item)
             if os.path.isdir(source_dir):
                 self.mkpath(target_dir)
-                distutils.dir_util.copy_tree(source_dir, target_dir)
+                self.copy_tree(source_dir, target_dir)
             else:
                 target_dir = os.path.dirname(target_dir)
                 if not os.path.exists(target_dir):
@@ -570,7 +569,7 @@ class TileLangBuilPydCommand(build_py):
 
             if os.path.isdir(source_dir):
                 self.mkpath(target_dir)
-                distutils.dir_util.copy_tree(source_dir, target_dir)
+                self.copy_tree(source_dir, target_dir)
             else:
                 target_dir = os.path.dirname(target_dir)
                 if not os.path.exists(target_dir):
@@ -586,54 +585,6 @@ class TileLangSdistCommand(sdist):
         self.distribution.metadata.version = get_tilelang_version(
             with_cuda=False, with_system_info=False, with_commit_id=False)
         super().make_distribution()
-
-
-# ------------------------------------------------------------------------
-# NEW: Add a custom 'develop' command so that `pip install -e .` works.
-# ------------------------------------------------------------------------
-class TileLangDevelopCommand(develop):
-    """
-    Customized setuptools 'develop' command for an editable install.
-    Ensures the extension is built and all necessary assets are copied.
-    """
-
-    def run(self):
-        logger.info("Running TileLangDevelopCommand")
-        # 1. Build the C/C++ extension modules
-        self.run_command("build_ext")
-
-        build_ext_cmd = self.get_finalized_command("build_ext")
-        ext_modules = build_ext_cmd.extensions
-        for ext in ext_modules:
-            extdir = build_ext_cmd.get_ext_fullpath(ext.name)
-            logger.info(f"Extension {ext.name} output directory: {extdir}")
-
-        ext_output_dir = os.path.dirname(extdir)
-        logger.info(f"Extension output directory (parent): {ext_output_dir}")
-
-        # Copy the built TVM to the package directory
-        TVM_PREBUILD_ITEMS = [
-            f"{ext_output_dir}/libtvm_runtime.so",
-            f"{ext_output_dir}/libtvm.so",
-            f"{ext_output_dir}/libtilelang.so",
-            f"{ext_output_dir}/libtilelang_module.so",
-        ]
-        for item in TVM_PREBUILD_ITEMS:
-            source_lib_file = os.path.join(ROOT_DIR, item)
-            # only copy the file
-            file_name = os.path.basename(item)
-            target_dir = os.path.join(PACKAGE_NAME, file_name)
-            target_dir = os.path.dirname(target_dir)
-            target_dir = os.path.join(target_dir, "lib")
-            if not os.path.exists(target_dir):
-                os.makedirs(target_dir)
-            if os.path.exists(source_lib_file):
-                patch_libs(source_lib_file)
-                shutil.copy2(source_lib_file, target_dir)
-                # remove the original file
-                os.remove(source_lib_file)
-            else:
-                logger.info(f"INFO: {source_lib_file} does not exist.")
 
 
 class CMakeExtension(Extension):
@@ -742,15 +693,15 @@ class TilelangExtensionBuild(build_ext):
                 with open(md5_path, "r") as f:
                     cached_hash = f.read().strip()
                     if cached_hash == code_hash:
-                        logger.info("Cython jit adapter is up to date, no need to compile...")
+                        logger.info("Cython JIT adapter is up to date, no need to compile...")
                         need_compile = False
                     else:
-                        logger.info("Cython jit adapter is out of date, need to recompile...")
+                        logger.info("Cython JIT adapter is out of date, need to recompile...")
             else:
-                logger.info("No cached version found for cython jit adapter, need to compile...")
+                logger.info("No cached version found for Cython JIT adapter, need to compile...")
 
             if need_compile:
-                logger.info("Waiting for lock to compile cython jit adapter...")
+                logger.info("Waiting for lock to compile Cython JIT adapter...")
                 with open(lock_file, 'w') as lock:
                     fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
                     try:
@@ -765,7 +716,7 @@ class TilelangExtensionBuild(build_ext):
                                     need_compile = False
 
                         if need_compile:
-                            logger.info("Compiling cython jit adapter...")
+                            logger.info("Compiling Cython JIT adapter...")
                             temp_path = cache_dir / f"temp_{code_hash}.so"
 
                             with open(md5_path, "w") as f:
@@ -786,7 +737,7 @@ class TilelangExtensionBuild(build_ext):
                     except Exception as e:
                         if 'temp_path' in locals() and temp_path.exists():
                             temp_path.unlink()
-                        raise Exception(f"Failed to compile cython jit adapter: {e}") from e
+                        raise Exception(f"Failed to compile Cython JIT adapter: {e}") from e
                     finally:
                         if lock_file.exists():
                             lock_file.unlink()
@@ -811,38 +762,73 @@ class TilelangExtensionBuild(build_ext):
         # Determine the directory where the final .so or .pyd library should go.
         extdir = os.path.abspath(os.path.dirname(self.get_ext_fullpath(ext.name)))
 
+        # To make it compatible with in-place build and avoid redundant link during incremental build,
+        # we need to change the build destination to tilelang/lib, where it's actually loaded
+        if self.inplace:
+            extdir = os.path.abspath('./tilelang/lib/')
+
+        logger.info(f"{extdir=}")
+
         # Prepare arguments for the CMake configuration step.
         # -DCMAKE_LIBRARY_OUTPUT_DIRECTORY sets where built libraries go
         # -DPYTHON_EXECUTABLE ensures that the correct Python is used
         cmake_args = [
-            f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={extdir}", f"-DPYTHON_EXECUTABLE={sys.executable}",
-            f"-DCMAKE_BUILD_TYPE={'Debug' if DEBUG_MODE else 'Release'}"
+            f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={extdir}",
+            f"-DPython_EXECUTABLE={sys.executable}",
+            f"-DCMAKE_BUILD_TYPE={'Debug' if DEBUG_MODE else 'Release'}",
+            "-G",
+            "Ninja",
         ]
+        if not USE_ROCM:
+            cmake_args.append(f"-DCMAKE_CUDA_COMPILER={os.path.join(CUDA_HOME, 'bin', 'nvcc')}")
 
         # Create the temporary build directory (if it doesn't exist).
-        build_temp = os.path.abspath(self.build_temp)
+        if self.inplace:
+            build_temp = os.path.abspath('./build')
+        else:
+            build_temp = os.path.abspath(self.build_temp)
         os.makedirs(build_temp, exist_ok=True)
 
-        # Copy the default 'config.cmake' from the source tree into our build directory.
-        src_config_cmake = os.path.join(ext.sourcedir, "3rdparty", "tvm", "cmake", "config.cmake")
-        dst_config_cmake = os.path.join(build_temp, "config.cmake")
-        shutil.copy(src_config_cmake, dst_config_cmake)
+        # Paths to the source and destination config.cmake files
+        src_config = Path(ext.sourcedir) / "3rdparty" / "tvm" / "cmake" / "config.cmake"
+        dst_config = Path(build_temp) / "config.cmake"
 
-        # Append some configuration variables to 'config.cmake'
-        with open(dst_config_cmake, "a") as config_file:
-            config_file.write(f"set(USE_LLVM {llvm_config_path})\n")
-            if USE_ROCM:
-                config_file.write(f"set(USE_ROCM {ROCM_HOME})\n")
-                config_file.write("set(USE_CUDA OFF)\n")
-            else:
-                config_file.write(f"set(USE_CUDA {CUDA_HOME})\n")
-                config_file.write("set(USE_ROCM OFF)\n")
+        # Read the default config template
+        content_lines = src_config.read_text().splitlines()
+
+        # Add common LLVM configuration
+        content_lines.append(f"set(USE_LLVM {llvm_config_path})")
+
+        # Append GPU backend configuration based on environment
+        if USE_ROCM:
+            content_lines += [
+                f"set(USE_ROCM {ROCM_HOME})",
+                "set(USE_CUDA OFF)",
+            ]
+        else:
+            content_lines += [
+                f"set(USE_CUDA {CUDA_HOME})",
+                "set(USE_ROCM OFF)",
+            ]
+
+        # Create the final file content
+        new_content = "\n".join(content_lines) + "\n"
+
+        # Write the file only if it does not exist or has changed
+        if not dst_config.exists() or dst_config.read_text() != new_content:
+            dst_config.write_text(new_content)
+            print(f"[Config] Updated: {dst_config}")
+        else:
+            print(f"[Config] No changes: {dst_config}")
 
         # Run CMake to configure the project with the given arguments.
-        subprocess.check_call(["cmake", ext.sourcedir] + cmake_args, cwd=build_temp)
+        if not os.path.exists(build_temp + "/build.ninja"):
+            subprocess.check_call(["cmake", ext.sourcedir] + cmake_args, cwd=build_temp)
 
         # Build the project in "Release" mode with all available CPU cores ("-j").
-        subprocess.check_call(["cmake", "--build", ".", "--config", "Release", "-j"],
+        num_jobs = max(1, int(multiprocessing.cpu_count() * 0.75))
+        subprocess.check_call(["cmake", "--build", ".", "--config", "Release", "-j",
+                               str(num_jobs)],
                               cwd=build_temp)
 
 
@@ -882,6 +868,5 @@ setup(
         "build_py": TileLangBuilPydCommand,
         "sdist": TileLangSdistCommand,
         "build_ext": TilelangExtensionBuild,
-        "develop": TileLangDevelopCommand,
     },
 )

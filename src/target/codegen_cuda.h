@@ -64,6 +64,7 @@ public:
   void VisitStmt_(const EvaluateNode *op) final;
   void VisitStmt_(const AllocateNode *op) final;
   void VisitStmt_(const AttrStmtNode *op) final;
+  void VisitExpr_(const BufferLoadNode *op, std::ostream &os) final;
 
   // Override this as a work around for __grid_constant__ parameter
   void AddFunction(const GlobalVar &gvar, const PrimFunc &f);
@@ -94,16 +95,21 @@ private:
   std::string vid_global_barrier_state_;
   // Global barrier expected node.
   std::string vid_global_barrier_expect_;
+
   // whether enable fp16
   bool enable_fp16_{false};
   // whether enable bf16
   bool enable_bf16_{false};
   // whether enable fp8
   bool enable_fp8_{false};
-  // whether enable sparse gemm
-  bool enable_sparse_gemm_{false};
+  // whether enable fp6
+  bool enable_fp6_{false};
+  // whether enable fp4
+  bool enable_fp4_{false};
   // whether enable int8
   bool enable_int8_{false};
+  // whether enable sparse gemm
+  bool enable_sparse_gemm_{false};
   // whether enable warp shuffle intrinsics
   bool enable_warp_shuffle_{false};
   // whether need math_constants.h
@@ -124,6 +130,10 @@ private:
   const std::string barrier_name_ = "barrier";
   // The size of the barrier array in shared memory
   int barrier_count_ = -1;
+  // The name of the mbarrier array in shared memory
+  const std::string mbarrier_name_ = "mbarrier";
+  // The type name of the mbarrier array
+  const std::string mbarrier_dtype_ = "Barrier";
   // The alignment of the barrier array in shared memory
   // Set to 16 to maintain minimum alignment requirements for async bulk copy
   const int barrier_alignment_bytes_ = 16;
@@ -136,6 +146,11 @@ private:
                       const VarNode *variable, std::ostream &os);
   int32_t GetWmmaFragmentSize(const std::string &scope, const VarNode *variable,
                               int32_t size);
+
+  std::vector<std::string> eviction_policy_names_ = {
+      "EVICT_NORMAL", "EVICT_FIRST", "EVICT_LAST"};
+  std::unordered_set<std::string> bf16_supported_ops_ = {
+      "bf1622float2", "bf1622int16", "float22bf162", "bf162bf162"};
 };
 
 } // namespace codegen

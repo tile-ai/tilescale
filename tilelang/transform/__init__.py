@@ -87,8 +87,8 @@ def LowerHopperIntrin():
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.LowerHopperIntrin() \
-        if hasattr(_ffi_api, "LowerHopperIntrin") else lambda f: f # type: ignore
+    return (_ffi_api.LowerHopperIntrin() if hasattr(_ffi_api, "LowerHopperIntrin") else lambda f: f
+           )  # type: ignore
 
 
 def LowerCpengineIntrin():
@@ -198,6 +198,21 @@ def WarpSpecialized():
         The result pass
     """
     return _ffi_api.WarpSpecialized()  # type: ignore
+
+
+def AnnotateWarpGroupRegAlloc():
+    """Inject set_max_nreg calls into warp-specialized functions.
+
+    This pass analyzes the function to collect register hints from set_max_nreg
+    and no_set_max_nreg calls, then injects appropriate set_max_nreg calls into
+    producer and consumer branches of warp-specialized code.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.AnnotateWarpGroupRegAlloc()  # type: ignore
 
 
 def InjectTmaBarrier():
@@ -386,3 +401,32 @@ def LowerSharedBarrier():
     """LowerSharedBarrier
     """
     return _ffi_api.LowerSharedBarrier()  # type: ignore
+
+
+def StorageRewrite():
+    """StorageRewrite
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.StorageRewrite()  # type: ignore
+
+
+def LowerOpaqueBlock():
+    """LowerOpaqueBlock
+    """
+    return _ffi_api.LowerOpaqueBlock()  # type: ignore
+
+
+def LowerThreadAllreduce():
+    """LowerThreadAllreduce
+    """
+    return _ffi_api.LowerThreadAllreduce()  # type: ignore
+
+
+def LowerDeviceKernelLaunch():
+    """LowerDeviceKernelLaunch
+    """
+    return _ffi_api.LowerDeviceKernelLaunch()  # type: ignore

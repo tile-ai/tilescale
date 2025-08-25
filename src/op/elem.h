@@ -15,43 +15,15 @@ namespace tl {
 
 using namespace tir;
 
-class Copy : public Operator {
-public:
-  Copy(Array<PrimExpr> args, BufferMap vmap);
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const final;
-  LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level) final;
-
-  static const Op &Get();
-
-protected:
-  Stmt LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const;
-  Stmt LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer) const;
-
-  For MakeSIMTLoop(arith::Analyzer *analyzer) const;
-  Array<IterVar> MakeIterVars() const;
-
-  // ivs: itervars returned by MakeIterVars()
-  // src_dst: 0 for src_indices, 1 for dst_indices
-  Array<PrimExpr> MakeIndices(const Array<IterVar> &ivs, int src_dst) const;
-
-  PrimExpr MakePredicate(arith::Analyzer *analyzer, const Array<IterVar> &ivs,
-                         Array<PrimExpr> extents, int src_dst) const;
-
-  Array<PrimExpr> args_;
-
-  Buffer src, dst;
-  Array<Range> src_range, dst_range;
-  IntImm coalesced_width;
-  Bool disable_tma = Bool(false);
-
-  std::unique_ptr<ParallelOp> par_op_;
-};
-
 class Fill : public Operator {
 public:
   Fill(Array<PrimExpr> args, BufferMap vmap);
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const final;
   static const Op &Get();
+
+  std::unique_ptr<Operator> Clone() const final {
+    return std::make_unique<Fill>(*this);
+  }
 
 private:
   For MakeSIMTLoop(arith::Analyzer *analyzer) const;

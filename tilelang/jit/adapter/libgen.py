@@ -5,16 +5,15 @@ import os
 import os.path as osp
 import subprocess
 import tempfile
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 from tvm.target import Target
 
 from tilelang import tvm as tvm
 from tilelang.transform import PassConfigKey
-from tilelang.contrib.nvcc import get_nvcc_compiler, get_target_compute_version
+from tilelang.contrib.nvcc import get_nvcc_compiler, get_target_arch, get_target_compute_version
 from tilelang.contrib.rocm import find_rocm_path, get_rocm_arch
-from tilelang import USE_DISTRIBUTED
-from tilelang.env import TILELANG_TEMPLATE_PATH, NVSHMEM_INCLUDE_DIR, NVSHMEM_LIB_PATH
+from tilelang import env
 
 from .utils import is_cpu_target, is_cuda_target, is_hip_target
 
@@ -37,12 +36,19 @@ class LibraryGenerator(object):
     libpath: Optional[str] = None
     lib_code: Optional[str] = None
     pass_configs: Optional[Dict[str, Any]] = None
+    compile_flags: Optional[List[str]] = None
 
-    def __init__(self, target: Target):
+    def __init__(self, target: Target, verbose: bool = False):
         self.target = target
+        self.verbose = verbose
 
     def assign_pass_configs(self, pass_configs: Optional[Dict[str, Any]] = None):
         self.pass_configs = pass_configs
+
+    def assign_compile_flags(self, compile_flags: Optional[List[str]] = None):
+        if compile_flags is None:
+            compile_flags = []
+        self.compile_flags = compile_flags
 
     def update_lib_code(self, lib_code: str):
         self.lib_code = lib_code
@@ -59,15 +65,16 @@ class LibraryGenerator(object):
         disable_rdc = self.pass_configs.get(PassConfigKey.TL_DISABLE_RDC, False)
 
         target = self.target
+        verbose = self.verbose
         if is_cuda_target(target):
             from tilelang.env import CUTLASS_INCLUDE_DIR
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)
-            compute_version = "".join(get_target_compute_version(target).split("."))
-            if compute_version == "90":
-                compute_version = "90a"
+            target_arch = get_target_arch(get_target_compute_version(target))
             libpath = src.name.replace(".cu", ".so")
 
             disable_fast_math = self.pass_configs.get(PassConfigKey.TL_DISABLE_FAST_MATH, False)
+            ptxas_usage_level = self.pass_configs.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL,
+                                                      None)
             verbose_ptxas_output = self.pass_configs.get(
                 PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT, False)
 
@@ -78,18 +85,20 @@ class LibraryGenerator(object):
                 "-Xcudafe",
                 "--diag_suppress=177",
                 "--compiler-options",
-                "'-fPIC'",
+                "-fPIC",
                 "-lineinfo",
                 "--shared",
                 src.name,
                 "-lcuda",
                 "-gencode",
-                f"arch=compute_{compute_version},code=sm_{compute_version}",
+                f"arch=compute_{target_arch},code=sm_{target_arch}",
             ]
             if not disable_fast_math:
                 command += ["--use_fast_math"]
+            if ptxas_usage_level is not None:
+                command += [f"--ptxas-options=--register-usage-level={ptxas_usage_level}"]
             if verbose_ptxas_output:
-                command += ["--ptxas-options", "-v"]
+                command += ["--ptxas-options=--verbose"]
             command += [
                 "-I" + CUTLASS_INCLUDE_DIR,
             ]
@@ -118,29 +127,37 @@ class LibraryGenerator(object):
 
             command = [get_cplus_compiler(), "-std=c++17", "-fPIC", "-shared", src.name]
             command += [
-                "-I" + TILELANG_TEMPLATE_PATH,
+                "-I" + env.TILELANG_TEMPLATE_PATH,
             ]
         else:
             raise ValueError(f"Unsupported target: {target}")
 
         command += [
-            "-I" + TILELANG_TEMPLATE_PATH,
+            "-I" + env.TILELANG_TEMPLATE_PATH,
         ]
-        if USE_DISTRIBUTED:
-            assert NVSHMEM_INCLUDE_DIR is not None, "NVSHMEM_INCLUDE_DIR is not set"
-            assert NVSHMEM_LIB_PATH is not None, "NVSHMEM_LIB_PATH is not set"
+        if env.USE_DISTRIBUTED:
+            assert env.NVSHMEM_INCLUDE_DIR is not None, "env.NVSHMEM_INCLUDE_DIR is not set"
+            assert env.NVSHMEM_LIB_PATH is not None, "env.NVSHMEM_LIB_PATH is not set"
             command += ["-diag-suppress=20013"]
             if not disable_rdc:
                 command += ["-rdc=true"]
             command += [
-                "-I" + NVSHMEM_INCLUDE_DIR, "-L" + NVSHMEM_LIB_PATH,
+                "-I" + env.NVSHMEM_INCLUDE_DIR, "-L" + env.NVSHMEM_LIB_PATH,
                 "-lnvshmem_host -lnvshmem_device"
             ]
+
+        if self.compile_flags:
+            command += [
+                item for flag in self.compile_flags for item in flag.split() if item not in command
+            ]
+
         command += ["-o", libpath]
 
         src.write(self.lib_code)
         src.flush()
         try:
+            if verbose:
+                print(f"compile_lib compilation command: {' '.join(command)}")
             ret = subprocess.run(command, timeout=timeout)
         except Exception as e:
             raise RuntimeError(f"Compile kernel failed because of {e}") from e
@@ -175,10 +192,10 @@ class PyLibraryGenerator(LibraryGenerator):
     culib = None
     pymodule = None
 
-    def __init__(self, target: Target):
+    def __init__(self, target: Target, verbose: bool = False):
         if not is_nvrtc_available:
             raise ImportError(NVRTC_UNAVAILABLE_WARNING)
-        super().__init__(target)
+        super().__init__(target, verbose)
 
     @staticmethod
     def import_from_file(module_name, file_path):
@@ -209,6 +226,7 @@ class PyLibraryGenerator(LibraryGenerator):
 
     def compile_lib(self, timeout: float = None):
         target = self.target
+        verbose = self.verbose
         if is_cuda_target(target):
             from tilelang.env import (CUDA_HOME, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH)
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)
@@ -227,11 +245,15 @@ class PyLibraryGenerator(LibraryGenerator):
 
             cuda_home = "/usr/local/cuda" if CUDA_HOME is None else CUDA_HOME
 
+            options = [f"-I{tl_template_path}", f"-I{cutlass_path}", f"-I{cuda_home}/include"]
+            if self.compile_flags:
+                options += [
+                    item for flag in self.compile_flags for item in flag.split()
+                    if item not in options
+                ]
+
             cubin_bytes = compile_cuda(
-                self.lib_code,
-                target_format="cubin",
-                options=[f"-I{tl_template_path}", f"-I{cutlass_path}", f"-I{cuda_home}/include"],
-                verbose=True)
+                self.lib_code, target_format="cubin", options=options, verbose=verbose)
             with open(libpath, "wb") as f:
                 f.write(cubin_bytes)
 

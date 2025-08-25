@@ -53,11 +53,11 @@ _init_logger()
 
 logger = logging.getLogger(__name__)
 
-from .env import SKIP_LOADING_TILELANG_SO, USE_DISTRIBUTED  # noqa: F401
 from .env import enable_cache, disable_cache, is_cache_enabled  # noqa: F401
+from .env import env as env  # noqa: F401
 
 import tvm
-import tvm._ffi.base
+import tvm.base
 from tvm import DataType  # noqa: F401
 
 from . import libinfo
@@ -69,19 +69,19 @@ def _load_tile_lang_lib():
         for path in libinfo.get_dll_directories():
             os.add_dll_directory(path)
     # pylint: disable=protected-access
-    lib_name = "tilelang" if tvm._ffi.base._RUNTIME_ONLY else "tilelang_module"
+    lib_name = "tilelang" if tvm.base._RUNTIME_ONLY else "tilelang_module"
     # pylint: enable=protected-access
     lib_path = libinfo.find_lib_path(lib_name, optional=False)
     return ctypes.CDLL(lib_path[0]), lib_path[0]
 
 
 # only load once here
-if SKIP_LOADING_TILELANG_SO == "0":
+if env.SKIP_LOADING_TILELANG_SO == "0":
     _LIB, _LIB_PATH = _load_tile_lang_lib()
 
 from .jit import jit, JITKernel, compile  # noqa: F401
 from .profiler import Profiler  # noqa: F401
-from .cache import cached, set_cache_dir, get_cache_dir  # noqa: F401
+from .cache import clear_cache  # noqa: F401
 
 from .utils import (
     TensorSupplyType,  # noqa: F401

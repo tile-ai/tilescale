@@ -4,12 +4,16 @@ from tvm.target import Target
 from tvm.tir import PrimFunc
 
 import tilelang
-from tilelang import tvm as tvm
+from tilelang import tvm
+from tilelang import env
 from tilelang.engine.param import CompiledArtifact, KernelParam
 from tilelang.jit.adapter import (BaseKernelAdapter, CtypesKernelAdapter, CythonKernelAdapter,
                                   NVRTCKernelAdapter, TorchDLPackKernelAdapter)
 from tilelang.profiler import Profiler, TensorSupplyType
 from tilelang.utils.target import AVALIABLE_TARGETS, determine_target
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class JITKernel(object):
@@ -45,6 +49,7 @@ class JITKernel(object):
         verbose: bool = False,
         pass_configs: Optional[Dict[str, Any]] = None,
         from_database: bool = False,
+        compile_flags: Optional[List[str]] = None,
     ):
         """
         Initializes a TorchFunction instance.
@@ -82,6 +87,8 @@ class JITKernel(object):
             pass_configs = {}
         self.pass_configs = pass_configs
 
+        self.compile_flags = compile_flags
+
         # If the target is specified as a string, validate it and convert it to a TVM Target.
         if isinstance(target, str):
             assert target in AVALIABLE_TARGETS, f"Invalid target: {target}"
@@ -107,8 +114,22 @@ class JITKernel(object):
         if from_database:
             return
 
+        # Print log on compilation starts
+        # NOTE(Chenggang): printing could let the training/inference framework easier to know
+        # whether the communication timeout is from compilation
+        if env.is_print_on_compilation_enabled():
+            # assert func must have "global_symbol"
+            func_name = func.attrs.get("global_symbol")
+            assert func_name is not None, "func must have global_symbol"
+            logger.info(f"TileLang begins to compile kernel `{func_name}` with `{out_idx=}`")
+
         # Compile the TileLang function and create a kernel adapter for execution.
         adapter = self._compile_and_create_adapter(func, out_idx)
+
+        if env.is_print_on_compilation_enabled():
+            func_name = func.attrs.get("global_symbol")
+            assert func_name is not None, "func must have global_symbol"
+            logger.info(f"TileLang completes to compile kernel `{func_name}`")
 
         # The adapter's function is assigned as the callable function for this instance.
         self.adapter = adapter
@@ -126,6 +147,7 @@ class JITKernel(object):
         out_idx: Union[List[int], int],
         execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"],
         pass_configs: Optional[Dict[str, Any]] = None,
+        compile_flags: Optional[List[str]] = None,
     ):
         """
         Alternative constructor to create a TorchFunction directly from a database.
@@ -138,6 +160,7 @@ class JITKernel(object):
             target_host=target_host,
             pass_configs=pass_configs,
             from_database=True,
+            compile_flags=compile_flags,
         )
 
         instance.adapter = instance._create_adapter_from_database(
@@ -148,6 +171,7 @@ class JITKernel(object):
             kernel_global_source=kernel_global_source,
             kernel_lib_path=kernel_lib_path,
             pass_configs=pass_configs,
+            compile_flags=compile_flags,
         )
         instance.torch_function = instance.adapter.func
         return instance
@@ -192,6 +216,8 @@ class JITKernel(object):
         execution_backend = self.execution_backend
         pass_configs = self.pass_configs
 
+        compile_flags = self.compile_flags
+
         # Compile the function with TVM, optimizing with shared memory lowering.
         enable_host_codegen = execution_backend == "dlpack"
         enable_device_compile = execution_backend == "dlpack"
@@ -224,6 +250,7 @@ class JITKernel(object):
                 kernel_global_source=artifact.kernel_source,
                 verbose=verbose,
                 pass_configs=pass_configs,
+                compile_flags=compile_flags,
             )
         elif execution_backend == "cython":
             adapter = CythonKernelAdapter(
@@ -236,6 +263,7 @@ class JITKernel(object):
                 kernel_global_source=artifact.kernel_source,
                 verbose=verbose,
                 pass_configs=pass_configs,
+                compile_flags=compile_flags,
             )
         elif execution_backend == "nvrtc":
             adapter = NVRTCKernelAdapter(
@@ -248,6 +276,7 @@ class JITKernel(object):
                 kernel_global_source=artifact.kernel_source,
                 verbose=verbose,
                 pass_configs=pass_configs,
+                compile_flags=compile_flags,
             )
         else:
             # Handle invalid backend.
@@ -256,15 +285,15 @@ class JITKernel(object):
         return adapter
 
     def _create_adapter_from_database(
-        self,
-        params: List[KernelParam],
-        result_idx: Union[List[int], int],
-        target: Union[str, Target],
-        func_or_mod: Union[PrimFunc, tvm.runtime.Module],
-        kernel_global_source: str,
-        kernel_lib_path: str,
-        pass_configs: Optional[Dict[str, Any]] = None,
-    ) -> BaseKernelAdapter:
+            self,
+            params: List[KernelParam],
+            result_idx: Union[List[int], int],
+            target: Union[str, Target],
+            func_or_mod: Union[PrimFunc, tvm.runtime.Module],
+            kernel_global_source: str,
+            kernel_lib_path: str,
+            pass_configs: Optional[Dict[str, Any]] = None,
+            compile_flags: Optional[List[str]] = None) -> BaseKernelAdapter:
         target = self.target
         execution_backend = self.execution_backend
 
@@ -280,6 +309,7 @@ class JITKernel(object):
                 kernel_global_source=kernel_global_source,
                 kernel_lib_path=kernel_lib_path,
                 pass_configs=pass_configs,
+                compile_flags=compile_flags,
             )
         elif execution_backend == "cython":
             adapter = CythonKernelAdapter.from_database(
@@ -300,6 +330,7 @@ class JITKernel(object):
                 kernel_global_source=kernel_global_source,
                 kernel_lib_path=kernel_lib_path,
                 pass_configs=pass_configs,
+                compile_flags=compile_flags,
             )
         else:
             # Handle invalid backend.

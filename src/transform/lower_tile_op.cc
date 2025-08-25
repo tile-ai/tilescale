@@ -3,6 +3,7 @@
  * \brief Lower the tile op for further codegen.
  */
 
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
@@ -108,12 +109,14 @@ private:
    * \return The rewritten block.
    */
   Stmt RewritePaddingMap(const BlockNode *op) {
-    auto padding_map =
-        op->annotations.Get(attr::kPaddingMap).as<Map<Var, PrimExpr>>().value();
+    auto padding_map = op->annotations.Get(attr::kPaddingMap);
+    if (!padding_map) {
+      LOG(FATAL) << "Padding map annotation is missing";
+    }
 
     Map<Var, Var> var_remap = CreateVarRemap();
-    Map<Var, PrimExpr> new_padding_map =
-        RemapPaddingMap(padding_map, var_remap);
+    Map<Var, PrimExpr> new_padding_map = RemapPaddingMap(
+        Downcast<Map<Var, PrimExpr>>(padding_map.value()), var_remap);
 
     auto block = Downcast<Block>(IRMutatorWithAnalyzer::VisitStmt_(op));
     auto block_ptr = block.CopyOnWrite();
@@ -163,7 +166,8 @@ public:
     bool has_meta_data_ = false;
     for (int i = 0; i < f->params.size(); i++) {
       if (f->buffer_map[f->params[i]]->buffer_type == BufferType::kMetaData) {
-        ICHECK(!has_meta_data_) << "LowerTileOpPass: Only one meta_data buffer is allowed";
+        ICHECK(!has_meta_data_)
+            << "LowerTileOpPass: Only one meta_data buffer is allowed";
         meta_data_var_ = f->params[i];
         has_meta_data_ = true;
       }
@@ -180,9 +184,11 @@ public:
       int cnt = 0;
       substituter.meta_data_buffer_ = f->buffer_map[meta_data_var_];
       for (int i = 0; i < f->params.size(); i++) {
-        if (f->buffer_map[f->params[i]]->buffer_type == BufferType::kDistributed) {
-          substituter.buffer_to_meta_data_index_.Set(f->buffer_map[f->params[i]], cnt++);
-        }      
+        if (f->buffer_map[f->params[i]]->buffer_type ==
+            BufferType::kDistributed) {
+          substituter.buffer_to_meta_data_index_.Set(
+              f->buffer_map[f->params[i]], cnt++);
+        }
       }
     }
     auto target = f->GetAttr<Target>(tvm::attr::kTarget);
@@ -192,6 +198,15 @@ public:
     fptr->body = substituter.VisitStmt(f->body);
     fptr->body =
         RemapBufferRewriter::Substitute(fptr->body, substituter.buffer_remap_);
+    tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
+    Optional<Bool> opt_disable_tma_lower =
+        ctxt->GetConfig(kDisableTMALower, Optional<Bool>());
+
+    if (!opt_disable_tma_lower.value_or(Bool(false))) {
+      // @lei: this is a workaround, as if we don't disable tma lower,
+      // cp async lowering won't be generated.
+      ctxt->config.Set(kDisableTMALower, Bool(!substituter.has_tma_));
+    }
     return f;
   }
 
@@ -246,7 +261,7 @@ private:
   }
 
   PrimExpr HandleAccessPtrAndOffset(PrimExpr access_ptr,
-                                    Optional<PrimExpr> offset = NullOpt,
+                                    Optional<PrimExpr> offset = std::nullopt,
                                     DataType dtype = DataType::Int(32)) {
     // The 2th arg of T.tvm_access_ptr call is offset, we set it to 0 and
     // accumulate it to smem_offset
@@ -324,7 +339,12 @@ private:
   }
 
   PrimExpr VisitExpr_(const tir::CallNode *op) final {
-    Array<RelayExpr> ptx_instructions = {builtin::ptx_ldmatrix(),
+    if ((!has_tma_) && (op->op.same_as(tl::tma_load()) ||
+                        op->op.same_as(tl::tma_load_im2col()) ||
+                        op->op.same_as(tl::tma_store()))) {
+      has_tma_ = true;
+    }
+    Array<RelaxExpr> ptx_instructions = {builtin::ptx_ldmatrix(),
                                          builtin::mma_store()};
 
     if (std::find(ptx_instructions.begin(), ptx_instructions.end(), op->op) ==
@@ -360,7 +380,7 @@ private:
       // mma_store now
       auto access_ptr = call->args[2];
       auto new_access_ptr =
-          HandleAccessPtrAndOffset(access_ptr, NullOpt, call->dtype);
+          HandleAccessPtrAndOffset(access_ptr, std::nullopt, call->dtype);
       auto new_call = call.CopyOnWrite();
       new_call->args.Set(2, new_access_ptr);
     } else {
@@ -454,7 +474,8 @@ private:
 
     auto lowered = tile_op->Lower(
         LowerArgs{target_, thread_bounds, thread_var_->var, callback,
-                  layout_map_, buffer_remap_, disable_tma_lower, meta_data_buffer_, buffer_to_meta_data_index_},
+                  layout_map_, buffer_remap_, disable_tma_lower,
+                  meta_data_buffer_, buffer_to_meta_data_index_},
         analyzer_);
     return IRMutatorWithAnalyzer::VisitStmt(lowered);
   }
@@ -490,6 +511,7 @@ private:
   Map<Var, Var> var_remap_;
   Buffer meta_data_buffer_;
   Map<Buffer, PrimExpr> buffer_to_meta_data_index_;
+  bool has_tma_{false};
 };
 
 namespace transform {
@@ -503,7 +525,10 @@ tvm::transform::Pass LowerTileOp() {
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerTileOp", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.LowerTileOp").set_body_typed(LowerTileOp);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.LowerTileOp", LowerTileOp);
+});
 } // namespace transform
 
 } // namespace tl

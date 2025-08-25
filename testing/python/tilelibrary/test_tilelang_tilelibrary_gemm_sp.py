@@ -11,7 +11,7 @@ torch.manual_seed(42)
 STR_TO_TYPE = {
     "float16": torch.float16,
     "bfloat16": torch.bfloat16,
-    "e4m3_float8": torch.float8_e4m3fn,
+    "float8_e4m3": torch.float8_e4m3fn,
     "int8": torch.int8,
 }
 
@@ -70,7 +70,7 @@ def matmul_sp(
                         backend="cutlass",
                         block_k=block_K),
             })
-            T.no_set_max_nreg()
+            T.disable_warp_group_reg_alloc()
             T.clear(C_local)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 T.copy(E[by * block_M, k * block_K // E_factor], E_shared)
@@ -227,7 +227,7 @@ def test_gemm_sp():
     run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 64, 64, 64, 0, 128, True, False)
     run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 64, 64, 64, 0, 128, True, True)
 
-    run_gemm_sp(512, 1024, 768, "e4m3_float8", "float16", "float16", 64, 64, 64, 2, 128, False,
+    run_gemm_sp(512, 1024, 768, "float8_e4m3", "float16", "float16", 64, 64, 64, 2, 128, False,
                 True)
 
     run_gemm_sp(512, 1024, 768, "int8", "int8", "int32", 64, 64, 64, 2, 128, False, True)
