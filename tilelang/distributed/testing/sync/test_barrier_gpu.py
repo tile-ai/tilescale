@@ -21,7 +21,7 @@ def get_test_barrier_gpu_kernel(num_blocks: int, threads: int):
 
             b = T.alloc_shared([threads], "int32")
             val = T.alloc_local([1], "int32")
-            val[0] = 1  
+            val[0] = 1
             T.atomic_add(A[tid], val[0])
 
             T.sync_barrier_gpu(bar)
