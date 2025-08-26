@@ -11,7 +11,7 @@ import argparse
 def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H):
     scale = (1.0 / (dim + pe_dim))**0.5 * 1.44269504  # log2(e)
     dtype = "float16"
-    q_dtype = "e4m3_float8"
+    q_dtype = "float8_e4m3"
     accum_dtype = "float"
     kv_group_num = heads // kv_head_num
     VALID_BLOCK_H = min(block_H, kv_group_num)
@@ -52,7 +52,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(accum_dtype))
-            T.no_set_max_nreg()
+            T.disable_warp_group_reg_alloc()
             loop_range = T.ceildiv(seqlen_kv, block_N)
             for k in T.Pipelined(loop_range, num_stages=2):
                 T.copy(KV[bx, k * block_N:(k + 1) * block_N, cur_kv_head, :], qKV_shared)

@@ -15,13 +15,13 @@ from tilelang.utils.tensor import (
 from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter import BaseKernelAdapter
 from tilelang.profiler.bench import do_bench
-from tilelang import USE_DISTRIBUTED
+from tilelang import env
 
 import logging
 
 logger = logging.getLogger(__name__)
 
-if USE_DISTRIBUTED:
+if env.USE_DISTRIBUTED:
     import pynvshmem
     logger.info("Using distributed profiler")
 else:
@@ -158,7 +158,7 @@ class Profiler:
             rtol: Relative tolerance for comparison
             max_mismatched_ratio: Maximum allowed ratio of mismatched elements
         """
-        if USE_DISTRIBUTED:
+        if env.USE_DISTRIBUTED:
             self.init_distributed()
             ins = self._get_distributed_inputs()
         else:
@@ -246,7 +246,7 @@ class Profiler:
             repeat: Number of times to repeat the consistency check
         """
         # Used to check no race condition inside the kernel
-        if USE_DISTRIBUTED:
+        if env.USE_DISTRIBUTED:
             self.init_distributed()
             ins = self._get_distributed_inputs()
         else:
@@ -263,7 +263,7 @@ class Profiler:
                 ]
 
     def run_once(self, func: Optional[Callable] = None):
-        if USE_DISTRIBUTED:  # noqa: SIM108
+        if env.USE_DISTRIBUTED:  # noqa: SIM108
             # self.init_distributed()
             ins = self._get_distributed_inputs()
         else:
@@ -315,7 +315,7 @@ class Profiler:
             if func is None:
                 assert self.adapter is not None, "benchmarking function should be provided"
                 func = self.adapter
-            if USE_DISTRIBUTED:
+            if env.USE_DISTRIBUTED:
                 self.init_distributed()
                 ins = self._get_distributed_inputs() if input_tensors is None else input_tensors
             else:
@@ -332,7 +332,7 @@ class Profiler:
             assert func is not None, "func should not be None"
             assert isinstance(
                 func, tvm.runtime.Module), f"func should be a TVM module, but got {type(func)}"
-            if USE_DISTRIBUTED:
+            if env.USE_DISTRIBUTED:
                 self.init_distributed()
                 ins = self._get_distributed_inputs(
                     with_output=True) if input_tensors is None else input_tensors

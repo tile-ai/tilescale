@@ -24,6 +24,10 @@ public:
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const final;
   static const Op &Get();
 
+  std::unique_ptr<Operator> Clone() const final {
+    return std::make_unique<RemoteCopyOp>(*this);
+  }
+
 private:
   PrimExpr src_addr, dst_addr;
   PrimExpr src_offset, dst_offset;

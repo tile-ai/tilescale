@@ -24,11 +24,14 @@
 
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
+#include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+#include "../op/builtin.h"
+#include "../op/copy.h"
 #include "../op/distributed.h"
-#include "../op/bulk_copy.h"
+
 namespace tvm {
 namespace tl {
 
@@ -42,17 +45,17 @@ public:
     LowerCpengineIntrin substituter;
     fptr->body = substituter.VisitStmt(f->body);
     for (auto call : substituter.cpengine_calls_) {
-      fptr->body =SeqStmt({call, fptr->body});
+      fptr->body = SeqStmt({call, fptr->body});
     }
     return f;
   }
 
-
   PrimExpr VisitExpr_(const CallNode *call) final {
     if (call->op.same_as(CpengineCpAsync())) {
-        LOG(INFO) << "call CpengineCpAsync";
-        cpengine_calls_.push_back(Evaluate(
-          Call(DataType::Handle(), builtin::tvm_call_packed(), {StringImm("tvm_cpengine_cp_async")})));
+      LOG(INFO) << "call CpengineCpAsync";
+      cpengine_calls_.push_back(
+          Evaluate(Call(DataType::Handle(), builtin::tvm_call_packed(),
+                        {StringImm("tvm_cpengine_cp_async")})));
       return 0;
     } else {
       return StmtExprMutator::VisitExpr_(call);
@@ -73,8 +76,11 @@ tvm::transform::Pass LowerCpengineIntrin() {
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerCpengineIntrin", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.LowerCpengineIntrin")
-    .set_body_typed(LowerCpengineIntrin);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.LowerCpengineIntrin",
+                        LowerCpengineIntrin);
+});
 #endif // (CUDA_MAJOR_VERSION >= 12)
 
 } // namespace tl

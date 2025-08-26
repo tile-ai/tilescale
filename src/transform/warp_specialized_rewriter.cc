@@ -5,6 +5,7 @@
 
 #include "arith/ir_visitor_with_analyzer.h"
 #include "tir/analysis/var_use_def_analysis.h"
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
@@ -13,33 +14,63 @@
 
 #include "../op/builtin.h"
 #include "./common/collector.h"
+#include "runtime/thread_storage_scope.h"
+#include "tir/transforms/ir_utils.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
+using namespace runtime;
 using arith::IRVisitorWithAnalyzer;
+
+struct LoopInfo {
+  Var loop_var;
+  PrimExpr extent;
+  PrimExpr min;
+};
 
 enum class Role { kConsumer, kProducer, kBoth };
 
-class TMAFinder : public StmtExprVisitor {
+class ProducerBufferDetector : public StmtExprVisitor {
 public:
-  void clear() { has_tma_load_ = false; }
+  ProducerBufferDetector(
+      std::unordered_set<const BufferNode *> cur_producer_buffers)
+      : cur_producer_buffers_(cur_producer_buffers) {}
+
+  void clear() { has_producer_buffer_ = false; }
 
   void VisitExpr_(const CallNode *call) final {
     if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
-      has_tma_load_ = true;
+      has_producer_buffer_ = true;
     }
+    StmtExprVisitor::VisitExpr_(call);
   }
 
-  bool has_tma_load_ = false;
+  void VisitExpr_(const BufferLoadNode *op) final {
+    if (cur_producer_buffers_.count(op->buffer.get())) {
+      has_producer_buffer_ = true;
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  bool has_producer_buffer_ = false;
+  std::unordered_set<const BufferNode *> cur_producer_buffers_;
 };
 
 class ProducerUsedBufferFinder : public StmtExprVisitor {
 public:
   auto FindProducerusedBuffer(Stmt stmt) {
-    VisitStmt(stmt);
-    return used_in_producer_cond_;
+    producer_buffers_.clear();
+    std::unordered_set<const BufferNode *> last_producer_buffers_;
+    for (;;) {
+      VisitStmt(stmt);
+      if (producer_buffers_ == last_producer_buffers_) {
+        break;
+      }
+      last_producer_buffers_ = producer_buffers_;
+    }
+    return producer_buffers_;
   }
 
   void InsertBuffer(const PrimExpr &expr) {
@@ -47,36 +78,51 @@ public:
     VarUseDefAnalyzer usage(Array<Var>{});
     usage(expr);
     for (const auto &buffer : usage.buffer_use_count_) {
-      used_in_producer_cond_.insert(buffer.first);
-    }
-    for (const auto &buffer : used_in_producer_cond_) {
+      producer_buffers_.insert(buffer.first);
     }
   }
 
   void VisitStmt_(const IfThenElseNode *op) final {
-    TMAFinder tma_finder;
-    tma_finder(op->then_case);
+    ProducerBufferDetector producer_buffer_detector(producer_buffers_);
+    producer_buffer_detector(op->then_case);
     if (op->else_case.defined()) {
-      tma_finder(op->else_case.value());
+      producer_buffer_detector(op->else_case.value());
     }
-    if (tma_finder.has_tma_load_) {
+    if (producer_buffer_detector.has_producer_buffer_) {
       InsertBuffer(op->condition);
     }
     StmtExprVisitor::VisitStmt_(op);
   }
 
   void VisitStmt_(const ForNode *op) final {
-    TMAFinder tma_finder;
-    tma_finder(op->body);
-    if (tma_finder.has_tma_load_) {
+    ProducerBufferDetector producer_buffer_detector(producer_buffers_);
+    producer_buffer_detector(op->body);
+    if (producer_buffer_detector.has_producer_buffer_) {
       InsertBuffer(op->min);
       InsertBuffer(op->extent);
     }
     StmtExprVisitor::VisitStmt_(op);
   }
 
+  void VisitStmt_(const BufferStoreNode *op) final {
+    if (producer_buffers_.count(op->buffer.get())) {
+      InsertBuffer(op->value);
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  void VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(tma_load()) || op->op.same_as(tma_load_im2col())) {
+      for (auto arg : op->args) {
+        if (auto buffer_load = arg.as<BufferLoadNode>()) {
+          producer_buffers_.insert(buffer_load->buffer.get());
+        }
+      }
+    }
+  }
+
 private:
-  std::unordered_set<const BufferNode *> used_in_producer_cond_;
+  std::unordered_set<const BufferNode *> producer_buffers_;
 };
 
 class WarpSpecializedRoleMarker : public StmtVisitor {
@@ -86,7 +132,7 @@ public:
 
   void Prepare(const Stmt &stmt) {
     ProducerUsedBufferFinder finder;
-    used_in_producer_cond_ = finder.FindProducerusedBuffer(stmt);
+    producer_buffers_ = finder.FindProducerusedBuffer(stmt);
   }
 
   Role GetRole(const StmtNode *stmt) const {
@@ -112,9 +158,9 @@ public:
   }
 
   void VisitStmt_(const BufferStoreNode *op) final {
-    bool is_shared_store =
-        op->buffer.scope() == "shared.dyn" || op->buffer.scope() == "shared";
-    if (used_in_producer_cond_.count(op->buffer.get())) {
+    auto scope = StorageScope::Create(GetPtrStorageScope(op->buffer->data));
+    bool is_shared_store = scope.rank == StorageRank::kShared;
+    if (producer_buffers_.count(op->buffer.get())) {
       SetRole(op, Role::kBoth);
       return;
     }
@@ -170,6 +216,12 @@ public:
     SetRole(op, GetRole(op->block));
   }
 
+  void VisitStmt_(const AllocateNode *op) final {
+    StmtVisitor::VisitStmt_(op);
+    Role role = Role::kConsumer;
+    SetRole(op, role);
+  }
+
   template <class NodeType> void HandleBodyStmt(const NodeType *op) {
     StmtVisitor::VisitStmt_(op);
     SetRole(op, GetRole(op->body));
@@ -192,17 +244,22 @@ private:
   std::unordered_map<const StmtNode *, Role> map_;
   bool has_simt_copy_ = false;
   bool has_bulk_copy_ = false;
-  std::unordered_set<const BufferNode *> used_in_producer_cond_;
+  std::unordered_set<const BufferNode *> producer_buffers_;
 };
 
 static PrimExpr makeGetBarrier(PrimExpr barrier_id) {
   return Call(DataType::Handle(), get_mbarrier(), {barrier_id});
 }
 
-static Stmt makeArriveBarrier(PrimExpr barrier_id) {
-  auto call = Call(DataType::Handle(), builtin::ptx_arrive_barrier(),
-                   {makeGetBarrier(barrier_id)});
-  return Evaluate(call);
+static Stmt makeArriveBarrier(PrimExpr barrier_id, int cta_id = -1,
+                              PrimExpr pred = 1) {
+  Array<PrimExpr> args = {makeGetBarrier(barrier_id)};
+  if (cta_id != -1) {
+    args.push_back(cta_id);
+    args.push_back(pred);
+  }
+  return Evaluate(
+      Call(DataType::Handle(), builtin::ptx_arrive_barrier(), args));
 }
 
 static Stmt makeCpAsyncBarrier(PrimExpr barrier_id) {
@@ -275,14 +332,18 @@ private:
 
 class ThreadIdxRewriter : public StmtExprMutator {
 public:
-  static Stmt Rewrite(Stmt stmt, Var thread_var, PrimExpr replaced) {
-    auto rewriter = ThreadIdxRewriter(thread_var, replaced);
+  static Stmt Rewrite(Stmt stmt, Var thread_var, PrimExpr replaced,
+                      PrimExpr thread_extent, bool do_shuffle = false) {
+    auto rewriter =
+        ThreadIdxRewriter(thread_var, replaced, thread_extent, do_shuffle);
     return rewriter(stmt);
   }
 
 private:
-  ThreadIdxRewriter(Var thread_var, PrimExpr replaced)
-      : thread_var_(thread_var), replaced_(replaced) {}
+  ThreadIdxRewriter(Var thread_var, PrimExpr replaced, PrimExpr thread_extent,
+                    bool do_shuffle)
+      : thread_var_(thread_var), replaced_(replaced),
+        thread_extent_(thread_extent), do_shuffle_(do_shuffle) {}
 
   PrimExpr VisitExpr_(const VarNode *var) final {
     if (var == thread_var_.get()) {
@@ -292,8 +353,34 @@ private:
     }
   }
 
+  Stmt VisitStmt_(const IfThenElseNode *op) final {
+    auto f_uses_thread_index = [=](const tvm::tir::VarNode *parameter) {
+      return parameter == thread_var_.get();
+    };
+    maybe_thread_opt_ = false;
+    if (!op->else_case.defined() && op->condition.as<EQNode>() &&
+        UsesVar(op->condition, f_uses_thread_index) &&
+        !(UsesVar(op->then_case, f_uses_thread_index))) {
+      auto eq_op = Downcast<EQ>(op->condition);
+      if (eq_op->a.as<VarNode>() == thread_var_.get() ||
+          eq_op->b.as<VarNode>() == thread_var_.get()) {
+        maybe_thread_opt_ = true;
+      }
+      maybe_thread_opt_ = do_shuffle_ && maybe_thread_opt_;
+    }
+    if (maybe_thread_opt_)
+      return IfThenElse(
+          Call(DataType::Bool(), tl_shuffle_elect(), {thread_extent_}),
+          StmtExprMutator::VisitStmt(op->then_case), std::nullopt);
+    else
+      return StmtExprMutator::VisitStmt_(op);
+  }
+
   Var thread_var_;
   PrimExpr replaced_;
+  PrimExpr thread_extent_;
+  bool maybe_thread_opt_ = false;
+  bool do_shuffle_;
 };
 
 Block MakeGroupBlock(const Stmt &stmt,
@@ -441,7 +528,7 @@ private:
       order_anno.push_back(Integer(op_info.order));
       stage_anno.push_back(Integer(op_info.stage));
     }
-    Map<String, ObjectRef> for_annotations = op->annotations;
+    Map<String, Any> for_annotations = op->annotations;
     for_annotations.erase("tl_pipeline_group");
     for_annotations.Set("software_pipeline_order", order_anno);
     for_annotations.Set("software_pipeline_stage", stage_anno);
@@ -454,15 +541,91 @@ private:
 
   PipelineInfo pipeline_info_;
 };
+
+class WgMMACollector : public StmtExprVisitor {
+public:
+  WgMMACollector() = default;
+
+  void VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(tl_gemm()) || op->op.same_as(tl_gemm_sp())) {
+      auto op_name = std::string(op->args[0].as<StringImmNode>()->value);
+      if (has_wgmma_) {
+        has_wgmma_ =
+            op_name.find("false") == std::string::npos && !in_if_scope_;
+      }
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  void VisitStmt_(const IfThenElseNode *op) final {
+    in_if_scope_ = true;
+    StmtExprVisitor::VisitStmt(op->then_case);
+    if (op->else_case.defined()) {
+      StmtExprVisitor::VisitStmt(op->else_case.value());
+    }
+    in_if_scope_ = false;
+  }
+
+  static bool HasWgMMA(Stmt stmt) {
+    auto collector = WgMMACollector();
+    collector(stmt);
+    return collector.has_wgmma_;
+  }
+
+  bool has_wgmma_{true};
+  bool in_if_scope_{false};
+};
+
 class WSCodeEmitter : public StmtMutator {
 public:
+  /**
+   * @brief Construct a warp-specialized code emitter configured for producer or
+   * consumer emission.
+   *
+   * Initializes a WSCodeEmitter that will emit barrier-aware, role-filtered
+   * code for a single warp-specialized block. The emitter is configured with
+   * the loop/thread iteration variable, buffer mapping, role marker used to
+   * classify statements, and two flags that control emission behavior:
+   *
+   * - `mbarrier_only`: when true, emission is restricted to barrier-related
+   * operations only.
+   * - `only_has_wgmma`: when true, the emitter will account for the presence of
+   * WgMMA (workgroup MMA) operations when computing barrier/thread gating
+   * behavior.
+   *
+   * @param is_emitting_producer True to emit producer-side groups; false to
+   * emit consumer-side groups.
+   * @param thread_iv IterVar representing the thread iteration variable
+   * (threadIdx.*) whose Var is used for thread-index rewrites and gating.
+   * @param buffer_data_to_buffer Map from buffer data Var to the corresponding
+   * Buffer (used to resolve buffer references during emission).
+   * @param marker Role marker that classifies statements as
+   * producer/consumer/both; used to filter which statements are emitted on this
+   * path.
+   * @param mbarrier_only If true, restrict emission to mbarrier-related
+   * statements and helpers.
+   * @param only_has_wgmma If true, adjust emission and barrier-thread-count
+   * logic for blocks that contain WgMMA operations.
+   */
   WSCodeEmitter(bool is_emitting_producer, IterVar thread_iv,
                 Map<Var, Buffer> buffer_data_to_buffer,
                 const WarpSpecializedRoleMarker &marker,
-                bool mbarrier_only = false)
+                bool mbarrier_only = false, bool only_has_wgmma = false)
       : is_emitting_producer_(is_emitting_producer),
         buffer_data_to_buffer_(buffer_data_to_buffer), marker_(marker),
-        thread_var_(thread_iv->var), mbarrier_only_(mbarrier_only) {}
+        thread_var_(thread_iv->var), mbarrier_only_(mbarrier_only),
+        only_has_wgmma_(only_has_wgmma) {}
+
+  /**
+   * @brief Whether a SIMT-style bulk copy was detected.
+   *
+   * Returns true when a simulated SIMT (thread-parallel) copy pattern was
+   * observed during analysis/emission, which can affect barrier insertion and
+   * copy emission.
+   *
+   * @return true if a SIMT copy was detected; false otherwise.
+   */
+  bool hasSimtCopy() const { return has_simt_copy_; }
 
 private:
   template <typename NodeType> Stmt FilterByRole(const NodeType *op) {
@@ -480,7 +643,47 @@ private:
     }
   }
 
-  // TODO: only need to add block for ops in the loop
+  /**
+   * @brief Visit and transform a SeqStmt node, emitting grouped blocks with
+   * barrier synchronization according to producer/consumer roles.
+   *
+   * This method examines the sequence to determine whether producer-side
+   * synchronization is required (based on marker_ roles). If no producer sync
+   * is needed it delegates to FilterByRole. Otherwise it:
+   * - Recursively visits and transforms each child statement.
+   * - Extracts an acquire/release sync pattern for the sequence via
+   *   ExtractSyncPattern.
+   * - For producer emission (is_emitting_producer_ == true):
+   *   - Skips consumer-only statements unless marker_ marks a statement as
+   * Both, in which case the statement is emitted as its own group.
+   *   - For each statement, inserts parity waits for acquire patterns, rewrites
+   *     release statements with MbarrierRewriter using a computed barrier id,
+   *     collects SimT-copy presence (setting has_simt_copy_ and inserting
+   *     cp.async barriers when found), optionally emits arrive barriers for
+   *     release-after events, and emits each resulting set of statements as a
+   *     group block annotated with "stmt_group".
+   * - For consumer emission (is_emitting_producer_ == false):
+   *   - Skips producer-only statements.
+   *   - Inserts parity waits for acquire patterns, appends the transformed
+   *     statement, and emits arrive barriers for release-after events. When
+   *     only_has_wgmma_ is set, the arrive barrier uses a per-thread predicate
+   *     (FloorMod(thread_var_,128)==0) with CTA=0; otherwise a full arrive is
+   *     emitted.
+   *   - Recomputes pipeline_info_ to drop producer-only ops.
+   *
+   * Side effects / state updates:
+   * - Increments num_barriers_ by (number of extracted patterns * num_stages_).
+   * - May set has_simt_copy_ when a SimT copy is detected in producer rewrites.
+   * - Inserts barrier ids into released_barrier_ for release-after events.
+   * - Updates pipeline_info_ for the consumer path to remove producer ops.
+   *
+   * The resulting statements are emitted as grouped blocks (via MakeGroupBlock)
+   * with the annotation "stmt_group" and returned as either a single Stmt (if
+   * there's only one group) or a SeqStmt containing the grouped blocks.
+   *
+   * @return Stmt The transformed statement (either a single group block or a
+   * SeqStmt of group blocks).
+   */
   Stmt VisitStmt_(const SeqStmtNode *op) final {
 
     bool has_producer = false;
@@ -499,6 +702,7 @@ private:
         op->seq.Map([&](Stmt stmt) { return VisitStmt(stmt); });
 
     auto map = ExtractSyncPattern(op->seq);
+
     /*
       std::cout << "Print ExtractSyncPattern" << std::endl;
       for (int i = 0; i < static_cast<int>(op->seq.size()); i++) {
@@ -551,8 +755,9 @@ private:
               MbarrierRewriter::Rewrite(seq_transformed[i], release_barrier_id);
           collector.Collect(stmt);
           block_stmt.push_back(stmt);
-          if (collector.HasSimtCopy() > 0) {
+          if (collector.HasSimtCopy()) {
             block_stmt.push_back(makeCpAsyncBarrier(release_barrier_id));
+            has_simt_copy_ = true;
           }
           if (map.release_after[i][j]) {
             block_stmt.push_back(makeArriveBarrier(release_barrier_id));
@@ -587,7 +792,11 @@ private:
             int pattern_idx = map.release[i][j];
             PrimExpr release_barrier_id =
                 stage_ + num_barriers_ + num_stages_ * pattern_idx;
-            block_stmt.push_back(makeArriveBarrier(release_barrier_id));
+            if (only_has_wgmma_)
+              block_stmt.push_back(makeArriveBarrier(
+                  release_barrier_id, 0, EQ(FloorMod(thread_var_, 128), 0)));
+            else
+              block_stmt.push_back(makeArriveBarrier(release_barrier_id));
             for (int s = 0; s < num_stages_; s++) {
               released_barrier_.insert(s + num_barriers_ +
                                        num_stages_ * pattern_idx);
@@ -630,28 +839,28 @@ private:
   Stmt VisitStmt_(const ForNode *op) final {
     int num_stages = 1;
     auto num_stages_anno = op->annotations.Get("num_stages");
-    if (num_stages_anno.defined()) {
-      ICHECK(num_stages_anno.as<IntImmNode>());
-      num_stages = static_cast<int>(num_stages_anno.as<IntImmNode>()->value);
+    if (num_stages_anno) {
+      ICHECK(num_stages_anno->as<IntImmNode>());
+      num_stages = static_cast<int>(num_stages_anno->as<IntImmNode>()->value);
       ICHECK(num_stages_ == 1) << "Nested pipeline not supported.";
     }
-    loop_stack_.emplace_back(op->loop_var, op->extent);
+    loop_stack_.emplace_back(LoopInfo{op->loop_var, op->extent, op->min});
 
     Array<Array<Integer>> group_info_array;
     Array<Integer> order_info_array;
     Array<Integer> stage_info_array;
 
     auto group_anno = op->annotations.Get("tl_pipeline_group");
-    if (group_anno.defined()) {
-      group_info_array = Downcast<Array<Array<Integer>>>(group_anno);
+    if (group_anno) {
+      group_info_array = Downcast<Array<Array<Integer>>>(group_anno.value());
     }
     auto order_anno = op->annotations.Get("tl_pipeline_order");
-    if (order_anno.defined()) {
-      order_info_array = Downcast<Array<Integer>>(order_anno);
+    if (order_anno) {
+      order_info_array = Downcast<Array<Integer>>(order_anno.value());
     }
     auto stage_anno = op->annotations.Get("tl_pipeline_stage");
-    if (stage_anno.defined()) {
-      stage_info_array = Downcast<Array<Integer>>(stage_anno);
+    if (stage_anno) {
+      stage_info_array = Downcast<Array<Integer>>(stage_anno.value());
     }
 
     PipelineInfo pipeline_info(group_info_array, order_info_array,
@@ -668,20 +877,19 @@ private:
 
     num_stages_ = num_stages;
     pipeline_info_ = pipeline_info;
-    PrimExpr linear_index = loop_stack_[0].first;
+    PrimExpr linear_index = loop_stack_[0].loop_var - loop_stack_[0].min;
     for (size_t i = 1; i < loop_stack_.size(); ++i) {
-      linear_index =
-          linear_index * loop_stack_[i].second + loop_stack_[i].first;
+      linear_index = linear_index * loop_stack_[i].extent +
+                     (loop_stack_[i].loop_var - loop_stack_[i].min);
     }
     stage_ = FloorMod(linear_index, num_stages);
     parity_ = FloorMod(
         parity_before * op->extent + FloorDiv(linear_index, num_stages), 2);
-
     auto result = FilterByRole(op);
 
     Stmt grouped_for_node;
-    if (result.as<ForNode>() && group_anno.defined() &&
-        group_info_array.size() > 0 && !is_emitting_producer_) {
+    if (result.as<ForNode>() && group_anno && group_info_array.size() > 0 &&
+        !is_emitting_producer_) {
       GroupOpRewriter group_op_rewriter(pipeline_info_);
       auto for_node = Downcast<For>(result);
       grouped_for_node = group_op_rewriter(for_node);
@@ -701,7 +909,7 @@ private:
         for_node.CopyOnWrite()->annotations.erase("tl_pipeline_order");
         for_node.CopyOnWrite()->annotations.erase("tl_pipeline_stage");
       }
-      if (is_emitting_producer_ || !group_anno.defined() ||
+      if (is_emitting_producer_ || !group_anno ||
           group_info_array.size() == 0) {
         loop_stack_.pop_back();
         return for_node;
@@ -763,10 +971,22 @@ private:
                   /*body*/ seq_stmt[i]);
       auto access = GetBlockAccessRegion(block, buffer_data_to_buffer_);
       std::set<const BufferNode *> read_set, write_set;
-      for (auto region : access[0])
-        read_set.insert(region->buffer.get());
-      for (auto region : access[1])
-        write_set.insert(region->buffer.get());
+      for (auto region : access[0]) {
+        auto var = region->buffer->data;
+        if (buffer_data_to_buffer_.count(var)) {
+          read_set.insert(buffer_data_to_buffer_[var].get());
+        } else {
+          read_set.insert(region->buffer.get());
+        }
+      }
+      for (auto region : access[1]) {
+        auto var = region->buffer->data;
+        if (buffer_data_to_buffer_.count(var)) {
+          write_set.insert(buffer_data_to_buffer_[var].get());
+        } else {
+          write_set.insert(region->buffer.get());
+        }
+      }
       reads.push_back(std::move(read_set));
       writes.push_back(std::move(write_set));
     }
@@ -922,54 +1142,23 @@ private:
   PrimExpr parity_ = 0;
   PrimExpr stage_ = 0;
   int num_stages_ = 1;
-  std::vector<std::pair<Var, PrimExpr>> loop_stack_;
+  std::vector<LoopInfo> loop_stack_;
   Var thread_var_;
   bool mbarrier_only_ = false;
   PipelineInfo pipeline_info_;
   friend class WarpSpecializedRewriter;
-};
-
-class SetMaxNRegCollector : public StmtExprVisitor {
-public:
-  static Array<IntImm> Collect(const PrimFunc &f) {
-    SetMaxNRegCollector collector;
-    collector(f->body);
-    return collector.has_no_set_max_nreg_
-               ? Array<IntImm>({IntImm(DataType::Int(32), -1),
-                                IntImm(DataType::Int(32), -1)})
-               : collector.nreg_;
-  }
-
-private:
-  void VisitStmt_(const EvaluateNode *op) final {
-    if (const CallNode *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(set_max_nreg())) {
-        int reg_hint = call->args[0].as<IntImmNode>()->value;
-        int is_inc = call->args[1].as<IntImmNode>()->value;
-        ICHECK(reg_hint <= 240 && reg_hint >= 24)
-            << "Invalid reg hint: " << reg_hint;
-        ICHECK(is_inc == 0 || is_inc == 1) << "Invalid is_inc: " << is_inc;
-
-        // producer should decrease register hint while consumer should increase
-        // register hint
-        nreg_.Set(is_inc, IntImm(DataType::Int(32), reg_hint));
-      } else if (call->op.same_as(no_set_max_nreg())) {
-        has_no_set_max_nreg_ = true;
-      }
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  Array<IntImm> nreg_{IntImm(DataType::Int(32), 0),
-                      IntImm(DataType::Int(32), 0)};
-  bool has_no_set_max_nreg_ = false;
+  bool only_has_wgmma_ = false;
+  bool has_simt_copy_ = false;
 };
 
 class WarpSpecializedRewriter : public StmtExprMutator {
 public:
-  WarpSpecializedRewriter(bool disable_warp_specialized)
-      : disable_warp_specialized_(disable_warp_specialized) {}
-  static PrimFunc Substitute(PrimFunc f, bool disable_warp_specialized) {
+  WarpSpecializedRewriter(bool disable_warp_specialized,
+                          bool disable_shuffle_elect)
+      : disable_warp_specialized_(disable_warp_specialized),
+        disable_shuffle_elect_(disable_shuffle_elect) {}
+  static PrimFunc Substitute(PrimFunc f, bool disable_warp_specialized,
+                             bool disable_shuffle_elect) {
     // Check if function only uses threadIdx.x before proceeding
     if (!ThreadTagChecker::HasOnlyThreadIdxX(f)) {
       LOG(WARNING) << "WarpSpecialize will be disabled because the program "
@@ -980,8 +1169,8 @@ public:
       return f;
     }
 
-    auto T = WarpSpecializedRewriter(disable_warp_specialized);
-    T.nreg_ = SetMaxNRegCollector::Collect(f);
+    auto T = WarpSpecializedRewriter(disable_warp_specialized,
+                                     disable_shuffle_elect);
     T.buffer_lca_ = DetectBufferAccessLCA(f);
     for (auto [buffer, _] : T.buffer_lca_)
       T.buffer_data_to_buffer_.Set(buffer->data, buffer);
@@ -1008,16 +1197,6 @@ private:
     }
   }
 
-  Stmt VisitStmt_(const EvaluateNode *op) final {
-    if (const CallNode *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(set_max_nreg()) ||
-          call->op.same_as(no_set_max_nreg())) {
-        return Evaluate(0);
-      }
-    }
-    return StmtExprMutator::VisitStmt_(op);
-  }
-
   // If users define a thread binding, we will replace the thread binding with
   // threadIdx.x We require the thread binding is threadIdx.x, and the extent is
   // the same as the thread extent
@@ -1030,12 +1209,44 @@ private:
       ICHECK(thread_tag == "threadIdx.x") << "Only support threadIdx.x";
       Var thread_iv = Downcast<Var>(for_node->loop_var);
       Stmt new_body =
-          ThreadIdxRewriter::Rewrite(for_node->body, thread_iv, thread_iv_);
+          ThreadIdxRewriter::Rewrite(for_node->body, thread_iv, thread_iv_, 0);
       return new_body;
     }
     return for_node;
   }
 
+  /**
+   * @brief Rewrite a BlockRealize for warp specialization, inserting barriers
+   * and emitting producer/consumer bodies.
+   *
+   * This visitor handles BlockRealize nodes when a thread IterVar (thread_iv_)
+   * is defined and warp-specialization is applicable. It:
+   * - Determines producer/consumer roles via WarpSpecializedRoleMarker and
+   *   returns the original block if no producer is detected.
+   * - If warp specialization is disabled, emits only mbarrier initialization
+   * and the mbarrier-only transformed body.
+   * - Otherwise, detects WgMMA usage for the block body and constructs separate
+   *   WSCodeEmitter instances for producer and consumer paths (propagating the
+   *   WgMMA flag to the consumer emitter).
+   * - Generates producer/consumer code, applies register hint calls
+   * (set_max_nreg) when available, and rewrites thread indices with
+   * ThreadIdxRewriter to partition threads between producer and consumer roles.
+   * - Computes and initializes a list of mbarrier handles with per-barrier
+   *   arrive thread counts (taking SIMT-copy and WgMMA cases into account).
+   * - Wraps the transformed body in an IfThenElse that dispatches producer vs
+   *   consumer based on thread index, and annotates the region with the
+   *   "kWarpSpecializationScope" attribute that contains producer/consumer
+   *   thread extents.
+   *
+   * Side effects:
+   * - May update member state: only_has_wgmma_, updated_thread_extent_,
+   *   need_update_thread_extent_.
+   * - May abort via ICHECK if invariants (e.g., matching barrier counts) are
+   *   violated.
+   *
+   * @return The possibly rewritten BlockRealize statement (original when no
+   *         warp-specialization is applied or thread_iv_ is undefined).
+   */
   Stmt VisitStmt_(const BlockRealizeNode *op) final {
     BlockRealize block_realize =
         Downcast<BlockRealize>(StmtExprMutator::VisitStmt_(op));
@@ -1069,8 +1280,10 @@ private:
       block_realize.CopyOnWrite()->block = block;
       return block_realize;
     }
+    only_has_wgmma_ = WgMMACollector::HasWgMMA(block->body);
     WSCodeEmitter producer(true, thread_iv_, buffer_data_to_buffer_, marker);
-    WSCodeEmitter consumer(false, thread_iv_, buffer_data_to_buffer_, marker);
+    WSCodeEmitter consumer(false, thread_iv_, buffer_data_to_buffer_, marker,
+                           false, only_has_wgmma_);
     Stmt producer_code = producer(block->body);
     Stmt consumer_code = consumer(block->body);
     PrimExpr consumer_thread_extent = thread_iv_->dom->extent;
@@ -1079,26 +1292,15 @@ private:
     if (!marker.HasSimtCopy())
       producer_thread_extent = 128;
 
-    // TODO: estimate the correct reg usage.
-    int dec_reg = nreg_[0].as<IntImmNode>()->value;
-    int inc_reg = nreg_[1].as<IntImmNode>()->value;
-
-    auto inc_reg_stmt = Evaluate(0);
-    auto dec_reg_stmt = Evaluate(0);
-    if (dec_reg >= 0 && inc_reg >= 0) {
-      inc_reg_stmt = Evaluate(Call(DataType::Handle(), set_max_nreg(),
-                                   {inc_reg == 0 ? 240 : inc_reg, 1}));
-      dec_reg_stmt = Evaluate(Call(DataType::Handle(), set_max_nreg(),
-                                   {dec_reg == 0 ? 24 : dec_reg, 0}));
-    }
-
-    producer_code = SeqStmt({dec_reg_stmt, producer_code});
-    consumer_code = SeqStmt({inc_reg_stmt, consumer_code});
-
-    producer_code =
-        ThreadIdxRewriter::Rewrite(producer_code, thread_iv_->var,
-                                   thread_iv_->var - consumer_thread_extent);
     updated_thread_extent_ = consumer_thread_extent + producer_thread_extent;
+
+    producer_code = ThreadIdxRewriter::Rewrite(
+        producer_code, thread_iv_->var,
+        thread_iv_->var - consumer_thread_extent, producer_thread_extent,
+        !disable_shuffle_elect_);
+    consumer_code = ThreadIdxRewriter::Rewrite(
+        consumer_code, thread_iv_->var, thread_iv_->var, consumer_thread_extent,
+        !disable_shuffle_elect_);
     need_update_thread_extent_ = true;
 
     ICHECK(producer.num_barriers_ == consumer.num_barriers_)
@@ -1107,9 +1309,11 @@ private:
     Array<PrimExpr> barrier_num_threads;
     barrier_num_threads.reserve(num_barriers);
     for (int i = 0; i < num_barriers; i++) {
-      PrimExpr arrive_thread_count = producer.released_barrier_.count(i)
-                                         ? producer_thread_extent
-                                         : consumer_thread_extent;
+      PrimExpr arrive_thread_count =
+          producer.released_barrier_.count(i)
+              ? (producer.hasSimtCopy() ? producer_thread_extent : 1)
+              : (only_has_wgmma_ ? FloorDiv(consumer_thread_extent, 128)
+                                 : consumer_thread_extent);
       barrier_num_threads.push_back(arrive_thread_count);
     }
 
@@ -1120,7 +1324,7 @@ private:
     // Add an attr here to handle the partial thread count in ThreadSync pass.
     Array<IntImm> ws_partition = {Downcast<IntImm>(producer_thread_extent),
                                   Downcast<IntImm>(consumer_thread_extent)};
-    body = AttrStmt(ws_partition, "kWarpSpecializationScope", 0, body);
+    body = AttrStmt(ws_partition, attr::kWarpSpecializationScope, 0, body);
 
     block.CopyOnWrite()->body = SeqStmt({init_barrier, body});
     block_realize.CopyOnWrite()->block = block;
@@ -1136,16 +1340,27 @@ private:
   Optional<PrimExpr> updated_thread_extent_;
   bool need_update_thread_extent_ = false;
   bool disable_warp_specialized_ = false;
-  Array<IntImm> nreg_;
+  bool disable_shuffle_elect_ = false;
+  bool only_has_wgmma_ = false;
 };
 
 class WarpSpecializedDetector : public IRVisitorWithAnalyzer {
 public:
+  // return true means this aws will be disabled
   static bool Detect(Stmt stmt, bool skip_thread_partition = false) {
     WarpSpecializedDetector detector;
     detector.VisitStmt(stmt);
-    return detector.has_warp_specialization_ ||
-           (detector.has_tma_op_ && detector.has_mbarrier_op_);
+    if (detector.has_warp_specialization_) {
+      LOG(WARNING) << "Auto warp specialization will be disabled because warp "
+                      "specialization is manually enabled";
+      return true;
+    }
+    if (detector.has_tma_op_ && detector.has_mbarrier_op_) {
+      LOG(WARNING) << "Auto warp specialization will be disabled because TMA "
+                      "and mbarrier are both present";
+      return true;
+    }
+    return false;
   }
 
   WarpSpecializedDetector() {
@@ -1202,18 +1417,23 @@ tvm::transform::Pass WarpSpecialized() {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
     bool disable_warp_specialized =
         ctx->GetConfig<Bool>(kDisableWarpSpecialized, Bool(false)).value();
+    bool disable_shuffle_elect =
+        ctx->GetConfig<Bool>(kDisableShuffleElect, Bool(false)).value();
     bool warp_specialized = WarpSpecializedDetector::Detect(f->body);
 
     if (!warp_specialized) {
-      return WarpSpecializedRewriter::Substitute(f, disable_warp_specialized);
+      return WarpSpecializedRewriter::Substitute(f, disable_warp_specialized,
+                                                 disable_shuffle_elect);
     }
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.WarpSpecialized", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.WarpSpecialized")
-    .set_body_typed(WarpSpecialized);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.WarpSpecialized", WarpSpecialized);
+});
 
 } // namespace tl
 } // namespace tvm
