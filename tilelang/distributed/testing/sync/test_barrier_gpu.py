@@ -50,7 +50,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--blocks', type=int, default=64)
     parser.add_argument('--threads', type=int, default=128)
-    parser.add_argument('--print_source', action='store_true')
+    parser.add_argument('--print-source', action='store_true')
     return parser.parse_args()
 
 

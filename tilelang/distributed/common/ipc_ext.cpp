@@ -66,6 +66,11 @@ pybind11::bytearray create_ipc_handle(void *ptr) {
   cudaIpcGetMemHandle(handle, ptr);
   pybind11::bytearray result = {handle->reserved, CUDA_IPC_HANDLE_SIZE};
   return result;
+pybind11::bytearray create_ipc_handle(void* ptr) {
+    cudaIpcMemHandle_t* handle = (cudaIpcMemHandle_t*)malloc(sizeof(cudaIpcMemHandle_t));
+    cudaIpcGetMemHandle(handle, ptr);
+    pybind11::bytearray result = {handle->reserved, CUDA_IPC_HANDLE_SIZE};
+    return result;
 }
 
 void sync_ipc_handles(
@@ -91,6 +96,27 @@ void sync_ipc_handles(
                                       cudaIpcMemLazyEnablePeerAccess));
     }
   }
+    const std::optional<pybind11::bytearray>& root_unique_id_opt
+) {
+    // TODO: Support inter-node case
+    int rdma_rank = 0;
+    int num_nvl_ranks = device_ids.size();
+    cudaIpcMemHandle_t ipc_handles[device_ids.size()];
+    // buffer_ptrs is a pointer on host and points to the address on device
+    void* buffer_ptrs[device_ids.size()];
+    // EP_HOST_ASSERT(num_ranks == device_ids.size());
+    EP_HOST_ASSERT(device_ids.size() == all_gathered_handles.size());
+    for (int i = 0, offset = rdma_rank * num_nvl_ranks; i < num_nvl_ranks; ++ i) {
+        EP_HOST_ASSERT(all_gathered_handles[offset + i].has_value());
+        auto handle_str = std::string(all_gathered_handles[offset + i].value());
+        EP_HOST_ASSERT(handle_str.size() == CUDA_IPC_HANDLE_SIZE);
+        if (offset + i != rank) {
+            std::memcpy(ipc_handles[i].reserved, handle_str.c_str(), CUDA_IPC_HANDLE_SIZE);
+            CUDA_CHECK(cudaIpcOpenMemHandle(&buffer_ptrs[i], ipc_handles[i], cudaIpcMemLazyEnablePeerAccess));
+        } else {
+            EP_HOST_ASSERT(std::memcmp(ipc_handles[i].reserved, handle_str.c_str(), CUDA_IPC_HANDLE_SIZE) == 0);
+        }
+    }
 
   // Copy all buffer and barrier signal pointers to GPU
   CUDA_CHECK(cudaMemcpy(buffer_ptrs_gpu, buffer_ptrs,
