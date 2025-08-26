@@ -325,7 +325,7 @@ TVM_DLL const Op &tl_shuffle_elect();
  *
  * void init_barrier_gpu(barrier, expected)
  */
-TVM_DLL const Op init_barrier_gpu();
+TVM_DLL const Op &init_barrier_gpu();
 
 /*!
  * \brief Arrive at a barrier for GPU-level synchronization
