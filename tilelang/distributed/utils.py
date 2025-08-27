@@ -44,7 +44,7 @@ def init_dist(local_rank: int, num_local_ranks: int):
         list(range(num_local_ranks * num_nodes)))
 
 
-def create_tensor(shape: List[int], dtype: torch.dtype):
+def create_tensor(shape: List[int], dtype: torch.dtype) -> torch.Tensor:
     # NOTE(wt): We discovered that IPC only works with tensors explicitly allocated by `cudaMalloc` somehow.
     return _create_tensor(shape, dtype)
 

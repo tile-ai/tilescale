@@ -1,3 +1,4 @@
+import os
 import tilelang
 import tilelang.language as T
 import argparse
@@ -7,6 +8,7 @@ import torch.multiprocessing
 from tilelang.distributed.utils import init_dist, create_dist_tensor, create_tensor
 
 tilelang.disable_cache()
+os.environ['NCCL_DEBUG'] = 'WARN'  # silence NCCL log
 
 
 def kernel_(M, N, num_rank, block_M, threads):
@@ -19,8 +21,8 @@ def kernel_(M, N, num_rank, block_M, threads):
             meta_data: T.Tensor((1, num_rank), "uint64", buffer_type="meta_data"),
     ):
         with T.Kernel(T.ceildiv(M, block_M), threads=threads) as bid:
-            #TODO(ipc): Add work partition among warps and vectorized copy
-            T.remote_copy(
+            #TODO(ipc): Add work partition among warps
+            T.push_warp(
                 src=T.address_of(src[bid * block_M, 0]),
                 dst=T.address_of(dst[bid * block_M, 0]),
                 size=block_M * N,

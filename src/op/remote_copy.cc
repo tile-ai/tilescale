@@ -1,6 +1,6 @@
 /*!
  * \file tl/op/remote_copy.cc
- * \brief Remote copy operator.
+ * \brief Push warp operator.
  *
  */
 
@@ -13,6 +13,7 @@
 #include "../target/cuda.h"
 #include "../target/utils.h"
 #include "builtin.h"
+#include "parallel.h"
 
 namespace tvm {
 namespace tl {
@@ -30,16 +31,20 @@ PrimExpr get_offset(const BufferLoadNode *load) {
   return div(offset * load->dtype.bits(), 8);
 }
 
-RemoteCopyOp::RemoteCopyOp(Array<PrimExpr> args, BufferMap vmap) {
+PushWarpOp::PushWarpOp(Array<PrimExpr> args, BufferMap vmap) {
   src_addr = args[0];
   dst_addr = args[1];
   ICHECK(src_addr.as<CallNode>()) << "src_addr must be a call node";
-  ICHECK(src_addr.as<CallNode>()->op.same_as(builtin::address_of())) << "src_addr must be address_of op";
+  ICHECK(src_addr.as<CallNode>()->op.same_as(builtin::address_of()))
+      << "src_addr must be address_of op";
   ICHECK(dst_addr.as<CallNode>()) << "dst_addr must be a call node";
-  ICHECK(dst_addr.as<CallNode>()->op.same_as(builtin::address_of())) << "dst_addr must be address_of op";
+  ICHECK(dst_addr.as<CallNode>()->op.same_as(builtin::address_of()))
+      << "dst_addr must be address_of op";
 
-  src_offset = get_offset(src_addr.as<CallNode>()->args[0].as<BufferLoadNode>());
-  dst_offset = get_offset(dst_addr.as<CallNode>()->args[0].as<BufferLoadNode>());
+  src_offset =
+      get_offset(src_addr.as<CallNode>()->args[0].as<BufferLoadNode>());
+  dst_offset =
+      get_offset(dst_addr.as<CallNode>()->args[0].as<BufferLoadNode>());
   src_buffer = src_addr.as<CallNode>()->args[0].as<BufferLoadNode>()->buffer;
   dst_buffer = dst_addr.as<CallNode>()->args[0].as<BufferLoadNode>()->buffer;
 
@@ -51,26 +56,88 @@ RemoteCopyOp::RemoteCopyOp(Array<PrimExpr> args, BufferMap vmap) {
   }
 }
 
-Stmt RemoteCopyOp::Lower(const LowerArgs &T,
-                           arith::Analyzer *analyzer) const {
+Stmt PushWarpOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   Array<PrimExpr> new_args;
   std::stringstream ss;
   ss << "tl::cp_unrolled<" << copy_size << ", " << unroll_factor << ">";
   new_args.push_back(StringImm(ss.str()));
   if (is_symmetric) {
     ICHECK(T.meta_data_buffer.defined()) << "meta_data_buffer is not defined";
-    ICHECK(T.buffer_to_meta_data_index.defined()) << "buffer_to_meta_data_index is not defined";
-    ICHECK(T.buffer_to_meta_data_index.find(dst_buffer) != T.buffer_to_meta_data_index.end()) << "dst_buffer is not in buffer_to_meta_data_index";
-    new_args.push_back(BufferLoad(T.meta_data_buffer, {T.buffer_to_meta_data_index[dst_buffer], dst_pe}) + dst_offset);
+    ICHECK(T.buffer_to_meta_data_index.defined())
+        << "buffer_to_meta_data_index is not defined";
+    ICHECK(T.buffer_to_meta_data_index.find(dst_buffer) !=
+           T.buffer_to_meta_data_index.end())
+        << "dst_buffer is not in buffer_to_meta_data_index";
+    new_args.push_back(
+        BufferLoad(T.meta_data_buffer,
+                   {T.buffer_to_meta_data_index[dst_buffer], dst_pe}) +
+        dst_offset);
   } else {
     new_args.push_back(dst_addr);
   }
   new_args.push_back(src_addr);
-  auto unrolled_copy = Call(DataType::Handle(), builtin::call_extern(), new_args);
+  auto unrolled_copy =
+      Call(DataType::Handle(), builtin::call_extern(), new_args);
   return Evaluate(unrolled_copy);
 }
 
-TIR_REGISTER_TL_OP(RemoteCopyOp, remote_copy)
+PullWarpOp::PullWarpOp(Array<PrimExpr> args, BufferMap vmap) {
+  src_addr = args[0];
+  dst_addr = args[1];
+  ICHECK(src_addr.as<CallNode>()) << "src_addr must be a call node";
+  ICHECK(src_addr.as<CallNode>()->op.same_as(builtin::address_of()))
+      << "src_addr must be address_of op";
+  ICHECK(dst_addr.as<CallNode>()) << "dst_addr must be a call node";
+  ICHECK(dst_addr.as<CallNode>()->op.same_as(builtin::address_of()))
+      << "dst_addr must be address_of op";
+
+  src_offset =
+      get_offset(src_addr.as<CallNode>()->args[0].as<BufferLoadNode>());
+  dst_offset =
+      get_offset(dst_addr.as<CallNode>()->args[0].as<BufferLoadNode>());
+  src_buffer = src_addr.as<CallNode>()->args[0].as<BufferLoadNode>()->buffer;
+  dst_buffer = dst_addr.as<CallNode>()->args[0].as<BufferLoadNode>()->buffer;
+
+  copy_size = args[2];
+  src_pe = args[3];
+  unroll_factor = args[4].as<IntImm>().value()->value;
+  if (src_pe.defined()) {
+    is_symmetric = true;
+  }
+}
+
+Stmt PullWarpOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+  Array<PrimExpr> new_args;
+  std::stringstream ss;
+  ss << "tl::cp_unrolled<" << copy_size << ", " << unroll_factor << ">";
+  new_args.push_back(StringImm(ss.str()));
+  new_args.push_back(dst_addr); // Always dst first in tl_templates
+  if (is_symmetric) {
+    ICHECK(T.meta_data_buffer.defined()) << "meta_data_buffer is not defined";
+    ICHECK(T.buffer_to_meta_data_index.defined())
+        << "buffer_to_meta_data_index is not defined";
+    ICHECK(T.buffer_to_meta_data_index.find(src_buffer) !=
+           T.buffer_to_meta_data_index.end())
+        << "src_buffer is not in buffer_to_meta_data_index";
+    new_args.push_back(
+        BufferLoad(T.meta_data_buffer,
+                   {T.buffer_to_meta_data_index[src_buffer], src_pe}) +
+        src_offset);
+  } else {
+    new_args.push_back(src_addr);
+  }
+
+  auto unrolled_pull =
+      Call(DataType::Handle(), builtin::call_extern(), new_args);
+  return Evaluate(unrolled_pull);
+}
+
+TIR_REGISTER_TL_OP(PushWarpOp, push_warp)
+    .set_num_inputs(5)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_REGISTER_TL_OP(PullWarpOp, pull_warp)
     .set_num_inputs(5)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
