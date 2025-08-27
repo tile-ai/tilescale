@@ -1,6 +1,6 @@
 /*!
  * \file tl/op/remote_copy.h
- * \brief Remote copy operator.
+ * \brief Warp-level remote copy operators.
  *
  */
 
@@ -18,20 +18,40 @@ namespace tl {
 
 using namespace tir;
 
-class RemoteCopyOp : public Operator {
+class PushWarpOp : public Operator {
 public:
-  RemoteCopyOp(Array<PrimExpr> args, BufferMap vmap);
+  PushWarpOp(Array<PrimExpr> args, BufferMap vmap);
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const final;
   static const Op &Get();
 
   std::unique_ptr<Operator> Clone() const final {
-    return std::make_unique<RemoteCopyOp>(*this);
+    return std::make_unique<PushWarpOp>(*this);
   }
 
 private:
   PrimExpr src_addr, dst_addr;
   PrimExpr src_offset, dst_offset;
   PrimExpr copy_size, dst_pe;
+  int unroll_factor;
+  bool is_symmetric = false;
+  Buffer src_buffer, dst_buffer;
+  Map<Buffer, Array<IntImm>> meta_data_;
+};
+
+class PullWarpOp : public Operator {
+public:
+  PullWarpOp(Array<PrimExpr> args, BufferMap vmap);
+  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const final;
+  static const Op &Get();
+
+  std::unique_ptr<Operator> Clone() const final {
+    return std::make_unique<PullWarpOp>(*this);
+  }
+
+private:
+  PrimExpr src_addr, dst_addr;
+  PrimExpr src_offset, dst_offset;
+  PrimExpr copy_size, src_pe;
   int unroll_factor;
   bool is_symmetric = false;
   Buffer src_buffer, dst_buffer;
