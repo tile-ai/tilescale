@@ -11,6 +11,8 @@ from tilelang.jit.adapter import (BaseKernelAdapter, CtypesKernelAdapter, Cython
                                   NVRTCKernelAdapter, TorchDLPackKernelAdapter)
 from tilelang.profiler import Profiler, TensorSupplyType
 from tilelang.utils.target import AVALIABLE_TARGETS, determine_target
+from tilelang.utils.allocator import BaseAllocator
+import ctypes
 import logging
 
 logger = logging.getLogger(__name__)
@@ -134,6 +136,7 @@ class JITKernel(object):
         # The adapter's function is assigned as the callable function for this instance.
         self.adapter = adapter
         self.torch_function = adapter.func
+        self.allocator = None
 
     @classmethod
     def from_database(
@@ -393,6 +396,17 @@ class JITKernel(object):
         Returns the source code of the host function.
         """
         return str(self.artifact.host_mod)
+
+    def initialize(
+        self,
+        allocator: BaseAllocator,
+    ):
+        assert allocator.initialized(), "Allocator is not initialized"
+        result = self.adapter.lib.init_table(
+            ctypes.c_void_p(allocator.table.data_ptr()), allocator.table_size)
+        if result != 0:
+            error_msg = self.adapter.lib.get_last_error().decode('utf-8')
+            raise RuntimeError(f"Initialization failed: {error_msg}")
 
     def run_once(self, func: Optional[Callable] = None) -> None:
         return self.get_profiler().run_once(func)

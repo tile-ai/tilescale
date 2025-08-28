@@ -5,6 +5,18 @@ from typing import Optional
 from tvm.tir import PrimExpr
 
 
+def get_rank():
+    """Get the rank of the current process.
+    """
+    return tir.call_intrin("uint64", tir.op.Op.get("tl.get_rank"))
+
+
+def get_num_ranks():
+    """Get the number of processes.
+    """
+    return tir.call_intrin("uint64", tir.op.Op.get("tl.get_num_ranks"))
+
+
 def remote_copy(src: PrimExpr,
                 dst: PrimExpr,
                 size: PrimExpr,

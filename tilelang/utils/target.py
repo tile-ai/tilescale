@@ -3,6 +3,7 @@ from tilelang import tvm as tvm
 from tvm.target import Target
 from tvm.contrib import rocm
 from tilelang.contrib import nvcc
+import torch
 
 AVALIABLE_TARGETS = {
     "auto",
@@ -81,3 +82,19 @@ def determine_target(target: Union[str, Target, Literal["auto"]] = "auto",
     if return_object:
         return Target(return_var)
     return return_var
+
+
+def parse_device(device: Union[str, torch.device, int]) -> int:
+    if isinstance(device, str):
+        if device.startswith("cuda"):
+            return torch.cuda.current_device()
+        elif device == "cpu":
+            return -1
+        else:
+            raise ValueError(f"unknown device string: {device}")
+    elif isinstance(device, torch.device):
+        return device.index if device.type == "cuda" else -1
+    elif isinstance(device, int):
+        return device
+    else:
+        raise TypeError("device must be str|torch.device|int")

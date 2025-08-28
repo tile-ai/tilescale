@@ -6,6 +6,10 @@ from tvm.runtime import ndarray
 from tvm import tir
 from torch.utils.dlpack import to_dlpack
 import numpy as np
+from typing import Optional, Tuple
+from tilelang.utils.allocator import BaseAllocator
+from tilelang.utils.target import parse_device
+from typing import Union
 
 
 class TensorSupplyType(Enum):
@@ -36,6 +40,21 @@ def map_torch_type(intype: str) -> torch.dtype:
         return torch.float8_e4m3fnuz
     else:
         return getattr(torch, intype)
+
+
+def tensor(shape: Tuple[int, ...],
+           dtype: torch.dtype,
+           device: Optional[Union[str, torch.device, int]] = None,
+           allocator: Optional[BaseAllocator] = None) -> torch.Tensor:
+    if allocator is not None:
+        assert allocator.initialized(), "Allocator is not initialized"
+        if device is not None:
+            device = parse_device(device)
+            assert allocator.device == device, f"Allocator device must be the " \
+                f"same as the device of the tensor, but got {allocator.device} != {device}"
+        return allocator._allocate_tensor(shape, dtype)
+    else:
+        return torch.empty(shape, dtype=dtype, device=device)
 
 
 def adapt_torch2tvm(arg):

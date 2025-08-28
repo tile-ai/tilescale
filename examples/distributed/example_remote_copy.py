@@ -4,25 +4,30 @@ import argparse
 import torch
 import torch.distributed as dist
 import torch.multiprocessing
-from tilelang.distributed.utils import init_dist, create_dist_tensor
+from tilelang.distributed.utils import init_dist
 
 tilelang.disable_cache()
 
 
-def kernel_(M, N, num_rank, block_M, block_N, threads):
+def kernel_(M, num_rank, block_M, threads):
 
     @T.prim_func
     def main(
-            dst: T.Tensor((M, N), "float32", buffer_type="distributed"),
-            src: T.Tensor((M, N), "float32"),
-            rank: T.Tensor((1), "int32"),
-            meta_data: T.Tensor((1, num_rank), "uint64", buffer_type="meta_data"),
+            dst: T.Tensor((M), "float32"),
+            src: T.Tensor((M), "float32"),
     ):
-        with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), threads=threads) as (bx, by):
+        with T.Kernel(T.ceildiv(M, block_M), threads=threads) as (bx):
+            rank = T.alloc_local([1], "uint64")
+            num_rank = T.alloc_local([1], "uint64")
+            rank[0] = T.get_rank()
+            num_rank[0] = T.get_num_ranks()
+            warp_idx = T.get_thread_binding(0) // 32
+            warp_copy_size = T.ceildiv(block_M, threads // 32)
+            warp_start = bx * block_M + warp_copy_size * warp_idx
             T.remote_copy(
-                src=T.address_of(src[0, 0]),
-                dst=T.address_of(dst[0, 0]),
-                size=M * N,
+                src=T.address_of(src[warp_start]),
+                dst=T.address_of(dst[warp_start]),
+                size=warp_copy_size,
                 dst_pe=rank[0] ^ 1,
                 unroll_factor=4)
 
@@ -30,25 +35,30 @@ def kernel_(M, N, num_rank, block_M, block_N, threads):
 
 
 def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
-    M, N = args.M, args.N
-    BLOCK_M = 128
-    BLOCK_N = 256
-    threads = 256
+    M = args.M
+    BLOCK_M = 4096
+    threads = 128
+    assert num_local_ranks == 2, "this example only supports 2 ranks copying to each other"
 
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
-    src = torch.randn(M, N, device="cuda", dtype=torch.float32)
-    dst = torch.empty(M, N, device="cuda", dtype=torch.float32)
-    rank_tensor = torch.tensor([local_rank], device="cuda", dtype=torch.int32)
-    buffer_ptrs_gpu = create_dist_tensor(local_rank, num_local_ranks, dst, rank,
-                                         group).reshape(1, num_local_ranks)
-
-    kernel = tilelang.compile(kernel_(M, N, num_ranks, BLOCK_M, BLOCK_N, threads))
+    allocator = tilelang.get_allocator(
+        size=2**25,
+        device="cuda",
+        is_distributed=True,
+        local_rank=local_rank,
+        num_local_ranks=num_local_ranks,
+        group=group)
+    kernel = tilelang.compile(kernel_(M, num_ranks, BLOCK_M, threads))
+    kernel.initialize(allocator=allocator)
     if local_rank == 0:
         print(kernel.get_kernel_source())
 
+    src = tilelang.tensor((M), torch.float32, allocator=allocator).normal_()
+    dst = tilelang.tensor((M), torch.float32, allocator=allocator)
+
     torch.cuda.synchronize()
     torch.distributed.barrier(group)
-    kernel(dst, src, rank_tensor, buffer_ptrs_gpu)
+    kernel(dst, src)
     torch.cuda.synchronize()
     torch.distributed.barrier(group)
 
@@ -70,8 +80,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         '--num-processes', type=int, default=2, help='Number of processes to spawn (default: 2)')
-    parser.add_argument('--M', type=int, default=8192, help='M dimension')
-    parser.add_argument('--N', type=int, default=8192, help='N dimension')
+    parser.add_argument('--M', type=int, default=65536, help='M dimension')
     args = parser.parse_args()
     num_processes = args.num_processes
     torch.multiprocessing.spawn(main, args=(num_processes, args), nprocs=num_processes)
