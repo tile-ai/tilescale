@@ -122,6 +122,8 @@ private:
   bool need_cooperative_groups_{false};
   // whether need distributed.h
   bool use_distributed_{use_distributed()};
+  // whether need sync.h
+  bool need_sync_{false};
   // Op attribute map
   OpAttrMap<bool> op_need_warp_shuffle_ =
       Op::GetAttrMap<bool>("cuda.need_warp_shuffle");

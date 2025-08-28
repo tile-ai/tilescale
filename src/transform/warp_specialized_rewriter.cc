@@ -13,6 +13,7 @@
 #include <tvm/tir/transform.h>
 
 #include "../op/builtin.h"
+#include "../op/sync.h"
 #include "./common/collector.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
@@ -150,9 +151,15 @@ public:
         role = Role::kProducer;
         has_bulk_copy_ = true;
       }
-      if (call->op.same_as(loop_break())) {
+      if (call->op.same_as(loop_break()))
         role = Role::kBoth;
-      }
+    } else if (call->op.same_as(init_barrier_gpu()) ||
+               call->op.same_as(arrive_barrier_gpu()) ||
+               call->op.same_as(wait_barrier_gpu()) ||
+               call->op.same_as(sync_barrier_gpu())) {
+      role = Role::kBoth;
+    } else if (call->op.same_as(barrier_all_blocks_sys())) {
+      role = Role::kBoth;
     }
     SetRole(op, role);
   }

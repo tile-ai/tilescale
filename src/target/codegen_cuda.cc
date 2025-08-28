@@ -15,6 +15,7 @@
 
 #include "../op/builtin.h"
 #include "../op/distributed.h"
+#include "../op/sync.h"
 #include "arith/pattern_match.h"
 #include "target/source/ptx.h"
 
@@ -185,6 +186,10 @@ std::string CodeGenTileLangCUDA::Finish() {
 
   if (need_cooperative_groups_) {
     decl_stream << "#include <cooperative_groups.h>\n";
+  }
+
+  if (need_sync_) {
+    decl_stream << "#include <tl_templates/cuda/sync.h>\n";
   }
 
   decl_stream << "#include <tl_templates/cuda/gemm.h>\n";
@@ -1154,6 +1159,34 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                     "cooperative_groups::this_grid();\n";
     this->PrintIndent();
     this->stream << "grid.sync();\n";
+  } else if (op->op.same_as(tl::init_barrier_gpu())) {
+    ICHECK_GE(op->args.size(), 2);
+    this->need_sync_ = true;
+    this->PrintIndent();
+    this->stream << "tl::init_barrier_gpu<" << this->PrintExpr(op->args[1])
+                 << ">(" << this->PrintExpr(op->args[0]) << ");\n";
+  } else if (op->op.same_as(tl::arrive_barrier_gpu())) {
+    this->need_sync_ = true;
+    this->PrintIndent();
+    this->stream << "tl::arrive_barrier_gpu(" << this->PrintExpr(op->args[0])
+                 << ");\n";
+  } else if (op->op.same_as(tl::wait_barrier_gpu())) {
+    this->need_sync_ = true;
+    this->PrintIndent();
+    this->stream << "tl::wait_barrier_gpu(" << this->PrintExpr(op->args[0])
+                 << ");\n";
+  } else if (op->op.same_as(tl::sync_barrier_gpu())) {
+    this->need_sync_ = true;
+    this->PrintIndent();
+    this->stream << "tl::sync_barrier_gpu(" << this->PrintExpr(op->args[0])
+                 << ");\n";
+  } else if (op->op.same_as(tl::barrier_all_blocks_sys())) {
+    this->need_sync_ = true;
+    this->PrintIndent();
+    this->stream << "tl::barrier_all_blocks_sys<"
+                 << this->PrintExpr(op->args[2]) << ">("
+                 << this->PrintExpr(op->args[0]) << ", "
+                 << this->PrintExpr(op->args[1]) << ");\n";
   } else if (op->op.same_as(tl::loop_break())) {
     this->PrintIndent();
     this->stream << "break;\n";
