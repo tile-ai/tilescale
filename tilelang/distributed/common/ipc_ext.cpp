@@ -1,3 +1,6 @@
+#include <ATen/ops/from_blob.h>
+#include <c10/core/ScalarType.h>
+#include <c10/cuda/CUDAFunctions.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <pybind11/pybind11.h>
@@ -6,9 +9,6 @@
 #include <torch/python.h>
 #include <torch/types.h>
 #include <vector>
-#include <ATen/ops/from_blob.h>
-#include <c10/core/ScalarType.h>
-#include <c10/cuda/CUDAFunctions.h>
 
 namespace py = pybind11;
 

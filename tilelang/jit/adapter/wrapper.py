@@ -39,6 +39,26 @@ extern "C" int init() {{
     {0}
     return 0;
 }}
+
+extern "C" int init_table(const void* host_table, size_t n) {{
+    if (error_buf) error_buf[0] = '\\0';
+
+    if (host_table == nullptr) {{
+        if (error_buf) std::snprintf(error_buf, 256, "host_table is null");
+        return -1;
+    }}
+    if (n == 0) {{
+        return 0;
+    }}
+
+    size_t bytes = n * sizeof(uint64_t);
+    cudaError_t err = cudaMemcpyToSymbol(meta_data, host_table, bytes, 0, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {{
+        if (error_buf) std::snprintf(error_buf, 256, "cudaMemcpyToSymbol failed: %s", cudaGetErrorString(err));
+        return static_cast<int>(err);
+    }}
+    return 0;
+}}
 """
 
 PREDEF_HOST_FUNC = """

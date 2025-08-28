@@ -87,6 +87,8 @@ from .utils import (
     TensorSupplyType,  # noqa: F401
     deprecated,  # noqa: F401
 )
+from .utils.tensor import tensor  # noqa: F401
+from .utils.allocator import get_allocator  # noqa: F401
 from .layout import (
     Layout,  # noqa: F401
     Fragment,  # noqa: F401
