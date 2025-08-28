@@ -1,13 +1,13 @@
 # allocator_ctypes.py
 import ctypes
 import ctypes.util
-from abc import ABC
 from typing import Optional, Tuple, Union
 import torch
 import torch.distributed as dist
 from tilelang.distributed.common.ipc_ext import create_ipc_handle, sync_ipc_handles
 from tilelang.utils.cpp.alloc_cuda import tensor_from_ptr
 from tilelang.utils.target import parse_device
+import contextlib
 
 _dtype_to_str = {
     torch.float32: "float32",
@@ -50,7 +50,7 @@ def _load_cudart():
     try:
         lib = ctypes.CDLL(name)
     except OSError as e:
-        raise RuntimeError(f"cannot load cudart ({name}): {e}")
+        raise RuntimeError(f"cannot load cudart ({name}): {e}") from e
     return lib
 
 
@@ -68,7 +68,7 @@ if hasattr(_libcudart, "cudaSetDevice"):
     _libcudart.cudaSetDevice.restype = ctypes.c_int
 
 
-class BaseAllocator(ABC):
+class BaseAllocator:
     func: Optional[callable] = None
 
     def __init__(self,
@@ -180,7 +180,7 @@ class BaseAllocator(ABC):
         if cur_ptr_val == 0:
             raise RuntimeError("null device pointer")
 
-        dtype_str = _dtype_to_str.get(dtype, None)
+        dtype_str = _dtype_to_str.get(dtype)
         if dtype_str is None:
             dtype_str = str(dtype).split(".")[-1]
 
@@ -209,10 +209,8 @@ class BaseAllocator(ABC):
         return self._table_size
 
     def __del__(self):
-        try:
+        with contextlib.suppress(Exception):
             self._free()
-        except Exception:
-            pass
 
 
 def get_allocator(size: int = 2**30,

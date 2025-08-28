@@ -204,7 +204,6 @@ std::string CodeGenTileLangCUDA::Finish() {
   decl_stream << "#include <tl_templates/cuda/cuda_bf16_fallbacks.cuh>\n";
   decl_stream << "#endif\n";
 
-
   if (use_distributed_) {
     decl_stream << "uint64_t __constant__ meta_data[1024];\n";
   }
