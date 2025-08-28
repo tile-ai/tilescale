@@ -1,14 +1,12 @@
 import torch
 import torch.distributed as dist
-import datetime
 import os
 import inspect
 from typing import List, Union, Tuple, Callable, Sequence
 from contextlib import contextmanager
 from cuda import cuda, cudart
 import ctypes
-import os
-from tilelang.distributed.common.ipc_ext import create_ipc_handle, sync_ipc_handles
+from tilelang.distributed.common.ipc_ext import _create_ipc_handle, _sync_ipc_handles, _create_tensor
 
 dtype_map = {
     "bfloat16": torch.bfloat16,
@@ -46,36 +44,15 @@ def init_dist(local_rank: int, num_local_ranks: int):
         list(range(num_local_ranks * num_nodes)))
 
 
-def init_distributed(return_tp_group=False, init_nvshmem=False):
-    WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-    RANK = int(os.environ.get("RANK", 0))
-    LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
-
-    torch.distributed.init_process_group(
-        backend="nccl",
-        world_size=WORLD_SIZE,
-        rank=RANK,
-        timeout=datetime.timedelta(seconds=1800),
-    )
-    torch.cuda.set_device(LOCAL_RANK)
-    assert torch.distributed.is_initialized()
-    TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
-
-    torch.cuda.synchronize()
-    if init_nvshmem:
-        import pynvshmem
-        pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
-
-    if return_tp_group:
-        return WORLD_SIZE, RANK, LOCAL_RANK, TP_GROUP
-    else:
-        return WORLD_SIZE, RANK, LOCAL_RANK
+def create_tensor(shape: List[int], dtype: torch.dtype) -> torch.Tensor:
+    # NOTE(wt): We discovered that IPC only works with tensors explicitly allocated by `cudaMalloc` somehow.
+    return _create_tensor(shape, dtype)
 
 
 # IPC related functions
 def get_local_ipc_handle(data: torch.Tensor):
     p = ctypes.c_void_p(data.data_ptr())
-    handle = create_ipc_handle(p.value)
+    handle = _create_ipc_handle(p.value)
     return handle
 
 
@@ -96,8 +73,8 @@ def create_dist_tensor(local_rank: int, num_local_ranks: int, data: torch.Tensor
     local_ipc_handle = get_local_ipc_handle(data)
     dist.all_gather_object(ipc_handles, local_ipc_handle, group)
     buffer_ptrs_gpu = torch.empty(group.size(), dtype=torch.uint64, device="cuda")
-    sync_ipc_handles(rank, device_ids,
-                     ctypes.c_void_p(buffer_ptrs_gpu.data_ptr()).value, ipc_handles, None)
+    _sync_ipc_handles(rank, device_ids,
+                      ctypes.c_void_p(buffer_ptrs_gpu.data_ptr()).value, ipc_handles, None)
     return buffer_ptrs_gpu
 
 

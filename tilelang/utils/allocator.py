@@ -4,7 +4,7 @@ import ctypes.util
 from typing import Optional, Tuple, Union
 import torch
 import torch.distributed as dist
-from tilelang.distributed.common.ipc_ext import create_ipc_handle, sync_ipc_handles
+from tilelang.distributed.common.ipc_ext import _create_ipc_handle, _sync_ipc_handles
 from tilelang.utils.cpp.alloc_cuda import tensor_from_ptr
 from tilelang.utils.target import parse_device
 import contextlib
@@ -147,11 +147,11 @@ class BaseAllocator:
         ipc_handles = [
             None,
         ] * self._group.size()
-        local_ipc_handle = create_ipc_handle(self._base_ptr.value)
+        local_ipc_handle = _create_ipc_handle(self._base_ptr.value)
         dist.all_gather_object(ipc_handles, local_ipc_handle, self._group)
         buffer_ptrs = torch.empty(self._group.size(), dtype=torch.uint64)
-        sync_ipc_handles(self._local_rank, device_ids,
-                         ctypes.c_void_p(buffer_ptrs.data_ptr()).value, ipc_handles, None)
+        _sync_ipc_handles(self._local_rank, device_ids,
+                          ctypes.c_void_p(buffer_ptrs.data_ptr()).value, ipc_handles, None)
         buffer_ptrs[self._local_rank] = self._base_ptr.value
         self._buffer_ptrs = buffer_ptrs
         self._table_size = 2 + self._group.size()

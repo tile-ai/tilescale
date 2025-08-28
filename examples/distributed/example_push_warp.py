@@ -1,3 +1,4 @@
+import os
 import tilelang
 import tilelang.language as T
 import argparse
@@ -7,6 +8,7 @@ import torch.multiprocessing
 from tilelang.distributed.utils import init_dist
 
 tilelang.disable_cache()
+os.environ['NCCL_DEBUG'] = 'WARN'  # silence NCCL log
 
 
 def kernel_(M, num_rank, block_M, threads):
@@ -24,7 +26,7 @@ def kernel_(M, num_rank, block_M, threads):
             warp_idx = T.get_thread_binding(0) // 32
             warp_copy_size = T.ceildiv(block_M, threads // 32)
             warp_start = bx * block_M + warp_copy_size * warp_idx
-            T.remote_copy(
+            T.push_warp(
                 src=T.address_of(src[warp_start]),
                 dst=T.address_of(dst[warp_start]),
                 size=warp_copy_size,
@@ -83,4 +85,5 @@ if __name__ == "__main__":
     parser.add_argument('--M', type=int, default=65536, help='M dimension')
     args = parser.parse_args()
     num_processes = args.num_processes
+
     torch.multiprocessing.spawn(main, args=(num_processes, args), nprocs=num_processes)
