@@ -15,6 +15,7 @@
 
 #include "../op/builtin.h"
 #include "../op/distributed.h"
+#include "../op/sync.h"
 #include "arith/pattern_match.h"
 #include "target/source/ptx.h"
 
