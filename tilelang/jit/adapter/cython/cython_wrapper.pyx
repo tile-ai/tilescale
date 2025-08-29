@@ -7,7 +7,7 @@ from libc.stdint cimport int64_t, uintptr_t
 from libc.stdlib cimport malloc, free
 from tvm import tir
 from tilelang.utils.tensor import map_torch_type
-from tilelang import env
+from tilelang.env import env
 if env.USE_DISTRIBUTED:
     import pynvshmem
 
