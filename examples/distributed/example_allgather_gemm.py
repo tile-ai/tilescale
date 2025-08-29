@@ -60,7 +60,13 @@ RANK = int(os.environ.get("RANK", 0))
 WORLD_SIZE, RANK, LOCAL_RANK, TP_GROUP = init_distributed(return_tp_group=True)
 PE_num = WORLD_SIZE
 func = allgather_gemm(PE_num, M, N, K, block_M, block_N, block_K)
-kernel = tilelang.compile(func, out_idx=-1)
+kernel = tilelang.compile(
+    func,
+    out_idx=-1,
+    pass_configs={
+        "tl.disable_tma_lower": True,
+        "tl.disable_warp_specialized": True
+    })
 
 # Get CUDA Source
 if RANK == 0:
