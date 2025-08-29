@@ -210,10 +210,10 @@ class Environment:
     TVM_IMPORT_PYTHON_PATH = EnvVar("TVM_IMPORT_PYTHON_PATH", None)
 
     # Distributed settings
-    USE_DISTRIBUTED = EnvVar("TILELANG_USE_DISTRIBUTED", "0") in ("1", "true", "on")
+    USE_DISTRIBUTED = EnvVar("TILELANG_USE_DISTRIBUTED", "0").get().lower() in ("1", "true", "on")
     if USE_DISTRIBUTED:
-        if EnvVar("NVSHMEM_SRC", None) is not None:
-            NVSHMEM_SRC = EnvVar("NVSHMEM_SRC")
+        if EnvVar("NVSHMEM_SRC", None).get() is not None:
+            NVSHMEM_SRC = EnvVar("NVSHMEM_SRC", None).get()
         else:
             NVSHMEM_SRC = os.path.join(
                 os.path.dirname(os.path.abspath(__file__)), "..", "3rdparty", "nvshmem_src")

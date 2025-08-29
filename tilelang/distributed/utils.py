@@ -1,5 +1,6 @@
 import torch
 import torch.distributed as dist
+import datetime
 import os
 import inspect
 from typing import List, Union, Tuple, Callable, Sequence
@@ -42,6 +43,32 @@ def init_dist(local_rank: int, num_local_ranks: int):
 
     return dist.get_rank(), dist.get_world_size(), dist.new_group(
         list(range(num_local_ranks * num_nodes)))
+
+
+def init_distributed(return_tp_group=False, init_nvshmem=True):
+    WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
+    RANK = int(os.environ.get("RANK", 0))
+    LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
+
+    torch.distributed.init_process_group(
+        backend="nccl",
+        world_size=WORLD_SIZE,
+        rank=RANK,
+        timeout=datetime.timedelta(seconds=1800),
+    )
+    torch.cuda.set_device(LOCAL_RANK)
+    assert torch.distributed.is_initialized()
+    TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
+
+    torch.cuda.synchronize()
+    if init_nvshmem:
+        import pynvshmem
+        pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
+
+    if return_tp_group:
+        return WORLD_SIZE, RANK, LOCAL_RANK, TP_GROUP
+    else:
+        return WORLD_SIZE, RANK, LOCAL_RANK
 
 
 def create_tensor(shape: List[int], dtype: torch.dtype) -> torch.Tensor:
