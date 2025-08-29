@@ -15,13 +15,8 @@ def kernel_(M, num_rank, block_M, threads):
 
     @T.prim_func
     def main(
-            dst: T.Tensor(
-                (M, N),
-                "float32",
-            ),
-            src: T.Tensor((M, N), "float32", buffer_type="distributed"),
-            rank: T.Tensor((1), "int32"),
-            meta_data: T.Tensor((1, num_rank), "uint64", buffer_type="meta_data"),
+            dst: T.Tensor((M), "float32"),
+            src: T.Tensor((M), "float32"),
     ):
         with T.Kernel(T.ceildiv(M, block_M), threads=threads) as (bx):
             rank = T.alloc_local([1], "uint64")
