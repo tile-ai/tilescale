@@ -3,6 +3,7 @@ import torch
 import torch.distributed
 
 import importlib.metadata
+
 cuda_python_version = importlib.metadata.version("cuda-python")
 from packaging import version
 if version.parse(cuda_python_version) >= version.parse("12.8.0"):
