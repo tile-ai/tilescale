@@ -1,7 +1,7 @@
 from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
-ABI = 0  # from torch._C._GLIBCXX_USE_CXX11_ABI == False
+ABI = 1  # from torch._C._GLIBCXX_USE_CXX11_ABI == False
 
 setup(
     name="alloc_cuda",

@@ -5,7 +5,16 @@ import os
 import inspect
 from typing import List, Union, Tuple, Callable, Sequence
 from contextlib import contextmanager
-from cuda import cuda, cudart
+
+import importlib.metadata
+cuda_python_version = importlib.metadata.version("cuda-python")
+from packaging import version
+if version.parse(cuda_python_version) >= version.parse("12.8.0"):
+    from cuda.bindings import driver as cuda
+    from cuda.bindings import runtime as cudart
+else:
+    from cuda import cuda, cudart
+
 import ctypes
 from tilelang.distributed.common.ipc_ext import _create_ipc_handle, _sync_ipc_handles, _create_tensor
 
