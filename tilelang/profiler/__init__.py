@@ -21,11 +21,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-if env.USE_DISTRIBUTED:
+if env.USE_NVSHMEM:
     import pynvshmem
-    logger.info("Using distributed profiler")
-else:
-    logger.info("Not using distributed profiler")
 
 
 @dataclass
