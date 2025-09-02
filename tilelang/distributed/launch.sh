@@ -1,6 +1,7 @@
 #!/bin/bash
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib:~/.local/lib/
 
+export TILELANG_USE_NVSHMEM=1  # enable TileLang distributed mode
 export TILELANG_USE_DISTRIBUTED=1  # enable TileLang distributed mode
 export NVSHMEM_BOOTSTRAP_MPI_PLUGIN=nvshmem_bootstrap_torch.so
 export NVSHMEM_DISABLE_CUDA_VMM=1  # moving from cpp to shell
@@ -32,7 +33,8 @@ export NVSHMEM_IB_GID_INDEX=3
 memcheck=${MEMCHECK:=0}  # set env var. `MEMCHECK` to 1 to enable memory check via compute-sanitizer
 # This is especially useful for debugging memory issues, e.g. CUDA misalignment errors and TMA stuff.
 
-CMD="torchrun \
+PYTHON_EXEC="$(which python)"
+CMD="${PYTHON_EXEC} -m torch.distributed.run \
   --node_rank=${node_rank} \
   --nproc_per_node=${nproc_per_node} \
   --nnodes=${nnodes} \

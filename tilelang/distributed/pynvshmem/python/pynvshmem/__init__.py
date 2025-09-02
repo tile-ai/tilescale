@@ -1,7 +1,8 @@
 import sys
 import torch
 import torch.distributed
-from cuda import cuda, cudart
+from cuda.bindings import driver as cuda
+from cuda.bindings import runtime as cudart
 from typing import Optional
 from enum import IntEnum
 

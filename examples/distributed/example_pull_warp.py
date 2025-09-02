@@ -37,7 +37,7 @@ def kernel_(M, num_rank, block_M, threads):
 
 
 def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
-    M = args.M
+    M = args.M if args else 65536
     BLOCK_M = 4096
     threads = 128
     assert num_local_ranks == 2, "this example only supports 2 ranks copying to each other"

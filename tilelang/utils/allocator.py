@@ -174,6 +174,13 @@ class BaseAllocator:
 
         bytes_alloc = _align_up(bytes_needed, self._align)
 
+        current_offset = int(self._ptr.value) - int(self._base_ptr.value)
+        if current_offset + bytes_alloc > self.size:
+            bytes_available = self.size - current_offset
+            raise MemoryError(f"Allocation failed: Requesting {bytes_alloc} bytes, but only "
+                              f"{bytes_available} bytes are available in the pre-allocated buffer "
+                              f"(total size: {self.size} bytes).")
+
         if not isinstance(self._ptr, ctypes.c_void_p):
             raise TypeError("self._ptr must be ctypes.c_void_p")
         cur_ptr_val = int(self._ptr.value)

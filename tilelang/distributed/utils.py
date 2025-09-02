@@ -5,7 +5,8 @@ import os
 import inspect
 from typing import List, Union, Tuple, Callable, Sequence
 from contextlib import contextmanager
-from cuda import cuda, cudart
+from cuda.bindings import driver as cuda
+from cuda.bindings import runtime as cudart
 import ctypes
 from tilelang.distributed.common.ipc_ext import _create_ipc_handle, _sync_ipc_handles, _create_tensor
 
