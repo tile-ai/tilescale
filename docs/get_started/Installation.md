@@ -6,7 +6,7 @@
 
 - **Operating System**: Linux
 - **Python Version**: >= 3.7
-- **CUDA Version**: >= 10.0
+- **CUDA Version**: >= 12.1
 - **LLVM**: < 20 if you are using the bundled TVM submodule
 
 We currently provide three methods to install **TileScale**:
