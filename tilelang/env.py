@@ -211,6 +211,7 @@ class Environment:
 
     # Distributed settings
     USE_DISTRIBUTED = EnvVar("TILELANG_USE_DISTRIBUTED", "0").get().lower() in ("1", "true", "on")
+    USE_NVSHMEM = EnvVar("TILELANG_USE_NVSHMEM", "0").get().lower() in ("1", "true", "on")
     if USE_DISTRIBUTED:
         if EnvVar("NVSHMEM_SRC", None).get() is not None:
             NVSHMEM_SRC = EnvVar("NVSHMEM_SRC", None).get()

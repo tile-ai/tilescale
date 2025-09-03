@@ -39,7 +39,9 @@ extern "C" int init() {{
     {0}
     return 0;
 }}
+"""
 
+PREDEF_INIT_TABLE_FUNC = """
 extern "C" int init_table(const void* host_table, size_t n) {{
     if (error_buf) error_buf[0] = '\\0';
 
@@ -239,7 +241,8 @@ class TLCUDASourceWrapper(object):
         self.block_info: Union[List[int], Dict] = [1, 1, 1]
         self.grid_info: Union[List[int], Dict] = [1, 1, 1]
         self.tma_descriptor_args: Optional[Dict] = None
-        self.use_nvshmem = env.USE_DISTRIBUTED
+        self.use_distributed = env.USE_DISTRIBUTED
+        self.use_nvshmem = env.USE_NVSHMEM
         self.l2_persistent_map: Optional[Dict[str, Dict]] = {}
         self.parse_source_information()
         self.srcpath: Optional[str] = None
@@ -546,6 +549,8 @@ class TLCUDASourceWrapper(object):
         nvshmem_init_str = "nvshmem_init();\n\t" if self.use_nvshmem else ""
         # Format the initialization function using the call_str
         init_funcs = PREDEF_INIT_FUNC.format(nvshmem_init_str + call_str)
+        if self.use_distributed:
+            init_funcs += PREDEF_INIT_TABLE_FUNC
         return init_funcs
 
     def update_lib_code(self, code: str):

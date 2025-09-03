@@ -222,6 +222,30 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   target_compile_definitions(tilelang_static PRIVATE "TVM_LOG_DEBUG")
 endif()
 
+set(ALLOC_CUDA_EXT_DIR ${PROJECT_SOURCE_DIR}/tilelang/utils/cpp)
+add_custom_target(
+  build_alloc_cuda_ext ALL
+  COMMAND
+    ${Python_EXECUTABLE} setup.py build_ext --inplace
+  WORKING_DIRECTORY
+    ${ALLOC_CUDA_EXT_DIR}
+  COMMENT
+    "Building alloc_cuda PyTorch extension (in-place)"
+)
+add_dependencies(tilelang build_alloc_cuda_ext)
+
+set(IPC_EXT_DIR ${PROJECT_SOURCE_DIR}/tilelang/distributed/common)
+add_custom_target(
+  build_ipc_ext ALL
+  COMMAND
+    ${Python_EXECUTABLE} setup.py build_ext --inplace
+  WORKING_DIRECTORY
+    ${IPC_EXT_DIR}
+  COMMENT
+    "Building ipc_ext PyTorch extension (in-place)"
+)
+add_dependencies(tilelang build_ipc_ext)
+
 # Building tvm_cython modules
 if(NOT DEFINED TVM_PREBUILD_PATH)
   add_dependencies(tilelang tvm_cython)
