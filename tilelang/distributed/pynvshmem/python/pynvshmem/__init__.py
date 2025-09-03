@@ -1,8 +1,17 @@
 import sys
 import torch
 import torch.distributed
-from cuda.bindings import driver as cuda
-from cuda.bindings import runtime as cudart
+
+import importlib.metadata
+
+cuda_python_version = importlib.metadata.version("cuda-python")
+from packaging import version
+if version.parse(cuda_python_version) >= version.parse("12.8.0"):
+    from cuda.bindings import driver as cuda
+    from cuda.bindings import runtime as cudart
+else:
+    from cuda import cuda, cudart
+
 from typing import Optional
 from enum import IntEnum
 
