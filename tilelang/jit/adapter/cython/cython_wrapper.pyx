@@ -7,8 +7,8 @@ from libc.stdint cimport int64_t, uintptr_t
 from libc.stdlib cimport malloc, free
 from tvm import tir
 from tilelang.utils.tensor import map_torch_type
-from tilelang import env
-if env.USE_DISTRIBUTED:
+from tilelang.env import env
+if env.USE_NVSHMEM:
     import pynvshmem
 
 cdef class CythonKernelWrapper:
@@ -195,7 +195,7 @@ cdef class CythonKernelWrapper:
                         f"Cannot create output tensor (name={param_name}) - 0-dimensional tensors are not supported. "
                         f"Expected shape: {shape}"
                     )
-                if env.USE_DISTRIBUTED:
+                if env.USE_NVSHMEM:
                     tensor = pynvshmem.nvshmem_create_tensor(shape, dtype)
                 else:
                     tensor = torch.empty(*shape, dtype=dtype, device=device)

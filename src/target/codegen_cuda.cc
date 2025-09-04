@@ -180,8 +180,9 @@ std::string CodeGenTileLangCUDA::Finish() {
     decl_stream << "#include <math_constants.h>\n";
   }
 
-  if (use_distributed_) {
-    decl_stream << "#include <tl_templates/cuda/distributed.h>\n";
+  if (use_nvshmem_) {
+    decl_stream << "#include <nvshmem.h>>\n";
+    decl_stream << "#include <nvshmemx.h>>\n";
   }
 
   if (need_cooperative_groups_) {
@@ -201,9 +202,16 @@ std::string CodeGenTileLangCUDA::Finish() {
   decl_stream << "#include <tl_templates/cuda/ldsm.h>\n";
   decl_stream << "#include <tl_templates/cuda/threadblock_swizzle.h>\n";
   decl_stream << "#include <tl_templates/cuda/debug.h>\n";
+  if (use_distributed_) {
+    decl_stream << "#include <tl_templates/cuda/distributed.h>\n";
+  }
   decl_stream << "#ifdef ENABLE_BF16\n";
   decl_stream << "#include <tl_templates/cuda/cuda_bf16_fallbacks.cuh>\n";
   decl_stream << "#endif\n";
+
+  if (use_distributed_) {
+    decl_stream << "uint64_t __constant__ meta_data[1024];\n";
+  }
 
   if (need_global_barrier_) {
     decl_stream << "__device__ unsigned " << vid_global_barrier_state_
@@ -1190,6 +1198,18 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::loop_break())) {
     this->PrintIndent();
     this->stream << "break;\n";
+  } else if (op->op.same_as(tl::get_rank())) {
+    this->use_distributed_ = true;
+    os << "tl::get_rank()";
+  } else if (op->op.same_as(tl::get_num_ranks())) {
+    this->use_distributed_ = true;
+    os << "tl::get_num_ranks()";
+  } else if (op->op.same_as(tl::get_remote_base_ptr())) {
+    this->use_distributed_ = true;
+    std::string pe_str = this->PrintExpr(op->args[0]);
+    os << "tl::get_remote_base_ptr(" << pe_str << ")";
+  } else if (op->op.same_as(tl::get_uintptr_t())) {
+    os << "tl::get_uintptr_t(" << this->PrintExpr(op->args[0]) << ")";
   } else if (op->op.same_as(builtin::tvm_fill_fragment())) {
     need_mma_h_ = true;
     ICHECK_EQ(op->args.size(), 6U);
@@ -1536,12 +1556,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     stream << ");\n";
   } else if (op->op.same_as(tl::GetPE())) {
     this->use_distributed_ = true;
+    this->use_nvshmem_ = true;
     os << "nvshmem_my_pe()";
   } else if (op->op.same_as(tl::GetPENum())) {
     this->use_distributed_ = true;
+    this->use_nvshmem_ = true;
     os << "nvshmem_n_pes()";
   } else if (op->op.same_as(tl::IntPE())) {
     this->use_distributed_ = true;
+    this->use_nvshmem_ = true;
     os << "nvshmem_int_p(";
     this->PrintExpr(op->args[0], os);
     os << ", ";
@@ -1551,6 +1574,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     os << ")";
   } else if (op->op.same_as(tl::PutmemNbiBlock())) {
     this->use_distributed_ = true;
+    this->use_nvshmem_ = true;
     os << "nvshmemx_putmem_nbi_block(";
     this->PrintExpr(op->args[0], os);
     os << ", ";
@@ -1562,6 +1586,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     os << ")";
   } else if (op->op.same_as(tl::PutmemSignalNbiBlock())) {
     this->use_distributed_ = true;
+    this->use_nvshmem_ = true;
     os << "nvshmemx_putmem_signal_nbi_block(";
     for (int i = 0; i < op->args.size(); i++) {
       this->PrintExpr(op->args[i], os);
@@ -1572,6 +1597,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     os << ")";
   } else if (op->op.same_as(tl::GetmemNbiBlock())) {
     this->use_distributed_ = true;
+    this->use_nvshmem_ = true;
     os << "nvshmemx_getmem_nbi_block(";
     this->PrintExpr(op->args[0], os);
     os << ", ";
@@ -1583,6 +1609,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     os << ")";
   } else if (op->op.same_as(tl::SignalWaitUntil())) {
     this->use_distributed_ = true;
+    this->use_nvshmem_ = true;
     os << "nvshmem_signal_wait_until(";
     for (int i = 0; i < op->args.size(); i++) {
       this->PrintExpr(op->args[i], os);
@@ -1593,6 +1620,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     os << ")";
   } else if (op->op.same_as(tl::SignalOp())) {
     this->use_distributed_ = true;
+    this->use_nvshmem_ = true;
     os << "nvshmemx_signal_op(";
     for (int i = 0; i < op->args.size(); i++) {
       this->PrintExpr(op->args[i], os);
@@ -1603,15 +1631,19 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     os << ")";
   } else if (op->op.same_as(tl::Quiet())) {
     this->use_distributed_ = true;
+    this->use_nvshmem_ = true;
     os << "nvshmem_quiet()";
   } else if (op->op.same_as(tl::Fence())) {
     this->use_distributed_ = true;
+    this->use_nvshmem_ = true;
     os << "nvshmem_fence()";
   } else if (op->op.same_as(tl::SyncAll())) {
     this->use_distributed_ = true;
+    this->use_nvshmem_ = true;
     os << "nvshmem_sync_all()";
   } else if (op->op.same_as(tl::BarrierAll())) {
     this->use_distributed_ = true;
+    this->use_nvshmem_ = true;
     os << "nvshmem_barrier_all()";
   } else if (op->op.same_as(builtin::reinterpret())) {
     DataType tgt_dtype = op->dtype;

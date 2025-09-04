@@ -135,7 +135,7 @@ class LibraryGenerator(object):
         command += [
             "-I" + env.TILELANG_TEMPLATE_PATH,
         ]
-        if env.USE_DISTRIBUTED:
+        if env.USE_NVSHMEM:
             assert env.NVSHMEM_INCLUDE_DIR is not None, "env.NVSHMEM_INCLUDE_DIR is not set"
             assert env.NVSHMEM_LIB_PATH is not None, "env.NVSHMEM_LIB_PATH is not set"
             command += ["-diag-suppress=20013"]

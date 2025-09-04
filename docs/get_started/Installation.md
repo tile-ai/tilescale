@@ -1,74 +1,15 @@
 # Installation Guide
 
-## Installing with pip
-
-**Prerequisites for installation via wheel or PyPI:**
-
-- **Operating System**: Ubuntu 20.04 or later
-- **Python Version**: >= 3.8
-- **CUDA Version**: >= 11.0
-
-The easiest way to install **tile-lang** is directly from PyPI using pip. To install the latest version, run the following command in your terminal:
-
-```bash
-pip install tilelang
-```
-
-Alternatively, you may choose to install **tile-lang** using prebuilt packages available on the Release Page:
-
-```bash
-pip install tilelang-0.0.0.dev0+ubuntu.20.4.cu120-py3-none-any.whl
-```
-
-To install the latest version of **tile-lang** from the GitHub repository, you can run the following command:
-
-```bash
-pip install git+https://github.com/tile-ai/tilelang.git
-```
-
-After installing **tile-lang**, you can verify the installation by running:
-
-```bash
-python -c "import tilelang; print(tilelang.__version__)"
-```
-
 ## Building from Source
 
 **Prerequisites for building from source:**
 
 - **Operating System**: Linux
 - **Python Version**: >= 3.7
-- **CUDA Version**: >= 10.0
+- **CUDA Version**: >= 12.1
 - **LLVM**: < 20 if you are using the bundled TVM submodule
 
-We recommend using a Docker container with the necessary dependencies to build **tile-lang** from source. You can use the following command to run a Docker container with the required dependencies:
-
-```bash
-docker run --gpus all -it --rm --ipc=host nvcr.io/nvidia/pytorch:23.01-py3
-```
-
-To build and install **tile-lang** directly from source, follow these steps. This process requires certain pre-requisites from Apache TVM, which can be installed on Ubuntu/Debian-based systems using the following commands:
-
-```bash
-apt-get update
-apt-get install -y python3 python3-dev python3-setuptools gcc zlib1g-dev build-essential cmake libedit-dev
-```
-
-After installing the prerequisites, you can clone the **tile-lang** repository and install it using pip:
-
-```bash
-git clone --recursive https://github.com/tile-ai/tilelang.git
-cd tilelang
-pip install .  # Please be patient, this may take some time.
-```
-
-If you want to install **tile-lang** in development mode, you can run the following command:
-
-```bash
-pip install -e .
-```
-
-We currently provide three methods to install **tile-lang**:
+We currently provide three methods to install **TileScale**:
 
 1. [Install from Source (using your own TVM installation)](#install-method-1)
 2. [Install from Source (using the bundled TVM submodule)](#install-method-2)
@@ -83,8 +24,8 @@ If you already have a compatible TVM installation, follow these steps:
 1. **Clone the Repository**:
 
 ```bash
-git clone --recursive https://github.com/tile-ai/tilelang
-cd tilelang
+git clone --recursive https://github.com/tile-ai/tilescale
+cd tilescale
 ```
 
 **Note**: Use the `--recursive` flag to include necessary submodules.
@@ -119,8 +60,8 @@ If you prefer to use the built-in TVM version, follow these instructions:
 1. **Clone the Repository**:
 
 ```bash
-git clone --recursive https://github.com/tile-ai/tilelang
-cd tilelang
+git clone --recursive https://github.com/tile-ai/tilescale
+cd tilescale
 ```
 
 **Note**: Ensure the `--recursive` flag is included to fetch submodules.
@@ -159,8 +100,8 @@ For a simplified installation, use the provided script:
 1. **Clone the Repository**:
 
 ```bash
-git clone --recursive https://github.com/tile-ai/tilelang
-cd tilelang
+git clone --recursive https://github.com/tile-ai/tilescale
+cd tilescale
 ```
 
 2. **Run the Installation Script**:
@@ -170,13 +111,26 @@ bash install_cuda.sh
 # or bash `install_amd.sh` if you want to enable ROCm runtime
 ```
 
-## Install with Nightly Version
 
-For users who want access to the latest features and improvements before official releases, we provide nightly builds of **tile-lang**.
+## To use NVSHMEM APIs
+
+Before running the examples using NVSHMEM APIs (e.g., [example_allgather.py](../../examples/distributed/example_allgather.py)), you need to build NVSHMEM library for device-side code generation.
+
+```bash 
+pip install mpich
+export NVSHMEM_SRC="your_custom_nvshmem_dir" # default to 3rdparty/nvshmem_src
+cd tilelang/distributed
+source build_nvshmem.sh
+```
+You also need to install the `pynvshmem` package, which provides wrapped host-side Python API for NVSHMEM.
 
 ```bash
-pip install tilelang -f https://tile-ai.github.io/whl/nightly/cu121/
-# or pip install tilelang --find-links https://tile-ai.github.io/whl/nightly/cu121/
+cd ./pynvshmem
+python setup.py install
+export LD_LIBRARY_PATH="$NVSHMEM_SRC/build/src/lib:$LD_LIBRARY_PATH"
 ```
 
-> **Note:** Nightly builds contain the most recent code changes but may be less stable than official releases. They're ideal for testing new features or if you need a specific bugfix that hasn't been released yet.
+Then you can test python import:
+```bash
+python -c "import pynvshmem"
+```

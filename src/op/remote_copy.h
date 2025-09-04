@@ -35,7 +35,6 @@ private:
   int unroll_factor;
   bool is_symmetric = false;
   Buffer src_buffer, dst_buffer;
-  Map<Buffer, Array<IntImm>> meta_data_;
 };
 
 class PullWarpOp : public Operator {
@@ -55,7 +54,6 @@ private:
   int unroll_factor;
   bool is_symmetric = false;
   Buffer src_buffer, dst_buffer;
-  Map<Buffer, Array<IntImm>> meta_data_;
 };
 
 } // namespace tl

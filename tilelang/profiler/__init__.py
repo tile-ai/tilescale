@@ -21,12 +21,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-if env.USE_DISTRIBUTED:
-    import pynvshmem
-    logger.info("Using distributed profiler")
-else:
-    logger.info("Not using distributed profiler")
-
 
 @dataclass
 class Profiler:
@@ -89,7 +83,9 @@ class Profiler:
         TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
 
         torch.cuda.synchronize()
-        pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
+        if env.USE_NVSHMEM:
+            import pynvshmem
+            pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
 
     def _get_inputs(self, with_output=False):
         ins = []

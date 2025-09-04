@@ -13,6 +13,7 @@
 #include "../target/cuda.h"
 #include "../target/utils.h"
 #include "builtin.h"
+#include "distributed.h"
 #include "parallel.h"
 
 namespace tvm {
@@ -62,16 +63,15 @@ Stmt PushWarpOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   ss << "tl::cp_unrolled<" << copy_size << ", " << unroll_factor << ">";
   new_args.push_back(StringImm(ss.str()));
   if (is_symmetric) {
-    ICHECK(T.meta_data_buffer.defined()) << "meta_data_buffer is not defined";
-    ICHECK(T.buffer_to_meta_data_index.defined())
-        << "buffer_to_meta_data_index is not defined";
-    ICHECK(T.buffer_to_meta_data_index.find(dst_buffer) !=
-           T.buffer_to_meta_data_index.end())
-        << "dst_buffer is not in buffer_to_meta_data_index";
+    PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
+    PrimExpr local_base_ptr =
+        Call(DataType::Handle(), tl::get_remote_base_ptr(), {local_rank});
+    PrimExpr offset_to_base =
+        Sub(Call(DataType::Handle(), tl::get_uintptr_t(), {dst_addr}),
+            local_base_ptr);
     new_args.push_back(
-        BufferLoad(T.meta_data_buffer,
-                   {T.buffer_to_meta_data_index[dst_buffer], dst_pe}) +
-        dst_offset);
+        Call(DataType::Handle(), tl::get_remote_base_ptr(), {dst_pe}) +
+        offset_to_base);
   } else {
     new_args.push_back(dst_addr);
   }
@@ -113,16 +113,15 @@ Stmt PullWarpOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   new_args.push_back(StringImm(ss.str()));
   new_args.push_back(dst_addr); // Always dst first in tl_templates
   if (is_symmetric) {
-    ICHECK(T.meta_data_buffer.defined()) << "meta_data_buffer is not defined";
-    ICHECK(T.buffer_to_meta_data_index.defined())
-        << "buffer_to_meta_data_index is not defined";
-    ICHECK(T.buffer_to_meta_data_index.find(src_buffer) !=
-           T.buffer_to_meta_data_index.end())
-        << "src_buffer is not in buffer_to_meta_data_index";
+    PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
+    PrimExpr local_base_ptr =
+        Call(DataType::Handle(), tl::get_remote_base_ptr(), {local_rank});
+    PrimExpr offset_to_base =
+        Sub(Call(DataType::Handle(), tl::get_uintptr_t(), {src_addr}),
+            local_base_ptr);
     new_args.push_back(
-        BufferLoad(T.meta_data_buffer,
-                   {T.buffer_to_meta_data_index[src_buffer], src_pe}) +
-        src_offset);
+        Call(DataType::Handle(), tl::get_remote_base_ptr(), {src_pe}) +
+        offset_to_base);
   } else {
     new_args.push_back(src_addr);
   }

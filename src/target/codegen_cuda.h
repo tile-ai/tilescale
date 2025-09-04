@@ -122,6 +122,8 @@ private:
   bool need_cooperative_groups_{false};
   // whether need distributed.h
   bool use_distributed_{use_distributed()};
+  // whether need nvshmem.h
+  bool use_nvshmem_{false};
   // whether need sync.h
   bool need_sync_{false};
   // Op attribute map

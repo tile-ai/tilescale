@@ -211,5 +211,24 @@ const Op &FcollectBlock();
  */
 const Op &CpengineCpAsync();
 
+/*!
+ * \brief tvm intrinsics for getting the rank of the current process
+ */
+const Op &get_rank();
+
+/*!
+ * \brief tvm intrinsics for getting the number of processes
+ */
+const Op &get_num_ranks();
+
+/*!
+ * \brief tvm intrinsics for getting the remote base pointer
+ */
+const Op &get_remote_base_ptr();
+
+/*!
+ * \brief tvm intrinsics for getting the uintptr_t of a pointer
+ */
+const Op &get_uintptr_t();
 } // namespace tl
 } // namespace tvm
