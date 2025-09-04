@@ -189,10 +189,6 @@ std::string CodeGenTileLangCUDA::Finish() {
     decl_stream << "#include <cooperative_groups.h>\n";
   }
 
-  if (need_sync_) {
-    decl_stream << "#include <tl_templates/cuda/sync.h>\n";
-  }
-
   decl_stream << "#include <tl_templates/cuda/gemm.h>\n";
   if (enable_sparse_gemm_) {
     decl_stream << "#include <tl_templates/cuda/gemm_sp.h>\n";
@@ -204,6 +200,7 @@ std::string CodeGenTileLangCUDA::Finish() {
   decl_stream << "#include <tl_templates/cuda/debug.h>\n";
   if (use_distributed_) {
     decl_stream << "#include <tl_templates/cuda/distributed.h>\n";
+    decl_stream << "#include <tl_templates/cuda/sync.h>\n";
   }
   decl_stream << "#ifdef ENABLE_BF16\n";
   decl_stream << "#include <tl_templates/cuda/cuda_bf16_fallbacks.cuh>\n";
@@ -1161,22 +1158,18 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << "grid.sync();\n";
   } else if (op->op.same_as(tl::init_barrier_gpu())) {
     ICHECK_GE(op->args.size(), 2);
-    this->need_sync_ = true;
     this->PrintIndent();
     this->stream << "tl::init_barrier_gpu<" << this->PrintExpr(op->args[1])
                  << ">(" << this->PrintExpr(op->args[0]) << ");\n";
   } else if (op->op.same_as(tl::arrive_barrier_gpu())) {
-    this->need_sync_ = true;
     this->PrintIndent();
     this->stream << "tl::arrive_barrier_gpu(" << this->PrintExpr(op->args[0])
                  << ");\n";
   } else if (op->op.same_as(tl::wait_barrier_gpu())) {
-    this->need_sync_ = true;
     this->PrintIndent();
     this->stream << "tl::wait_barrier_gpu(" << this->PrintExpr(op->args[0])
                  << ");\n";
   } else if (op->op.same_as(tl::sync_barrier_gpu())) {
-    this->need_sync_ = true;
     this->PrintIndent();
     this->stream << "tl::sync_barrier_gpu(" << this->PrintExpr(op->args[0])
                  << ");\n";
