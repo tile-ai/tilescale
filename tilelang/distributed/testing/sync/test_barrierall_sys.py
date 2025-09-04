@@ -61,7 +61,7 @@ def main(local_rank: int, num_ranks: int, args: argparse.Namespace):
     kernel.initialize(allocator=allocator)
 
     A = tilelang.tensor([threads], torch.int32, allocator=allocator).zero_()
-    barrier = tilelang.tensor([num_ranks], torch.int32, allocator=allocator)
+    barrier = tilelang.tensor([num_ranks], torch.int32, allocator=allocator).zero_()
     torch.cuda.synchronize()
     dist.barrier(group)
     output = kernel(A, barrier)
