@@ -191,9 +191,12 @@ class BaseAllocator:
         if dtype_str is None:
             dtype_str = str(dtype).split(".")[-1]
 
-        t = tensor_from_ptr(cur_ptr_val,
-                            list(shape) if isinstance(shape, tuple) else [shape], dtype_str,
-                            self._device, take_ownership)
+        if isinstance(shape, tuple):
+            shape = list(shape)
+        elif not isinstance(shape, list):
+            shape = [shape]
+
+        t = tensor_from_ptr(cur_ptr_val, shape, dtype_str, self._device, take_ownership)
 
         if take_ownership:
             self._ptr = ctypes.c_void_p(0)

@@ -15,6 +15,7 @@
 
 #include "../op/builtin.h"
 #include "../op/distributed.h"
+#include "../op/sync.h"
 #include "arith/pattern_match.h"
 #include "target/source/ptx.h"
 
@@ -199,6 +200,7 @@ std::string CodeGenTileLangCUDA::Finish() {
   decl_stream << "#include <tl_templates/cuda/debug.h>\n";
   if (use_distributed_) {
     decl_stream << "#include <tl_templates/cuda/distributed.h>\n";
+    decl_stream << "#include <tl_templates/cuda/sync.h>\n";
   }
   decl_stream << "#ifdef ENABLE_BF16\n";
   decl_stream << "#include <tl_templates/cuda/cuda_bf16_fallbacks.cuh>\n";
@@ -1068,14 +1070,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     return;
   } else if (op->op.same_as(tl::sync_thread_partial())) {
     print_extern_call_stmt("tl::syncthreads_partial");
-  } else if (op->op.same_as(tl::copy_unrolled())) {
-    this->PrintIndent();
-    ICHECK_GE(op->args.size(), 4);
-    this->stream << "tl::cp_unrolled<";
-    this->stream << this->PrintExpr(op->args[2]) << ", ";
-    this->stream << this->PrintExpr(op->args[3]) << ">(";
-    this->stream << this->PrintExpr(op->args[0]) << ", ";
-    this->stream << this->PrintExpr(op->args[1]) << ");\n";
   } else if (op->op.same_as(tl::tma_load())) {
     std::ostringstream ss;
     ICHECK_GE(op->args.size(), 2);
@@ -1162,6 +1156,23 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                     "cooperative_groups::this_grid();\n";
     this->PrintIndent();
     this->stream << "grid.sync();\n";
+  } else if (op->op.same_as(tl::init_barrier_gpu())) {
+    ICHECK_GE(op->args.size(), 2);
+    this->PrintIndent();
+    this->stream << "tl::init_barrier_gpu<" << this->PrintExpr(op->args[1])
+                 << ">(" << this->PrintExpr(op->args[0]) << ");\n";
+  } else if (op->op.same_as(tl::arrive_barrier_gpu())) {
+    this->PrintIndent();
+    this->stream << "tl::arrive_barrier_gpu(" << this->PrintExpr(op->args[0])
+                 << ");\n";
+  } else if (op->op.same_as(tl::wait_barrier_gpu())) {
+    this->PrintIndent();
+    this->stream << "tl::wait_barrier_gpu(" << this->PrintExpr(op->args[0])
+                 << ");\n";
+  } else if (op->op.same_as(tl::sync_barrier_gpu())) {
+    this->PrintIndent();
+    this->stream << "tl::sync_barrier_gpu(" << this->PrintExpr(op->args[0])
+                 << ");\n";
   } else if (op->op.same_as(tl::loop_break())) {
     this->PrintIndent();
     this->stream << "break;\n";

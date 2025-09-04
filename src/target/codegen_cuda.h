@@ -123,6 +123,7 @@ private:
   // whether need distributed.h
   bool use_distributed_{use_distributed()};
   // whether need nvshmem.h
+
   bool use_nvshmem_{false};
   // Op attribute map
   OpAttrMap<bool> op_need_warp_shuffle_ =

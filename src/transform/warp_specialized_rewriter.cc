@@ -150,10 +150,11 @@ public:
         role = Role::kProducer;
         has_bulk_copy_ = true;
       }
-      if (call->op.same_as(loop_break())) {
+      if (call->op.same_as(loop_break()))
         role = Role::kBoth;
-      }
     }
+    // NOTE(wt): We should have set the role for barrier ops (on device and
+    // system level) to kBoth, but some issue exists in warp-specialized cases
     SetRole(op, role);
   }
 

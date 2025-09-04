@@ -28,6 +28,8 @@ public:
     return std::make_unique<PushWarpOp>(*this);
   }
 
+  PrimExpr get_offset(const BufferLoadNode *load);
+
 private:
   PrimExpr src_addr, dst_addr;
   PrimExpr src_offset, dst_offset;
@@ -46,6 +48,8 @@ public:
   std::unique_ptr<Operator> Clone() const final {
     return std::make_unique<PullWarpOp>(*this);
   }
+
+  PrimExpr get_offset(const BufferLoadNode *load);
 
 private:
   PrimExpr src_addr, dst_addr;

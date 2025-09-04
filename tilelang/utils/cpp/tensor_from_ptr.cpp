@@ -1,4 +1,3 @@
-#include <ATen/ATen.h>
 #include <cstdint>
 #include <cstdio>
 #include <cuda_runtime.h>
@@ -27,6 +26,10 @@ static at::ScalarType dtype_from_string(const std::string &s) {
     return at::kBFloat16;
   if (s == "float64" || s == "double")
     return at::kDouble;
+  if (s == "uint32")
+    return at::kUInt32;
+  if (s == "uint64")
+    return at::kUInt64;
   if (s == "int32" || s == "int")
     return at::kInt;
   if (s == "int64" || s == "long")
@@ -38,32 +41,6 @@ static at::ScalarType dtype_from_string(const std::string &s) {
   if (s == "bool")
     return at::kBool;
   throw std::runtime_error("Unsupported dtype string: " + s);
-}
-
-static int64_t element_size_bytes(at::ScalarType st) {
-  switch (st) {
-  case at::kFloat:
-    return 4;
-  case at::kHalf:
-    return 2;
-  case at::kBFloat16:
-    return 2;
-  case at::kDouble:
-    return 8;
-  case at::kInt:
-    return 4;
-  case at::kLong:
-    return 8;
-  case at::kByte:
-    return 1;
-  case at::kChar:
-    return 1;
-  case at::kBool:
-    return 1;
-  default:
-    throw std::runtime_error(
-        "Unsupported scalar type for element size calculation");
-  }
 }
 
 torch::Tensor tensor_from_ptr(uint64_t ptr_val, std::vector<int64_t> shape,
@@ -85,9 +62,6 @@ torch::Tensor tensor_from_ptr(uint64_t ptr_val, std::vector<int64_t> shape,
       throw std::runtime_error("Negative dimension in shape");
     nelems = safe_mul_int64(nelems, d);
   }
-
-  int64_t itemsize = element_size_bytes(st);
-  int64_t required_bytes = safe_mul_int64(nelems, itemsize);
 
   // deleter
   std::function<void(void *)> deleter;
