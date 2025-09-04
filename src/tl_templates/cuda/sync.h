@@ -123,7 +123,7 @@ TL_DEVICE void barrier_all_blocks_sys(int offset, // &barrier - base
 
   while (true) {
     int value =
-        tid < kNumRanks ? ld_volatile_global_s32(barrier[rank] + tid) : 0;
+        tid < num_ranks ? ld_volatile_global_s32(reinterpret_cast<int32_t *>(barrier_ptrs[rank]) + tid) : 0;
     if (__all_sync(0xffffffff, value <= 0)) {
       break;
     }
