@@ -20,7 +20,6 @@ import ctypes
 from tilelang.distributed.common.ipc_ext import _create_ipc_handle, _sync_ipc_handles, _create_tensor
 from functools import lru_cache
 
-
 dtype_map = {
     "bfloat16": torch.bfloat16,
     "float16": torch.float16,

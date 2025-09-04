@@ -7,7 +7,11 @@ import argparse
 tilelang.disable_cache()
 
 
-@tilelang.jit(out_idx=-1)
+@tilelang.jit(
+    out_idx=-1, pass_configs={
+        "tl.disable_warp_specialized": True,
+        "tl.disable_tma_lower": True
+    })
 def get_test_barrier_gpu_kernel(num_blocks: int, threads: int):
 
     @T.prim_func

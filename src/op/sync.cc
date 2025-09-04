@@ -13,7 +13,7 @@
 namespace tvm {
 namespace tl {
 
-  #define TIR_DEFINE_TL_BUILTIN(OpName)                                        \
+#define TIR_DEFINE_TL_BUILTIN(OpName)                                          \
   const Op &OpName() {                                                         \
     static const Op &op = Op::Get("tl." #OpName);                              \
     return op;                                                                 \

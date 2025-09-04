@@ -72,7 +72,7 @@ TL_DEVICE void init_barrier_gpu(uint32_t *barrier) {
 
 // Arrive at a GPU barrier (atomic increment)
 TL_DEVICE void arrive_barrier_gpu(uint32_t *barrier) {
-  __syncthreads();
+  __threadfence();
   if (IS_MASTER_THREAD()) {
     atomic_add_release_gpu_u32(barrier, 1);
   }
@@ -91,7 +91,7 @@ TL_DEVICE void wait_barrier_gpu(uint32_t *barrier) {
 
 // Synchronize at a GPU barrier (arrive + wait)
 TL_DEVICE void sync_barrier_gpu(uint32_t *barrier) {
-  __syncthreads();
+  __threadfence();
   if (IS_MASTER_THREAD()) {
     atomic_add_release_gpu_u32(barrier, 1);
     uint32_t arrive = ld_acquire_gpu_u32(barrier);
