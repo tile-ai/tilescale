@@ -104,31 +104,31 @@ TL_DEVICE void sync_barrier_gpu(uint32_t *barrier) {
 
 // Synchronize all blocks at a system-level barrier
 // TODO(wt): Add sync-only option and timeout handling
-TL_DEVICE void barrier_all_blocks_sys(int offset, // &barrier - base
-                                      int rank, int num_ranks) {
-  // Gather ptrs to barriers on all ranks via metadata
-  uint64_t barrier_ptrs[num_ranks];
-  for (int i = 0; i < num_ranks; i++) {
-    barrier_ptrs[i] = get_remote_base_ptr(i) + offset;
-  }
+
+TL_DEVICE void barrier_all_blocks_sys(int offset, int rank, int num_ranks) {
+// Macro to compute the barrier pointer for a given target rank
+#define BARRIER_PTR(tgt_rank)                                                  \
+  (reinterpret_cast<int32_t *>(get_remote_base_ptr(tgt_rank) + offset))
 
   __syncthreads();
   memory_fence_sys();
 
   int tid = threadIdx.x;
   if (tid < num_ranks) {
-    atomicAdd_system(reinterpret_cast<int32_t *>(barrier_ptrs[rank]) + tid, 1);
-    atomicAdd_system(reinterpret_cast<int32_t *>(barrier_ptrs[tid]) + rank, -1);
+    atomicAdd_system(BARRIER_PTR(rank) + tid, 1);
+    atomicAdd_system(BARRIER_PTR(tid) + rank, -1);
   }
 
   while (true) {
     int value =
-        tid < num_ranks ? ld_volatile_global_s32(reinterpret_cast<int32_t *>(barrier_ptrs[rank]) + tid) : 0;
+        tid < num_ranks ? ld_volatile_global_s32(BARRIER_PTR(rank) + tid) : 0;
     if (__all_sync(0xffffffff, value <= 0)) {
       break;
     }
   }
   __syncthreads();
+
+#undef BARRIER_PTR
 }
 
 } // namespace tl
