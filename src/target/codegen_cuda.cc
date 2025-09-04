@@ -1073,14 +1073,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     return;
   } else if (op->op.same_as(tl::sync_thread_partial())) {
     print_extern_call_stmt("tl::syncthreads_partial");
-  } else if (op->op.same_as(tl::copy_unrolled())) {
-    this->PrintIndent();
-    ICHECK_GE(op->args.size(), 4);
-    this->stream << "tl::cp_unrolled<";
-    this->stream << this->PrintExpr(op->args[2]) << ", ";
-    this->stream << this->PrintExpr(op->args[3]) << ">(";
-    this->stream << this->PrintExpr(op->args[0]) << ", ";
-    this->stream << this->PrintExpr(op->args[1]) << ");\n";
   } else if (op->op.same_as(tl::tma_load())) {
     std::ostringstream ss;
     ICHECK_GE(op->args.size(), 2);
