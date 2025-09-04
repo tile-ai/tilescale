@@ -18,12 +18,12 @@ os.environ['NCCL_DEBUG'] = 'WARN'  # silence NCCL log
         "tl.disable_tma_lower": True
     })
 def get_test_barrierall_sys_kernel(num_ranks: int, blocks: int, threads: int):
-    
+
     @T.prim_func
     def main(
-        A: T.Tensor([threads], "int32"),  # type: ignore
-        barrier: T.Tensor([num_ranks], "int32"),  # type: ignore
-        B: T.Tensor([blocks, threads], "int32"),  # type: ignore
+            A: T.Tensor([threads], "int32"),  # type: ignore
+            barrier: T.Tensor([num_ranks], "int32"),  # type: ignore
+            B: T.Tensor([blocks, threads], "int32"),  # type: ignore
     ):
         with T.Kernel(blocks, threads=threads) as bid:
             tid = T.get_thread_binding()
@@ -41,8 +41,7 @@ def get_test_barrierall_sys_kernel(num_ranks: int, blocks: int, threads: int):
                     dst=T.address_of(B[bid, 0]),
                     size=threads,
                     src_pe=rank[0] ^ 1,
-                    unroll_factor=4
-                )
+                    unroll_factor=4)
 
     return main
 
@@ -57,8 +56,7 @@ def main(local_rank: int, num_ranks: int, args: argparse.Namespace):
         is_distributed=True,
         local_rank=local_rank,
         num_local_ranks=num_ranks,
-        group=group
-    )
+        group=group)
     kernel = get_test_barrierall_sys_kernel(num_ranks, blocks, threads)
     kernel.initialize(allocator=allocator)
 
@@ -80,11 +78,14 @@ def main(local_rank: int, num_ranks: int, args: argparse.Namespace):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--num-processes', type=int, default=2, help='Number of processes to spawn (default: 2)')
+    parser.add_argument(
+        '--num-processes', type=int, default=2, help='Number of processes to spawn (default: 2)')
     parser.add_argument('--blocks', type=int, default=64, help='Number of blocks (default: 64)')
     parser.add_argument('--threads', type=int, default=128, help='Number of threads (default: 128)')
-    parser.add_argument('--print-source', action='store_true', help='Print the source code of the kernel')
+    parser.add_argument(
+        '--print-source', action='store_true', help='Print the source code of the kernel')
     return parser.parse_args()
+
 
 if __name__ == "__main__":
     args = parse_args()

@@ -63,8 +63,8 @@ BarrierAllBlocksSysOp::BarrierAllBlocksSysOp(Array<PrimExpr> args,
   ICHECK(local_bar_addr.as<CallNode>()->op.same_as(builtin::address_of()))
       << "local_bar_addr must be address_of op";
 
-  offset =
-      this->get_offset(local_bar_addr.as<CallNode>()->args[0].as<BufferLoadNode>());
+  offset = this->get_offset(
+      local_bar_addr.as<CallNode>()->args[0].as<BufferLoadNode>());
   local_bar =
       local_bar_addr.as<CallNode>()->args[0].as<BufferLoadNode>()->buffer;
 }

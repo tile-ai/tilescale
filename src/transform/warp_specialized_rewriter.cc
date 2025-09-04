@@ -154,8 +154,8 @@ public:
       if (call->op.same_as(loop_break()))
         role = Role::kBoth;
     }
-    // NOTE(wt): We should have set the role for barrier ops (on device and system level)
-    // to kBoth, but some issue exists in warp-specialized cases
+    // NOTE(wt): We should have set the role for barrier ops (on device and
+    // system level) to kBoth, but some issue exists in warp-specialized cases
     SetRole(op, role);
   }
 
