@@ -21,7 +21,7 @@ namespace tl {
 
 using namespace tir;
 
-PrimExpr get_offset(const BufferLoadNode *load) {
+PrimExpr PushWarpOp::get_offset(const BufferLoadNode *load) {
   PrimExpr offset = 0;
   PrimExpr stride = 1;
   auto buffer_shape = load->buffer->shape;
@@ -43,9 +43,9 @@ PushWarpOp::PushWarpOp(Array<PrimExpr> args, BufferMap vmap) {
       << "dst_addr must be address_of op";
 
   src_offset =
-      get_offset(src_addr.as<CallNode>()->args[0].as<BufferLoadNode>());
+      this->get_offset(src_addr.as<CallNode>()->args[0].as<BufferLoadNode>());
   dst_offset =
-      get_offset(dst_addr.as<CallNode>()->args[0].as<BufferLoadNode>());
+      this->get_offset(dst_addr.as<CallNode>()->args[0].as<BufferLoadNode>());
   src_buffer = src_addr.as<CallNode>()->args[0].as<BufferLoadNode>()->buffer;
   dst_buffer = dst_addr.as<CallNode>()->args[0].as<BufferLoadNode>()->buffer;
 
@@ -81,6 +81,17 @@ Stmt PushWarpOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   return Evaluate(unrolled_copy);
 }
 
+PrimExpr PullWarpOp::get_offset(const BufferLoadNode *load) {
+  PrimExpr offset = 0;
+  PrimExpr stride = 1;
+  auto buffer_shape = load->buffer->shape;
+  for (int i = load->indices.size() - 1; i >= 0; i--) {
+    offset += load->indices[i] * stride;
+    stride *= buffer_shape[i];
+  }
+  return div(offset * load->dtype.bits(), 8);
+}
+
 PullWarpOp::PullWarpOp(Array<PrimExpr> args, BufferMap vmap) {
   src_addr = args[0];
   dst_addr = args[1];
@@ -92,9 +103,9 @@ PullWarpOp::PullWarpOp(Array<PrimExpr> args, BufferMap vmap) {
       << "dst_addr must be address_of op";
 
   src_offset =
-      get_offset(src_addr.as<CallNode>()->args[0].as<BufferLoadNode>());
+      this->get_offset(src_addr.as<CallNode>()->args[0].as<BufferLoadNode>());
   dst_offset =
-      get_offset(dst_addr.as<CallNode>()->args[0].as<BufferLoadNode>());
+      this->get_offset(dst_addr.as<CallNode>()->args[0].as<BufferLoadNode>());
   src_buffer = src_addr.as<CallNode>()->args[0].as<BufferLoadNode>()->buffer;
   dst_buffer = dst_addr.as<CallNode>()->args[0].as<BufferLoadNode>()->buffer;
 

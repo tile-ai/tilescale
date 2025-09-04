@@ -29,7 +29,7 @@ static at::ScalarType dtype_from_string(const std::string &s) {
   if (s == "uint32")
     return at::kUInt32;
   if (s == "uint64")
-    return at::kUInt64; 
+    return at::kUInt64;
   if (s == "int32" || s == "int")
     return at::kInt;
   if (s == "int64" || s == "long")

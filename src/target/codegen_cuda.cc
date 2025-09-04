@@ -1180,13 +1180,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->PrintIndent();
     this->stream << "tl::sync_barrier_gpu(" << this->PrintExpr(op->args[0])
                  << ");\n";
-  } else if (op->op.same_as(tl::barrier_all_blocks_sys())) {
-    this->need_sync_ = true;
-    this->PrintIndent();
-    this->stream << "tl::barrier_all_blocks_sys<"
-                 << this->PrintExpr(op->args[2]) << ">("
-                 << this->PrintExpr(op->args[0]) << ", "
-                 << this->PrintExpr(op->args[1]) << ");\n";
   } else if (op->op.same_as(tl::loop_break())) {
     this->PrintIndent();
     this->stream << "break;\n";

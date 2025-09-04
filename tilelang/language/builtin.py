@@ -406,13 +406,11 @@ def sync_barrier_gpu(barrier: PrimExpr):
     return tir.call_intrin("handle", tir.op.Op.get("tl.sync_barrier_gpu"), address_of(barrier))
 
 
-def barrier_all_blocks_sys(barrier: PrimExpr, rank: int, num_ranks: int):
+def barrier_all_blocks_sys(barrier: PrimExpr):
     """Synchronize all blocks at a system-level barrier.
 
     Args:
-        barrier: The barrier to synchronize at, should be [num_ranks, num_ranks] of int32
-        rank: The rank of the current block
-        num_ranks: The number of ranks
+        barrier: The barrier to synchronize at, should be [num_ranks] of int32
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.barrier_all_blocks_sys"),
-                           address_of(barrier), rank, num_ranks)
+                           address_of(barrier))

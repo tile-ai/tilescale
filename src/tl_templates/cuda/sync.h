@@ -72,7 +72,7 @@ TL_DEVICE void init_barrier_gpu(uint32_t *barrier) {
 
 // Arrive at a GPU barrier (atomic increment)
 TL_DEVICE void arrive_barrier_gpu(uint32_t *barrier) {
-  __threadfence();
+  memory_fence_gpu();
   if (IS_MASTER_THREAD()) {
     atomic_add_release_gpu_u32(barrier, 1);
   }
@@ -91,7 +91,7 @@ TL_DEVICE void wait_barrier_gpu(uint32_t *barrier) {
 
 // Synchronize at a GPU barrier (arrive + wait)
 TL_DEVICE void sync_barrier_gpu(uint32_t *barrier) {
-  __threadfence();
+  memory_fence_gpu();
   if (IS_MASTER_THREAD()) {
     atomic_add_release_gpu_u32(barrier, 1);
     uint32_t arrive = ld_acquire_gpu_u32(barrier);
@@ -104,17 +104,21 @@ TL_DEVICE void sync_barrier_gpu(uint32_t *barrier) {
 
 // Synchronize all blocks at a system-level barrier
 // TODO(wt): Add sync-only option and timeout handling
-template <int kNumRanks>
-TL_DEVICE void barrier_all_blocks_sys(int **barrier, // [kNumRanks, kNumRanks]
-                                      int rank) {
-  int tid = threadIdx.x;
+TL_DEVICE void barrier_all_blocks_sys(int offset, // &barrier - base
+                                      int rank, int num_ranks) {
+  // Gather ptrs to barriers on all ranks via metadata
+  uint64_t barrier_ptrs[num_ranks];
+  for (int i = 0; i < num_ranks; i++) {
+    barrier_ptrs[i] = get_remote_base_ptr(i) + offset;
+  }
 
-  memory_fence_sys();
   __syncthreads();
+  memory_fence_sys();
 
-  if (tid < kNumRanks) {
-    atomicAdd_system(barrier[rank] + tid, 1);
-    atomicAdd_system(barrier[tid] + rank, -1);
+  int tid = threadIdx.x;
+  if (tid < num_ranks) {
+    atomicAdd_system(reinterpret_cast<int32_t *>(barrier_ptrs[rank]) + tid, 1);
+    atomicAdd_system(reinterpret_cast<int32_t *>(barrier_ptrs[tid]) + rank, -1);
   }
 
   while (true) {
