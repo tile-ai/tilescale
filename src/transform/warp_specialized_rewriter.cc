@@ -13,7 +13,6 @@
 #include <tvm/tir/transform.h>
 
 #include "../op/builtin.h"
-#include "../op/sync.h"
 #include "./common/collector.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
