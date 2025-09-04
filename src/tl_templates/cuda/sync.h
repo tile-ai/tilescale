@@ -110,9 +110,9 @@ TL_DEVICE void barrier_all_blocks_sys(int offset, int rank, int num_ranks) {
 #define BARRIER_PTR(tgt_rank)                                                  \
   (reinterpret_cast<int32_t *>(get_remote_base_ptr(tgt_rank) + offset))
 
-  __syncthreads();
   memory_fence_sys();
-
+  __syncthreads();
+  
   int tid = threadIdx.x;
   if (tid < num_ranks) {
     atomicAdd_system(BARRIER_PTR(rank) + tid, 1);
