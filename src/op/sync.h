@@ -69,6 +69,27 @@ private:
   Buffer local_bar;
 };
 
+/*!
+ * \brief Create a memory fence at the block level (visible to all threads in the current block)
+ *
+ * void fence_cta()
+ */
+TVM_DLL const Op &fence_cta();
+
+/*!
+ * \brief Synchronize all threads at the GPU level (visible to all blocks on the current device)
+ *
+ * void fence_gpu()
+ */
+TVM_DLL const Op &fence_gpu();
+
+/*!
+ * \brief Synchronize all threads at the system level (visible in a node)
+ *
+ * void fence_sys()
+ */
+TVM_DLL const Op &fence_sys();
+
 } // namespace tl
 } // namespace tvm
 
