@@ -1,6 +1,4 @@
-# This benchmark aims to measure the bandwidth of the out implementation of IPC communication,
-# and compare its efficiency with NVSHMEM primitives. We launch only one block on each rank to 
-# avoid NVLink bandwidth as the bottleneck.
+
 
 import os
 import tilelang
@@ -10,8 +8,8 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing
 from tilelang.distributed.utils import init_dist, perf_fn
-import pynvshmem
 
+tilelang.disable_cache()
 os.environ['NCCL_DEBUG'] = 'WARN'
 
 
@@ -114,7 +112,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         if rank == 0:
             print(f"{size=}, ipc push bw: {push_bw:.4f} GB/s, ipc pull bw: {pull_bw:.4f} GB/s")
 
-    dist.destroy_process_group(group)
+    dist.destroy_process_group()
 
 
 if __name__ == "__main__":
