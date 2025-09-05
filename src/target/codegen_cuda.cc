@@ -1550,6 +1550,18 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     os << ", ";
     this->PrintExpr(op->args[2], os);
     os << ")";
+  } else if (op->op.same_as(tl::PutmemBlock())) {
+    this->use_distributed_ = true;
+    this->use_nvshmem_ = true;
+    os << "nvshmemx_putmem_block(";
+    this->PrintExpr(op->args[0], os);
+    os << ", ";
+    this->PrintExpr(op->args[1], os);
+    os << ", ";
+    this->PrintExpr(op->args[2], os);
+    os << ", ";
+    this->PrintExpr(op->args[3], os);
+    os << ")";
   } else if (op->op.same_as(tl::PutmemNbiBlock())) {
     this->use_distributed_ = true;
     this->use_nvshmem_ = true;
@@ -1572,6 +1584,18 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         os << ", ";
       }
     }
+    os << ")";
+  } else if (op->op.same_as(tl::GetmemBlock())) {
+    this->use_distributed_ = true;
+    this->use_nvshmem_ = true;
+    os << "nvshmemx_getmem_block(";
+    this->PrintExpr(op->args[0], os);
+    os << ", ";
+    this->PrintExpr(op->args[1], os);
+    os << ", ";
+    this->PrintExpr(op->args[2], os);
+    os << ", ";
+    this->PrintExpr(op->args[3], os);
     os << ")";
   } else if (op->op.same_as(tl::GetmemNbiBlock())) {
     this->use_distributed_ = true;
