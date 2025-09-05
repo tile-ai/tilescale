@@ -11,11 +11,11 @@ import argparse
 tilelang.disable_cache()
 
 
-def torch_sequence_all_to_all_reference(data_src, group):
+def torch_sequence_all_to_all_transpose_reference(data_src, group):
     """
-    PyTorch Distributed All-to-All Golden Reference
+    PyTorch Distributed All-to-All Golden Reference with Transpose
     
-    Input:  [BATCH_SIZE, NUM_HEADS, SEQ_PER_PE, HEAD_DIM] - full heads, partial sequence per PE
+    Input:  [BATCH_SIZE, SEQ_PER_PE, NUM_HEADS, HEAD_DIM] - partial sequence, full heads per PE
     Output: [BATCH_SIZE, HEADS_PER_PE, SEQ_LEN, HEAD_DIM] - partial heads, full sequence per PE
     
     Args:
@@ -28,30 +28,27 @@ def torch_sequence_all_to_all_reference(data_src, group):
     world_size = dist.get_world_size(group)
     rank = dist.get_rank(group)
 
-    batch_size, num_heads, seq_per_pe, head_dim = data_src.shape
+    batch_size, seq_per_pe, num_heads, head_dim = data_src.shape
     seq_len = seq_per_pe * world_size
     heads_per_pe = num_heads // world_size
 
     # Step 1: Prepare input list for all_to_all
-    # Split data_src by heads and create send list
     input_list = []
     for pe_idx in range(world_size):
-        # For each target PE, extract the heads that should go to that PE
         start_head = pe_idx * heads_per_pe
         end_head = (pe_idx + 1) * heads_per_pe
 
-        # Extract [BATCH_SIZE, HEADS_PER_PE, SEQ_PER_PE, HEAD_DIM] for target PE
-        send_data = data_src[:, start_head:end_head, :, :].contiguous()
+        # Extract [BATCH_SIZE, SEQ_PER_PE, HEADS_PER_PE, HEAD_DIM] for target PE
+        send_data = data_src[:, :, start_head:end_head, :].contiguous()
         input_list.append(send_data)
 
     # Step 2: Prepare output list for all_to_all
     output_list = []
     for pe_idx in range(world_size):
-        # Receive [BATCH_SIZE, HEADS_PER_PE, SEQ_PER_PE, HEAD_DIM] from each PE
         recv_data = torch.empty(
             batch_size,
-            heads_per_pe,
             seq_per_pe,
+            heads_per_pe,
             head_dim,
             dtype=data_src.dtype,
             device=data_src.device)
@@ -60,81 +57,83 @@ def torch_sequence_all_to_all_reference(data_src, group):
     # Step 3: Execute all_to_all
     dist.all_to_all(output_list, input_list, group=group)
 
-    # Step 4: Reorganize received data
-    # output_list[pe_idx] contains data from PE pe_idx
-    # Need to arrange by sequence dimension
+    # Step 4: Reorganize received data with transpose
     result = torch.empty(
         batch_size, heads_per_pe, seq_len, head_dim, dtype=data_src.dtype, device=data_src.device)
 
     for pe_idx in range(world_size):
         seq_start = pe_idx * seq_per_pe
         seq_end = (pe_idx + 1) * seq_per_pe
-        # Place data from PE pe_idx into the correct sequence positions
-        result[:, :, seq_start:seq_end, :] = output_list[pe_idx]
+        # Transpose: [B, S, H, D] -> [B, H, S, D]
+        transposed_data = output_list[pe_idx].transpose(1, 2)
+        result[:, :, seq_start:seq_end, :] = transposed_data
 
     return result
 
 
-def sequence_parallel_all_to_all(PE_num, BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM, dtype="float16"):
+def sequence_parallel_all_to_all_transpose(PE_num,
+                                           BATCH_SIZE,
+                                           NUM_HEADS,
+                                           SEQ_LEN,
+                                           HEAD_DIM,
+                                           dtype="float16"):
     """
-    Sequence parallel All-to-All with dimension swap
-    Input:  [BATCH_SIZE, NUM_HEADS, SEQ_LEN//PE_num, HEAD_DIM] - full heads, partial sequence per PE
-    Output: [BATCH_SIZE, NUM_HEADS//PE_num, SEQ_LEN, HEAD_DIM] - partial heads, full sequence per PE
+    Coarse-grained version with proper transpose handling
+    Each block handles one (batch, head) combination and processes all sequence positions
     """
     SEQ_PER_PE = SEQ_LEN // PE_num
     HEADS_PER_PE = NUM_HEADS // PE_num
 
-    # Each block transfers SEQ_PER_PE * HEAD_DIM data
-    # Grid: (BATCH_SIZE * HEADS_PER_PE, PE_num)
+    # Fewer blocks: one per (batch, head) combination
     NUM_BLOCKS_X = BATCH_SIZE * HEADS_PER_PE
 
     @T.prim_func
     def main(
-            # Input: [BATCH_SIZE, NUM_HEADS, SEQ_PER_PE, HEAD_DIM]
-            data_src: T.Tensor((BATCH_SIZE, NUM_HEADS, SEQ_PER_PE, HEAD_DIM), dtype),
-            # Output: [BATCH_SIZE, HEADS_PER_PE, SEQ_LEN, HEAD_DIM]
+            data_src: T.Tensor((BATCH_SIZE, SEQ_PER_PE, NUM_HEADS, HEAD_DIM), dtype),
             data_dst: T.Tensor((BATCH_SIZE, HEADS_PER_PE, SEQ_LEN, HEAD_DIM), dtype),
-            # Sync signals
             signal: T.Tensor((PE_num,), "uint64"),
     ):
-        # Grid: (batch*head, target_pe)
         with T.Kernel(NUM_BLOCKS_X, PE_num, threads=128) as (bx, target_pe):
             tx = T.thread_binding(128, thread="threadIdx.x")
 
             mype = T.alloc_local([1], "int32")
             mype[0] = T.get_pe()
 
-            # Calculate batch and head indices from linear index
+            # Each block handles one (batch, head) combination
             batch_idx = bx // HEADS_PER_PE
             head_idx = bx % HEADS_PER_PE
 
-            # Calculate source and destination indices
             src_head_idx = target_pe * HEADS_PER_PE + head_idx
             dst_seq_start = mype[0] * SEQ_PER_PE
 
-            # Validate indices
             if batch_idx < BATCH_SIZE and src_head_idx < NUM_HEADS:
-                # Transfer contiguous block: [SEQ_PER_PE, HEAD_DIM]
-                transfer_size = SEQ_PER_PE * HEAD_DIM * 2  # float16 = 2 bytes
+                # Use for loop to handle each sequence position separately for proper transpose
+                # This ensures data continuity and correct transpose mapping
+                for seq_idx in T.serial(SEQ_PER_PE):
+                    dst_seq_idx = dst_seq_start + seq_idx
 
-                # Single block transfer for entire [SEQ_PER_PE, HEAD_DIM] data
-                T.putmem_nbi_block(
-                    T.address_of(data_dst[batch_idx, head_idx, dst_seq_start, 0]),
-                    T.address_of(data_src[batch_idx, src_head_idx, 0, 0]), transfer_size, target_pe)
+                    # Transfer HEAD_DIM elements for this specific (batch, seq, head) combination
+                    # From: data_src[batch_idx, seq_idx, src_head_idx, :] -> [HEAD_DIM]
+                    # To:   data_dst[batch_idx, head_idx, dst_seq_idx, :] on target_pe
+                    transfer_size = HEAD_DIM * 2  # float16 = 2 bytes
 
-            # Memory fence
+                    T.putmem_nbi_block(
+                        T.address_of(data_dst[batch_idx, head_idx, dst_seq_idx, 0]),
+                        T.address_of(data_src[batch_idx, seq_idx, src_head_idx, 0]), transfer_size,
+                        target_pe)
+
             T.fence()
 
-            # Synchronization
+            # Signaling: each block signals completion of SEQ_PER_PE work items
             if tx == 0:
                 T.signal_op(
                     T.address_of(signal[mype[0]]),
-                    1,
-                    10,  # NVSHMEM_SIGNAL_ADD
+                    1,  # Signal the number of sequence positions processed
+                    T.Amo.SIGNAL_ADD,
                     target_pe)
                 T.fence()
-                for k in T.serial(PE_num):
-                    T.signal_wait_until(T.address_of(signal[k]), 0, NUM_BLOCKS_X)
+                # Wait for all blocks to complete all sequence positions
+                T.signal_wait_until(T.address_of(signal[target_pe]), T.CmpType.EQ, NUM_BLOCKS_X)
 
     return main
 
@@ -169,8 +168,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch_size", type=int, default=2, help="Batch size")
     parser.add_argument("--seq_len", type=int, default=256, help="Sequence length")
-    parser.add_argument(
-        "--num_heads", type=int, default=16, help="Number of attention heads,combine QKV")
+    parser.add_argument("--num_heads", type=int, default=16, help="Number of attention heads")
     parser.add_argument("--head_dim", type=int, default=64, help="Head dimension")
     parser.add_argument("--dtype", default="float16", help="Data type")
     parser.add_argument("--warmup", type=int, default=3, help="Warmup iterations")
@@ -179,7 +177,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def test_all_to_all_with_golden_reference():
+def test_transpose_all_to_all_with_golden_reference():
     args = parse_args()
 
     # Initialize distributed environment
@@ -194,7 +192,7 @@ def test_all_to_all_with_golden_reference():
     HEADS_PER_PE = args.num_heads // PE_num
 
     if RANK == 0:
-        print("=== All-to-All with PyTorch Golden Reference ===")
+        print("=== Transpose All-to-All with PyTorch Golden Reference ===")
         print(f"Batch size: {args.batch_size}")
         print(f"Sequence length: {args.seq_len}")
         print(f"Number of heads: {args.num_heads}")
@@ -204,8 +202,8 @@ def test_all_to_all_with_golden_reference():
         print(f"Heads per PE: {HEADS_PER_PE}")
 
     # Compile TileLang kernel
-    func = sequence_parallel_all_to_all(PE_num, args.batch_size, args.num_heads, args.seq_len,
-                                        args.head_dim, args.dtype)
+    func = sequence_parallel_all_to_all_transpose(PE_num, args.batch_size, args.num_heads,
+                                                  args.seq_len, args.head_dim, args.dtype)
     kernel = tilelang.compile(
         func, pass_configs={
             "tl.disable_tma_lower": True,
@@ -216,11 +214,11 @@ def test_all_to_all_with_golden_reference():
         print("\nTileLang Kernel Source:")
         print(kernel.get_kernel_source())
 
-    # Create test data
+    # Create test data - following example_all2all_qkv.py style
     dtype_torch = dtype_map[args.dtype]
 
-    # Create input data (same for both implementations)
-    input_data = torch.rand([args.batch_size, args.num_heads, SEQ_PER_PE, args.head_dim],
+    # Create input data: [BATCH_SIZE, SEQ_PER_PE, NUM_HEADS, HEAD_DIM] - random like example
+    input_data = torch.rand([args.batch_size, SEQ_PER_PE, args.num_heads, args.head_dim],
                             dtype=dtype_torch,
                             device='cuda')
 
@@ -228,9 +226,8 @@ def test_all_to_all_with_golden_reference():
     print(f"PE {RANK} Input sample: {input_data[0, 0, 0, :3]}")
 
     # === Test 1: PyTorch Distributed Golden Reference ===
-
     dist.barrier(TP_GROUP)
-    torch_output = torch_sequence_all_to_all_reference(input_data, TP_GROUP)
+    torch_output = torch_sequence_all_to_all_transpose_reference(input_data, TP_GROUP)
 
     print("start compute tilelang output")
 
@@ -238,7 +235,7 @@ def test_all_to_all_with_golden_reference():
     def tilelang_all_to_all():
         # Create NVSHMEM tensors
         data_src = pynvshmem.nvshmem_create_tensor(
-            [args.batch_size, args.num_heads, SEQ_PER_PE, args.head_dim], dtype_torch)
+            [args.batch_size, SEQ_PER_PE, args.num_heads, args.head_dim], dtype_torch)
         data_dst = pynvshmem.nvshmem_create_tensor(
             [args.batch_size, HEADS_PER_PE, args.seq_len, args.head_dim], dtype_torch)
         signal = pynvshmem.nvshmem_create_tensor([PE_num], torch.uint64)
@@ -250,12 +247,12 @@ def test_all_to_all_with_golden_reference():
 
         # Execute kernel
         kernel(data_src, data_dst, signal)
-        #pynvshmem.nvshmem_barrier_all()
 
         return data_dst
 
     dist.barrier(TP_GROUP)
     tilelang_output = tilelang_all_to_all()
+
     # === Verification ===
     print(f"PE {RANK} Starting verification...")
 
@@ -271,4 +268,4 @@ def test_all_to_all_with_golden_reference():
 
 
 if __name__ == "__main__":
-    test_all_to_all_with_golden_reference()
+    test_transpose_all_to_all_with_golden_reference()
