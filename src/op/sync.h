@@ -70,14 +70,16 @@ private:
 };
 
 /*!
- * \brief Create a memory fence at the block level (visible to all threads in the current block)
+ * \brief Create a memory fence at the block level (visible to all threads in
+ * the current block)
  *
  * void fence_cta()
  */
 TVM_DLL const Op &fence_cta();
 
 /*!
- * \brief Synchronize all threads at the GPU level (visible to all blocks on the current device)
+ * \brief Synchronize all threads at the GPU level (visible to all blocks on the
+ * current device)
  *
  * void fence_gpu()
  */

@@ -1,5 +1,3 @@
-
-
 import os
 import tilelang
 import tilelang.language as T
@@ -37,7 +35,7 @@ def ipc_kernel_push(size, threads, unroll_factor):
     return ipc_push
 
 
-def ipc_kernel_pull(size, threads, unroll_factor) :
+def ipc_kernel_pull(size, threads, unroll_factor):
 
     @T.prim_func
     def ipc_pull(
@@ -61,7 +59,8 @@ def ipc_kernel_pull(size, threads, unroll_factor) :
     return ipc_pull
 
 
-def benchmark_ipc_bw(rank: int, num_ranks: int, group: dist.ProcessGroup, size: int, args: argparse.Namespace, allocator):
+def benchmark_ipc_bw(rank: int, num_ranks: int, group: dist.ProcessGroup, size: int,
+                     args: argparse.Namespace, allocator):
     assert num_ranks == 2, "this benchmark only supports 2 ranks"
     assert args.threads % 32 == 0, "threads must be divisible by 32"
 
@@ -76,11 +75,11 @@ def benchmark_ipc_bw(rank: int, num_ranks: int, group: dist.ProcessGroup, size: 
     dist.barrier(group)
     torch.cuda.synchronize()
     _, t_push = perf_fn(push_fn, args.warmup, args.repeat)  # 1st returned value is output
-    bw_push = (size*4* 1e-9) / (t_push * 1e-3)
+    bw_push = (size * 4 * 1e-9) / (t_push * 1e-3)
 
     dist.barrier(group)
 
-    # Re-use allocator and tensors
+    # Reuse allocator and tensors
     kernel = tilelang.compile(ipc_kernel_pull(size, args.threads, args.unroll_factor))
     kernel.initialize(allocator=allocator)
 
@@ -90,13 +89,13 @@ def benchmark_ipc_bw(rank: int, num_ranks: int, group: dist.ProcessGroup, size: 
     dist.barrier(group)
     torch.cuda.synchronize()
     _, t_pull = perf_fn(pull_fn, args.warmup, args.repeat)  # 1st returned value is output
-    bw_pull = (size*4* 1e-9) / (t_pull * 1e-3)
+    bw_pull = (size * 4 * 1e-9) / (t_pull * 1e-3)
 
     dist.barrier(group)
 
     return bw_push, bw_pull
 
-    
+
 def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
 
@@ -112,15 +111,19 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         size = 2**log_size
         push_bw, pull_bw = benchmark_ipc_bw(rank, num_ranks, group, size, args, allocator)
         if rank == 0:
-            print(f"size={size*4} bytes, ipc push bw: {push_bw:.4f} GB/s, ipc pull bw: {pull_bw:.4f} GB/s")
+            print(
+                f"size={size*4} bytes, ipc push bw: {push_bw:.4f} GB/s, ipc pull bw: {pull_bw:.4f} GB/s"
+            )
 
     dist.destroy_process_group()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--warmup", type=int, default=10, help="number of warmup iterations (default: 10)")
-    parser.add_argument("--repeat", type=int, default=50, help="number of repeat iterations (default: 10)")
+    parser.add_argument(
+        "--warmup", type=int, default=10, help="number of warmup iterations (default: 10)")
+    parser.add_argument(
+        "--repeat", type=int, default=50, help="number of repeat iterations (default: 10)")
     parser.add_argument("--threads", type=int, default=128, help="Threads per block (default: 128)")
     parser.add_argument("--unroll-factor", type=int, default=4, help="Unroll factor (default: 4)")
     args = parser.parse_args()

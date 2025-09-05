@@ -10,7 +10,7 @@ GPUS=2 bash tilelang/distributed/launch.sh benchmark/distributed/ipc_impls/bench
 
 ## Unrolled-copy implemented in TileScale (*ours*)
 ```bash
-export TILELANG_USE_DISTRIBUTED=1  # 
+export TILELANG_USE_DISTRIBUTED=1
 python benchmark/distributed/ipc_impls/benchmark_unrolledcp_p2p.py
 ```
 
