@@ -93,7 +93,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--warmup", type=int, default=10, help="number of warmup iterations (default: 10)")
     parser.add_argument(
-        "--repeat", type=int, default=50, help="number of repeat iterations (default: 10)")
+        "--repeat", type=int, default=50, help="number of repeat iterations (default: 50)")
     parser.add_argument("--threads", type=int, default=128, help="Threads per block (default: 128)")
     args = parser.parse_args()
 
