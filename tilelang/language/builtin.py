@@ -414,3 +414,18 @@ def barrier_all_blocks_sys(barrier: PrimExpr):
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.barrier_all_blocks_sys"),
                            address_of(barrier))
+
+
+def fence_cta():
+    """Create a memory fence at the block level (visible to all threads in the current block)."""
+    return tir.call_intrin("handle", tir.op.Op.get("tl.fence_cta"))
+
+
+def fence_gpu():
+    """Synchronize all threads at the GPU level (visible to all blocks on the current device)."""
+    return tir.call_intrin("handle", tir.op.Op.get("tl.fence_gpu"))
+
+
+def fence_sys():
+    """Synchronize all threads at the system level (visible in a node)."""
+    return tir.call_intrin("handle", tir.op.Op.get("tl.fence_sys"))

@@ -95,6 +95,13 @@ def getmem(*args):
 
 
 def putmem_block(*args):
+    """Put data from local memory to remote memory at block granularity.
+    Args:
+        dest: Symmetric address of the destination data object. 
+        src: Symmetric address of the object containing the data to be copied. 
+        nelems: Number of elements to be transferred (in bytes).
+        pe: The PE ID of the destination PE.
+    """
     return tir.call_intrin("handle", tir.op.Op.get("tl.PutmemBlock"), *args)
 
 
