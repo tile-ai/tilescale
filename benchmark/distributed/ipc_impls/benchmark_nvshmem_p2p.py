@@ -29,6 +29,7 @@ def nvshmem_kernel_push(size, threads):
                 size*4,
                 T.get_pe() ^ 1,
             )   
+            T.fence_sys()
 
     return nvshmem_push
 
@@ -47,6 +48,7 @@ def nvshmem_kernel_pull(size, threads):
                 size*4,
                 T.get_pe() ^ 1,
             )
+            T.fence_sys()
 
     return nvshmem_pull
 
@@ -97,7 +99,7 @@ if __name__ == "__main__":
         size = 2**log_size
         push_bw, pull_bw = benchmark_nvshmem_bw(rank, num_ranks, group, size, args)
         if rank == 0:
-            print(f"{size=}, nvshmem push bw: {push_bw:.4f} GB/s, nvshmem pull bw: {pull_bw:.4f} GB/s")
+            print(f"size={size*4} bytes, nvshmem push bw: {push_bw:.4f} GB/s, nvshmem pull bw: {pull_bw:.4f} GB/s")
 
     dist.destroy_process_group()
 

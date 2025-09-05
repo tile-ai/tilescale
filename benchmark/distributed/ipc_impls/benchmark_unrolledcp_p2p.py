@@ -32,6 +32,7 @@ def ipc_kernel_push(size, threads, unroll_factor):
                 size=warp_copy_size,
                 dst_pe=rank[0] ^ 1,
                 unroll_factor=unroll_factor)
+            T.fence_sys()
 
     return ipc_push
 
@@ -55,6 +56,7 @@ def ipc_kernel_pull(size, threads, unroll_factor) :
                 size=warp_copy_size,
                 src_pe=rank[0] ^ 1,
                 unroll_factor=unroll_factor)
+            T.fence_sys()
 
     return ipc_pull
 
@@ -110,7 +112,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         size = 2**log_size
         push_bw, pull_bw = benchmark_ipc_bw(rank, num_ranks, group, size, args, allocator)
         if rank == 0:
-            print(f"{size=}, ipc push bw: {push_bw:.4f} GB/s, ipc pull bw: {pull_bw:.4f} GB/s")
+            print(f"size={size*4} bytes, ipc push bw: {push_bw:.4f} GB/s, ipc pull bw: {pull_bw:.4f} GB/s")
 
     dist.destroy_process_group()
 
