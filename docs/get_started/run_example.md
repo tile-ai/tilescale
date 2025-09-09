@@ -9,7 +9,7 @@ export TILELANG_USE_DISTRIBUTED=1
 ```
 Then start an example directly with Python:
 ```bash
-python examples/distributed/example_put_warp.py 
+ python examples/distributed/primitives/example_put_warp.py 
 ```
 
 ## Examples using NVSHMEM APIs
