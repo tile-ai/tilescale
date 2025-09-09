@@ -247,7 +247,8 @@ TL_DEVICE void nvshmem_cp_threadgroup(dtype_t *__restrict__ _dst,
                                       const dtype_t *__restrict__ _src,
                                       int myIdx, int groupSize) {
   size_t len = N * sizeof(dtype_t);
-  void *dst = _dst, *src = _src;
+  void *dst = _dst;
+  const void *src = _src;
 
   /*
    * If src and dst are 16B aligned copy as much as possible using 16B chunks
