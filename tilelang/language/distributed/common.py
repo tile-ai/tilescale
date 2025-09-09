@@ -17,12 +17,12 @@ def get_num_ranks():
     return tir.call_intrin("uint64", tir.op.Op.get("tl.get_num_ranks"))
 
 
-def push_warp(src: PrimExpr,
-              dst: PrimExpr,
-              size: PrimExpr,
-              dst_pe: Optional[PrimExpr] = None,
-              unroll_factor: int = 4):
-    """Push from a remote buffer with unrolled loop.
+def put_warp(src: PrimExpr,
+             dst: PrimExpr,
+             size: PrimExpr,
+             dst_pe: Optional[PrimExpr] = None,
+             unroll_factor: int = 4):
+    """Put to a remote buffer with unrolled loop.
 
     Args:
         src: PrimExpr
@@ -30,7 +30,7 @@ def push_warp(src: PrimExpr,
         dst: PrimExpr
             The destination address.
         size: PrimExpr
-            The size of the copy.
+            The size of the put in elements.
         dst_pe: Optional[PrimExpr]
             The PE index of the destination.
             If provided, the dst is a symmetric address, otherwise it is a UVA address.
@@ -38,16 +38,16 @@ def push_warp(src: PrimExpr,
         unroll_factor: int
             The unroll factor
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.push_warp"), src, dst, size, dst_pe,
+    return tir.call_intrin("handle", tir.op.Op.get("tl.put_warp"), src, dst, size, dst_pe,
                            unroll_factor)
 
 
-def pull_warp(src: PrimExpr,
-              dst: PrimExpr,
-              size: PrimExpr,
-              src_pe: Optional[PrimExpr] = None,
-              unroll_factor: int = 4):
-    """Pull from a remote buffer with unrolled loop.
+def get_warp(src: PrimExpr,
+             dst: PrimExpr,
+             size: PrimExpr,
+             src_pe: Optional[PrimExpr] = None,
+             unroll_factor: int = 4):
+    """Get from a remote buffer with unrolled loop.
 
     Args:
         src: PrimExpr
@@ -55,7 +55,7 @@ def pull_warp(src: PrimExpr,
         dst: PrimExpr
             The destination address.
         size: PrimExpr
-            The size of the pull.
+            The size of the get in elements.
         src_pe: Optional[PrimExpr]
             The PE index of the source.
             If provided, the src is a symmetric address, otherwise it is a UVA address.
@@ -63,12 +63,12 @@ def pull_warp(src: PrimExpr,
         unroll_factor: int
             The unroll factor
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.pull_warp"), src, dst, size, src_pe,
+    return tir.call_intrin("handle", tir.op.Op.get("tl.get_warp"), src, dst, size, src_pe,
                            unroll_factor)
 
 
-def push_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, dst_pe: Optional[PrimExpr] = None):
-    """Push from a remote buffer.
+def put_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, dst_pe: Optional[PrimExpr] = None):
+    """Put to a remote buffer.
 
     Args:
         src: PrimExpr
@@ -76,19 +76,19 @@ def push_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, dst_pe: Optional[Pr
         dst: PrimExpr
             The destination address.
         size: PrimExpr
-            The size of the copy.
+            The size of the put in elements.
         dst_pe: Optional[PrimExpr]
             The PE index of the destination.
             If provided, the dst is a symmetric address, otherwise it is a UVA address.
             If not provided, the dst is a UVA address and dst_pe is None.
     """
     return tir.call_intrin(
-        "handle", tir.op.Op.get("tl.push_block"), src, dst, size, dst_pe
+        "handle", tir.op.Op.get("tl.put_block"), src, dst, size, dst_pe
     )  # NOTE(wt): unroll_factor is not needed because currently we implement block-level comm based on NVSHMEM-style copy
 
 
-def pull_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, src_pe: Optional[PrimExpr] = None):
-    """Pull from a remote buffer.
+def get_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, src_pe: Optional[PrimExpr] = None):
+    """Get from a remote buffer.
 
     Args:
         src: PrimExpr
@@ -96,10 +96,10 @@ def pull_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, src_pe: Optional[Pr
         dst: PrimExpr
             The destination address.
         size: PrimExpr
-            The size of the pull.
+            The size of the get in elements.
         src_pe: Optional[PrimExpr]
             The PE index of the source.
             If provided, the src is a symmetric address, otherwise it is a UVA address.
             If not provided, the src is a UVA address and src_pe is None.
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.pull_block"), src, dst, size, src_pe)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.get_block"), src, dst, size, src_pe)

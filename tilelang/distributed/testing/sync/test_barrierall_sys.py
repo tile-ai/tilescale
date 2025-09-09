@@ -36,7 +36,7 @@ def get_test_barrierall_sys_kernel(num_ranks: int, blocks: int, threads: int):
             T.barrier_all_blocks_sys(barrier)
 
             if tid < 32:
-                T.pull_warp(
+                T.put_warp(
                     src=T.address_of(A),
                     dst=T.address_of(B[bid, 0]),
                     size=threads,

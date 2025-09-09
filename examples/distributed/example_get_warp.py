@@ -26,11 +26,11 @@ def kernel_(M, num_rank, block_M, threads):
             warp_idx = T.get_thread_binding(0) // 32
             warp_copy_size = T.ceildiv(block_M, threads // 32)
             warp_start = bx * block_M + warp_copy_size * warp_idx
-            T.push_warp(
+            T.get_warp(
                 src=T.address_of(src[warp_start]),
                 dst=T.address_of(dst[warp_start]),
                 size=warp_copy_size,
-                dst_pe=rank[0] ^ 1,
+                src_pe=rank[0] ^ 1,
                 unroll_factor=4)
 
     return main

@@ -1,6 +1,6 @@
 /*!
  * \file tl/op/remote_copy.h
- * \brief Warp-level remote copy operators.
+ * \brief Remote copy operators.
  *
  */
 
@@ -18,14 +18,14 @@ namespace tl {
 
 using namespace tir;
 
-class PushWarpOp : public Operator {
+class PutWarpOp : public Operator {
 public:
-  PushWarpOp(Array<PrimExpr> args, BufferMap vmap);
+  PutWarpOp(Array<PrimExpr> args, BufferMap vmap);
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const final;
   static const Op &Get();
 
   std::unique_ptr<Operator> Clone() const final {
-    return std::make_unique<PushWarpOp>(*this);
+    return std::make_unique<PutWarpOp>(*this);
   }
 
   PrimExpr get_offset(const BufferLoadNode *load);
@@ -39,14 +39,14 @@ private:
   Buffer src_buffer, dst_buffer;
 };
 
-class PullWarpOp : public Operator {
+class GetWarpOp : public Operator {
 public:
-  PullWarpOp(Array<PrimExpr> args, BufferMap vmap);
+  GetWarpOp(Array<PrimExpr> args, BufferMap vmap);
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const final;
   static const Op &Get();
 
   std::unique_ptr<Operator> Clone() const final {
-    return std::make_unique<PullWarpOp>(*this);
+    return std::make_unique<GetWarpOp>(*this);
   }
 
   PrimExpr get_offset(const BufferLoadNode *load);
@@ -60,14 +60,14 @@ private:
   Buffer src_buffer, dst_buffer;
 };
 
-class PushBlockOp : public Operator {
+class PutBlockOp : public Operator {
 public:
-  PushBlockOp(Array<PrimExpr> args, BufferMap vmap);
+  PutBlockOp(Array<PrimExpr> args, BufferMap vmap);
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const final;
   static const Op &Get();
 
   std::unique_ptr<Operator> Clone() const final {
-    return std::make_unique<PushBlockOp>(*this);
+    return std::make_unique<PutBlockOp>(*this);
   }
 
   PrimExpr get_offset(const BufferLoadNode *load);
@@ -80,14 +80,14 @@ private:
   Buffer src_buffer, dst_buffer;
 };
 
-class PullBlockOp : public Operator {
+class GetBlockOp : public Operator {
 public:
-  PullBlockOp(Array<PrimExpr> args, BufferMap vmap);
+  GetBlockOp(Array<PrimExpr> args, BufferMap vmap);
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const final;
   static const Op &Get();
 
   std::unique_ptr<Operator> Clone() const final {
-    return std::make_unique<PullBlockOp>(*this);
+    return std::make_unique<GetBlockOp>(*this);
   }
 
   PrimExpr get_offset(const BufferLoadNode *load);

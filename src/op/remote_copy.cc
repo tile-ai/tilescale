@@ -1,6 +1,6 @@
 /*!
  * \file tl/op/remote_copy.cc
- * \brief Push warp operator.
+ * \brief Remote copy operators.
  *
  */
 
@@ -21,7 +21,7 @@ namespace tl {
 
 using namespace tir;
 
-PrimExpr PushWarpOp::get_offset(const BufferLoadNode *load) {
+PrimExpr PutWarpOp::get_offset(const BufferLoadNode *load) {
   PrimExpr offset = 0;
   PrimExpr stride = 1;
   auto buffer_shape = load->buffer->shape;
@@ -32,7 +32,7 @@ PrimExpr PushWarpOp::get_offset(const BufferLoadNode *load) {
   return div(offset * load->dtype.bits(), 8);
 }
 
-PushWarpOp::PushWarpOp(Array<PrimExpr> args, BufferMap vmap) {
+PutWarpOp::PutWarpOp(Array<PrimExpr> args, BufferMap vmap) {
   src_addr = args[0];
   dst_addr = args[1];
   ICHECK(src_addr.as<CallNode>()) << "src_addr must be a call node";
@@ -57,7 +57,7 @@ PushWarpOp::PushWarpOp(Array<PrimExpr> args, BufferMap vmap) {
   }
 }
 
-Stmt PushWarpOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+Stmt PutWarpOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   Array<PrimExpr> new_args;
   std::stringstream ss;
   ss << "tl::cp_warp<" << copy_size << ", " << unroll_factor << ">";
@@ -81,7 +81,7 @@ Stmt PushWarpOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   return Evaluate(unrolled_copy);
 }
 
-PrimExpr PullWarpOp::get_offset(const BufferLoadNode *load) {
+PrimExpr GetWarpOp::get_offset(const BufferLoadNode *load) {
   PrimExpr offset = 0;
   PrimExpr stride = 1;
   auto buffer_shape = load->buffer->shape;
@@ -92,7 +92,7 @@ PrimExpr PullWarpOp::get_offset(const BufferLoadNode *load) {
   return div(offset * load->dtype.bits(), 8);
 }
 
-PullWarpOp::PullWarpOp(Array<PrimExpr> args, BufferMap vmap) {
+GetWarpOp::GetWarpOp(Array<PrimExpr> args, BufferMap vmap) {
   src_addr = args[0];
   dst_addr = args[1];
   ICHECK(src_addr.as<CallNode>()) << "src_addr must be a call node";
@@ -117,7 +117,7 @@ PullWarpOp::PullWarpOp(Array<PrimExpr> args, BufferMap vmap) {
   }
 }
 
-Stmt PullWarpOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+Stmt GetWarpOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   Array<PrimExpr> new_args;
   std::stringstream ss;
   ss << "tl::cp_warp<" << copy_size << ", " << unroll_factor << ">";
@@ -137,12 +137,12 @@ Stmt PullWarpOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     new_args.push_back(src_addr);
   }
 
-  auto unrolled_pull =
+  auto unrolled_get =
       Call(DataType::Handle(), builtin::call_extern(), new_args);
-  return Evaluate(unrolled_pull);
+  return Evaluate(unrolled_get);
 }
 
-PrimExpr PushBlockOp::get_offset(const BufferLoadNode *load) {
+PrimExpr PutBlockOp::get_offset(const BufferLoadNode *load) {
   PrimExpr offset = 0;
   PrimExpr stride = 1;
   auto buffer_shape = load->buffer->shape;
@@ -153,7 +153,7 @@ PrimExpr PushBlockOp::get_offset(const BufferLoadNode *load) {
   return div(offset * load->dtype.bits(), 8);
 }
 
-PushBlockOp::PushBlockOp(Array<PrimExpr> args, BufferMap vmap) {
+PutBlockOp::PutBlockOp(Array<PrimExpr> args, BufferMap vmap) {
   src_addr = args[0];
   dst_addr = args[1];
   ICHECK(src_addr.as<CallNode>()) << "src_addr must be a call node";
@@ -177,7 +177,7 @@ PushBlockOp::PushBlockOp(Array<PrimExpr> args, BufferMap vmap) {
   }
 }
 
-Stmt PushBlockOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+Stmt PutBlockOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   Array<PrimExpr> new_args;
   std::stringstream ss;
   ss << "tl::cp_block<" << copy_size << ">";
@@ -201,7 +201,7 @@ Stmt PushBlockOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   return Evaluate(unrolled_copy);
 }
 
-PrimExpr PullBlockOp::get_offset(const BufferLoadNode *load) {
+PrimExpr GetBlockOp::get_offset(const BufferLoadNode *load) {
   PrimExpr offset = 0;
   PrimExpr stride = 1;
   auto buffer_shape = load->buffer->shape;
@@ -212,7 +212,7 @@ PrimExpr PullBlockOp::get_offset(const BufferLoadNode *load) {
   return div(offset * load->dtype.bits(), 8);
 }
 
-PullBlockOp::PullBlockOp(Array<PrimExpr> args, BufferMap vmap) {
+GetBlockOp::GetBlockOp(Array<PrimExpr> args, BufferMap vmap) {
   src_addr = args[0];
   dst_addr = args[1];
   ICHECK(src_addr.as<CallNode>()) << "src_addr must be a call node";
@@ -236,7 +236,7 @@ PullBlockOp::PullBlockOp(Array<PrimExpr> args, BufferMap vmap) {
   }
 }
 
-Stmt PullBlockOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+Stmt GetBlockOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   Array<PrimExpr> new_args;
   std::stringstream ss;
   ss << "tl::cp_block<" << copy_size << ">";
@@ -256,27 +256,27 @@ Stmt PullBlockOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     new_args.push_back(src_addr);
   }
 
-  auto unrolled_pull =
+  auto unrolled_get =
       Call(DataType::Handle(), builtin::call_extern(), new_args);
-  return Evaluate(unrolled_pull);
+  return Evaluate(unrolled_get);
 }
 
-TIR_REGISTER_TL_OP(PushWarpOp, push_warp)
+TIR_REGISTER_TL_OP(PutWarpOp, put_warp)
     .set_num_inputs(5)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_REGISTER_TL_OP(PullWarpOp, pull_warp)
+TIR_REGISTER_TL_OP(GetWarpOp, get_warp)
     .set_num_inputs(5)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_REGISTER_TL_OP(PushBlockOp, push_block)
+TIR_REGISTER_TL_OP(PutBlockOp, put_block)
     .set_num_inputs(4)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_REGISTER_TL_OP(PullBlockOp, pull_block)
+TIR_REGISTER_TL_OP(GetBlockOp, get_block)
     .set_num_inputs(4)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
