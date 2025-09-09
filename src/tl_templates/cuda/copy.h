@@ -171,7 +171,7 @@ template <> TL_DEVICE void st_na_global(const int4 *ptr, const int4 &value) {
 
 template <int N, int UNROLL_FACTOR, typename dtype_t>
 TL_DEVICE void cp_warp(dtype_t const *const dst_addr,
-                           dtype_t const *const src_addr) {
+                       dtype_t const *const src_addr) {
   int lane_id;
   asm("mov.s32 %0, %laneid;" : "=r"(lane_id));
   constexpr int kLoopStride = 32 * (UNROLL_FACTOR);
@@ -193,7 +193,7 @@ TL_DEVICE void cp_warp(dtype_t const *const dst_addr,
 
 template <int N, int UNROLL_FACTOR, typename dtype_t>
 TL_DEVICE void cp_warp(uint64_t dst_addr_uint64,
-                           dtype_t const *const src_addr) {
+                       dtype_t const *const src_addr) {
   dtype_t *dst_addr = reinterpret_cast<dtype_t *>(dst_addr_uint64);
 
   int lane_id;
@@ -243,10 +243,9 @@ TL_DEVICE void cp_warp(dtype_t *const dst_addr, uint64_t src_addr_uint64) {
  * nvshmem_src/src/include/non_abi/device/common/nvshmemi_common_device.cuh::nvshmemi_memcpy_threadgroup()
  */
 template <int N, typename dtype_t>
-TL_DEVICE void nvshmem_memcpy_threadgroup(dtype_t *__restrict__ _dst,
-                                          const dtype_t *__restrict__ _src,
-                                          int myIdx,
-                                          int groupSize) {
+TL_DEVICE void nvshmem_cp_threadgroup(dtype_t *__restrict__ _dst,
+                                      const dtype_t *__restrict__ _src,
+                                      int myIdx, int groupSize) {
   size_t len = N * sizeof(dtype_t);
   void *dst = _dst, *src = _src;
 
@@ -338,8 +337,8 @@ TL_DEVICE void nvshmem_memcpy_threadgroup(dtype_t *__restrict__ _dst,
 }
 
 template <int N, typename dtype_t>
-TL_DEVICE void nvshmem_cp_block(dtype_t *__restrict__ dst,
-                                    const dtype_t *__restrict__ src) {
+TL_DEVICE void nvshmem_cp_warp(dtype_t *__restrict__ dst,
+                               const dtype_t *__restrict__ src) {
   int lane_id;
   asm("mov.s32 %0, %laneid;" : "=r"(lane_id));
   nvshmem_cp_threadgroup<N>(dst, src, lane_id, 32);
@@ -347,7 +346,7 @@ TL_DEVICE void nvshmem_cp_block(dtype_t *__restrict__ dst,
 
 template <int N, typename dtype_t>
 TL_DEVICE void nvshmem_cp_block(dtype_t *__restrict__ dst,
-                                    const dtype_t *__restrict__ src) {
+                                const dtype_t *__restrict__ src) {
   int thread_id = threadIdx.x + threadIdx.y * blockDim.x +
                   threadIdx.z * blockDim.x * blockDim.y;
   int block_size = blockDim.x * blockDim.y * blockDim.z;
@@ -355,22 +354,20 @@ TL_DEVICE void nvshmem_cp_block(dtype_t *__restrict__ dst,
 }
 
 template <int N, typename dtype_t>
-TL_DEVICE void cp_block(dtype_t *dst_addr,
-                        const dtype_t *src_addr) {
-  nvshmem_memcpy_block<N>(dst_addr, src_addr);
+TL_DEVICE void cp_block(dtype_t *dst_addr, const dtype_t *src_addr) {
+  nvshmem_cp_block<N>(dst_addr, src_addr);
 }
 
 template <int N, typename dtype_t>
-TL_DEVICE void cp_block(uint64_t dst_addr_uint64,
-                        const dtype_t *src_addr) {
+TL_DEVICE void cp_block(uint64_t dst_addr_uint64, const dtype_t *src_addr) {
   dtype_t *dst_addr = reinterpret_cast<dtype_t *>(dst_addr_uint64);
-  nvshmem_memcpy_block<N>(dst_addr, src_addr);
+  nvshmem_cp_block<N>(dst_addr, src_addr);
 }
 
 template <int N, typename dtype_t>
 TL_DEVICE void cp_block(dtype_t *dst_addr, const uint64_t src_addr_uint64) {
   const dtype_t *src_addr = reinterpret_cast<const dtype_t *>(src_addr_uint64);
-  nvshmem_memcpy_block<N>(dst_addr, src_addr);
+  nvshmem_cp_block<N>(dst_addr, src_addr);
 }
 
 } // namespace tl
