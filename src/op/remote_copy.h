@@ -60,6 +60,46 @@ private:
   Buffer src_buffer, dst_buffer;
 };
 
+class PushBlockOp : public Operator {
+public:
+  PushBlockOp(Array<PrimExpr> args, BufferMap vmap);
+  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const final;
+  static const Op &Get();
+
+  std::unique_ptr<Operator> Clone() const final {
+    return std::make_unique<PushBlockOp>(*this);
+  }
+
+  PrimExpr get_offset(const BufferLoadNode *load);
+
+private:
+  PrimExpr src_addr, dst_addr;
+  PrimExpr src_offset, dst_offset;
+  PrimExpr copy_size, dst_pe;
+  bool is_symmetric = false;
+  Buffer src_buffer, dst_buffer;
+};
+
+class PullBlockOp : public Operator {
+public:
+  PullBlockOp(Array<PrimExpr> args, BufferMap vmap);
+  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const final;
+  static const Op &Get();
+
+  std::unique_ptr<Operator> Clone() const final {
+    return std::make_unique<PullBlockOp>(*this);
+  }
+
+  PrimExpr get_offset(const BufferLoadNode *load);
+
+private:
+  PrimExpr src_addr, dst_addr;
+  PrimExpr src_offset, dst_offset;
+  PrimExpr copy_size, src_pe;
+  bool is_symmetric = false;
+  Buffer src_buffer, dst_buffer;
+};
+
 } // namespace tl
 } // namespace tvm
 

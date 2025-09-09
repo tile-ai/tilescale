@@ -170,7 +170,7 @@ template <> TL_DEVICE void st_na_global(const int4 *ptr, const int4 &value) {
 #define ST_FUNC(ptr, value) st_na_global(ptr, value)
 
 template <int N, int UNROLL_FACTOR, typename dtype_t>
-TL_DEVICE void cp_unrolled(dtype_t const *const dst_addr,
+TL_DEVICE void cp_warp(dtype_t const *const dst_addr,
                            dtype_t const *const src_addr) {
   int lane_id;
   asm("mov.s32 %0, %laneid;" : "=r"(lane_id));
@@ -192,7 +192,7 @@ TL_DEVICE void cp_unrolled(dtype_t const *const dst_addr,
 }
 
 template <int N, int UNROLL_FACTOR, typename dtype_t>
-TL_DEVICE void cp_unrolled(uint64_t dst_addr_uint64,
+TL_DEVICE void cp_warp(uint64_t dst_addr_uint64,
                            dtype_t const *const src_addr) {
   dtype_t *dst_addr = reinterpret_cast<dtype_t *>(dst_addr_uint64);
 
@@ -216,7 +216,7 @@ TL_DEVICE void cp_unrolled(uint64_t dst_addr_uint64,
 }
 
 template <int N, int UNROLL_FACTOR, typename dtype_t>
-TL_DEVICE void cp_unrolled(dtype_t *const dst_addr, uint64_t src_addr_uint64) {
+TL_DEVICE void cp_warp(dtype_t *const dst_addr, uint64_t src_addr_uint64) {
   const dtype_t *src_addr = reinterpret_cast<const dtype_t *>(src_addr_uint64);
 
   int lane_id;
@@ -236,6 +236,141 @@ TL_DEVICE void cp_unrolled(dtype_t *const dst_addr, uint64_t src_addr_uint64) {
   for (int __i = ((N) / kLoopStride) * kLoopStride + (lane_id); __i < (N);
        __i += 32)
     ST_FUNC(__dst + __i, LD_FUNC(__src + __i));
+}
+
+/**
+ * Check:
+ * nvshmem_src/src/include/non_abi/device/common/nvshmemi_common_device.cuh::nvshmemi_memcpy_threadgroup()
+ */
+template <int N, typename dtype_t>
+TL_DEVICE void nvshmem_memcpy_threadgroup(dtype_t *__restrict__ _dst,
+                                          const dtype_t *__restrict__ _src,
+                                          int myIdx,
+                                          int groupSize) {
+  size_t len = N * sizeof(dtype_t);
+  void *dst = _dst, *src = _src;
+
+  /*
+   * If src and dst are 16B aligned copy as much as possible using 16B chunks
+   */
+  if ((uintptr_t)dst % 16 == 0 && (uintptr_t)src % 16 == 0) {
+    const size_t nelems = len / 16;
+
+    int4 *__restrict__ dst_p = (int4 *)dst;
+    const int4 *__restrict__ src_p = (const int4 *)src;
+    for (size_t i = myIdx; i < nelems; i += groupSize)
+      dst_p[i] = src_p[i];
+
+    len -= nelems * 16;
+
+    if (0 == len)
+      return;
+
+    dst = (void *)(dst_p + nelems);
+    src = (void *)(src_p + nelems);
+  }
+
+  /*
+   * If src and dst are 8B aligned copy as much as possible using 8B chunks
+   */
+  if ((uintptr_t)dst % 8 == 0 && (uintptr_t)src % 8 == 0) {
+    uint64_t *__restrict__ dst_p = (uint64_t *)dst;
+    const uint64_t *__restrict__ src_p = (const uint64_t *)src;
+    const size_t nelems = len / 8;
+
+    for (size_t i = myIdx; i < nelems; i += groupSize)
+      dst_p[i] = src_p[i];
+
+    len -= nelems * 8;
+
+    if (0 == len)
+      return;
+
+    dst = (void *)(dst_p + nelems);
+    src = (void *)(src_p + nelems);
+  }
+
+  /*
+   * If src and dst are 4B aligned copy as much as possible using 4B chunks
+   */
+  if ((uintptr_t)dst % 4 == 0 && (uintptr_t)src % 4 == 0) {
+    uint32_t *__restrict__ dst_p = (uint32_t *)dst;
+    const uint32_t *__restrict__ src_p = (const uint32_t *)src;
+    const size_t nelems = len / 4;
+
+    for (size_t i = myIdx; i < nelems; i += groupSize)
+      dst_p[i] = src_p[i];
+
+    len -= nelems * 4;
+
+    if (0 == len)
+      return;
+
+    dst = (void *)(dst_p + nelems);
+    src = (void *)(src_p + nelems);
+  }
+
+  /*
+   * If src and dst are 2B aligned copy as much as possible using 2B chunks
+   */
+  if ((uintptr_t)dst % 2 == 0 && (uintptr_t)src % 2 == 0) {
+    uint16_t *__restrict__ dst_p = (uint16_t *)dst;
+    const uint16_t *__restrict__ src_p = (const uint16_t *)src;
+    const size_t nelems = len / 2;
+
+    for (size_t i = myIdx; i < nelems; i += groupSize)
+      dst_p[i] = src_p[i];
+
+    len -= nelems * 2;
+
+    if (0 == len)
+      return;
+
+    dst = (void *)(dst_p + nelems);
+    src = (void *)(src_p + nelems);
+  }
+
+  unsigned char *__restrict__ dst_c = (unsigned char *)dst;
+  const unsigned char *__restrict__ src_c = (const unsigned char *)src;
+
+  for (size_t i = myIdx; i < len; i += groupSize)
+    dst_c[i] = src_c[i];
+}
+
+template <int N, typename dtype_t>
+TL_DEVICE void nvshmem_cp_block(dtype_t *__restrict__ dst,
+                                    const dtype_t *__restrict__ src) {
+  int lane_id;
+  asm("mov.s32 %0, %laneid;" : "=r"(lane_id));
+  nvshmem_cp_threadgroup<N>(dst, src, lane_id, 32);
+}
+
+template <int N, typename dtype_t>
+TL_DEVICE void nvshmem_cp_block(dtype_t *__restrict__ dst,
+                                    const dtype_t *__restrict__ src) {
+  int thread_id = threadIdx.x + threadIdx.y * blockDim.x +
+                  threadIdx.z * blockDim.x * blockDim.y;
+  int block_size = blockDim.x * blockDim.y * blockDim.z;
+  nvshmem_cp_threadgroup<N>(dst, src, thread_id, block_size);
+}
+
+template <int N, typename dtype_t>
+TL_DEVICE void cp_block(dtype_t *dst_addr,
+                        const dtype_t *src_addr) {
+  nvshmem_memcpy_block<N>(dst_addr, src_addr);
+}
+
+template <int N, typename dtype_t>
+TL_DEVICE void cp_block(uint64_t dst_addr_uint64,
+                        const dtype_t *src_addr) {
+  dtype_t *dst_addr = reinterpret_cast<dtype_t *>(dst_addr_uint64);
+  nvshmem_memcpy_block<N>(dst_addr, src_addr);
+}
+
+template <int N, typename dtype_t>
+TL_DEVICE void cp_block(dtype_t *dst_addr, const uint64_t src_addr_uint64) {
+  const dtype_t *src_addr = reinterpret_cast<const dtype_t *>(src_addr_uint64);
+  nvshmem_memcpy_block<N>(dst_addr, src_addr);
 }
 
 } // namespace tl
