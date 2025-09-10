@@ -18,14 +18,14 @@ namespace tl {
 
 using namespace tir;
 
-class PutWarpOp : public Operator {
+class PutOp : public Operator {
 public:
-  PutWarpOp(Array<PrimExpr> args, BufferMap vmap);
+  PutOp(Array<PrimExpr> args, BufferMap vmap);
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const final;
   static const Op &Get();
 
   std::unique_ptr<Operator> Clone() const final {
-    return std::make_unique<PutWarpOp>(*this);
+    return std::make_unique<PutOp>(*this);
   }
 
   PrimExpr get_offset(const BufferLoadNode *load);
@@ -37,16 +37,17 @@ private:
   int unroll_factor;
   bool is_symmetric = false;
   Buffer src_buffer, dst_buffer;
+  std::string scope;  // {warp, block}
 };
 
-class GetWarpOp : public Operator {
+class GetOp : public Operator {
 public:
-  GetWarpOp(Array<PrimExpr> args, BufferMap vmap);
+  GetOp(Array<PrimExpr> args, BufferMap vmap);
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const final;
   static const Op &Get();
 
   std::unique_ptr<Operator> Clone() const final {
-    return std::make_unique<GetWarpOp>(*this);
+    return std::make_unique<GetOp>(*this);
   }
 
   PrimExpr get_offset(const BufferLoadNode *load);
@@ -58,46 +59,7 @@ private:
   int unroll_factor;
   bool is_symmetric = false;
   Buffer src_buffer, dst_buffer;
-};
-
-class PutBlockOp : public Operator {
-public:
-  PutBlockOp(Array<PrimExpr> args, BufferMap vmap);
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const final;
-  static const Op &Get();
-
-  std::unique_ptr<Operator> Clone() const final {
-    return std::make_unique<PutBlockOp>(*this);
-  }
-
-  PrimExpr get_offset(const BufferLoadNode *load);
-
-private:
-  PrimExpr src_addr, dst_addr;
-  PrimExpr src_offset, dst_offset;
-  PrimExpr copy_size, dst_pe;
-  bool is_symmetric = false;
-  Buffer src_buffer, dst_buffer;
-};
-
-class GetBlockOp : public Operator {
-public:
-  GetBlockOp(Array<PrimExpr> args, BufferMap vmap);
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const final;
-  static const Op &Get();
-
-  std::unique_ptr<Operator> Clone() const final {
-    return std::make_unique<GetBlockOp>(*this);
-  }
-
-  PrimExpr get_offset(const BufferLoadNode *load);
-
-private:
-  PrimExpr src_addr, dst_addr;
-  PrimExpr src_offset, dst_offset;
-  PrimExpr copy_size, src_pe;
-  bool is_symmetric = false;
-  Buffer src_buffer, dst_buffer;
+  std::string scope;  // {warp, block}
 };
 
 } // namespace tl

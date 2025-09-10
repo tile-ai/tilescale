@@ -38,8 +38,7 @@ def put_warp(src: PrimExpr,
         unroll_factor: int
             The unroll factor
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.put_warp"), src, dst, size, dst_pe,
-                           unroll_factor)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.put"), src, dst, size, dst_pe, unroll_factor, "warp")
 
 
 def get_warp(src: PrimExpr,
@@ -63,8 +62,7 @@ def get_warp(src: PrimExpr,
         unroll_factor: int
             The unroll factor
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.get_warp"), src, dst, size, src_pe,
-                           unroll_factor)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.get"), src, dst, size, src_pe, unroll_factor, "warp")
 
 
 def put_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, dst_pe: Optional[PrimExpr] = None):
@@ -83,7 +81,7 @@ def put_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, dst_pe: Optional[Pri
             If not provided, the dst is a UVA address and dst_pe is None.
     """
     return tir.call_intrin(
-        "handle", tir.op.Op.get("tl.put_block"), src, dst, size, dst_pe
+        "handle", tir.op.Op.get("tl.put"), src, dst, size, dst_pe, 0, "block"
     )  # NOTE(wt): unroll_factor is not needed because currently we implement block-level comm based on NVSHMEM-style copy
 
 
@@ -102,4 +100,6 @@ def get_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, src_pe: Optional[Pri
             If provided, the src is a symmetric address, otherwise it is a UVA address.
             If not provided, the src is a UVA address and src_pe is None.
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.get_block"), src, dst, size, src_pe)
+    return tir.call_intrin(
+        "handle", tir.op.Op.get("tl.get"), src, dst, size, src_pe, 0, "block"
+    )  # NOTE(wt): unroll_factor is not needed because currently we implement block-level comm based on NVSHMEM-style copy
