@@ -68,7 +68,7 @@ Stmt PutOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   } else {
     LOG(FATAL) << "Invalid scope: " << scope;
   }
-  
+
   new_args.push_back(StringImm(ss.str()));
   if (is_symmetric) {
     PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
@@ -84,8 +84,7 @@ Stmt PutOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     new_args.push_back(dst_addr);
   }
   new_args.push_back(src_addr);
-  auto put =
-      Call(DataType::Handle(), builtin::call_extern(), new_args);
+  auto put = Call(DataType::Handle(), builtin::call_extern(), new_args);
   return Evaluate(put);
 }
 
@@ -153,8 +152,7 @@ Stmt GetOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     new_args.push_back(src_addr);
   }
 
-  auto get =
-      Call(DataType::Handle(), builtin::call_extern(), new_args);
+  auto get = Call(DataType::Handle(), builtin::call_extern(), new_args);
   return Evaluate(get);
 }
 

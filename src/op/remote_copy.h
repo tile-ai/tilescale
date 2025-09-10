@@ -37,7 +37,7 @@ private:
   int unroll_factor;
   bool is_symmetric = false;
   Buffer src_buffer, dst_buffer;
-  std::string scope;  // {warp, block}
+  std::string scope; // {warp, block}
 };
 
 class GetOp : public Operator {
@@ -59,7 +59,7 @@ private:
   int unroll_factor;
   bool is_symmetric = false;
   Buffer src_buffer, dst_buffer;
-  std::string scope;  // {warp, block}
+  std::string scope; // {warp, block}
 };
 
 } // namespace tl
