@@ -11,7 +11,7 @@ tilelang.disable_cache()
 os.environ['NCCL_DEBUG'] = 'WARN'  # silence NCCL log
 
 
-def kernel_(M, num_rank, block_M, threads):
+def get_kernel(M, num_rank, block_M, threads):
 
     @T.prim_func
     def main(
@@ -26,12 +26,13 @@ def kernel_(M, num_rank, block_M, threads):
             warp_idx = T.get_thread_binding(0) // 32
             warp_copy_size = T.ceildiv(block_M, threads // 32)
             warp_start = bx * block_M + warp_copy_size * warp_idx
-            T.pull_warp(
+            T.get_warp(
                 src=T.address_of(src[warp_start]),
                 dst=T.address_of(dst[warp_start]),
                 size=warp_copy_size,
                 src_pe=rank[0] ^ 1,
                 unroll_factor=4)
+            T.fence_sys()
 
     return main
 
@@ -50,7 +51,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         local_rank=local_rank,
         num_local_ranks=num_local_ranks,
         group=group)
-    kernel = tilelang.compile(kernel_(M, num_ranks, BLOCK_M, threads))
+    kernel = tilelang.compile(get_kernel(M, num_ranks, BLOCK_M, threads))
     kernel.initialize(allocator=allocator)
     if local_rank == 0:
         print(kernel.get_kernel_source())

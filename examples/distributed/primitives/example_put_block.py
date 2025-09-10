@@ -23,15 +23,12 @@ def kernel_(M, num_rank, block_M, threads):
             num_rank = T.alloc_local([1], "uint64")
             rank[0] = T.get_rank()
             num_rank[0] = T.get_num_ranks()
-            warp_idx = T.get_thread_binding(0) // 32
-            warp_copy_size = T.ceildiv(block_M, threads // 32)
-            warp_start = bx * block_M + warp_copy_size * warp_idx
-            T.push_warp(
-                src=T.address_of(src[warp_start]),
-                dst=T.address_of(dst[warp_start]),
-                size=warp_copy_size,
+            T.put_block(
+                src=T.address_of(src[bx * block_M]),
+                dst=T.address_of(dst[bx * block_M]),
+                size=block_M,
                 dst_pe=rank[0] ^ 1,
-                unroll_factor=4)
+            )
 
     return main
 

@@ -24,7 +24,7 @@ def ipc_kernel_push(size, threads, unroll_factor):
             warp_idx = T.get_thread_binding(0) // 32
             warp_copy_size = T.ceildiv(size, threads // 32)
             warp_start = warp_copy_size * warp_idx
-            T.push_warp(
+            T.put_warp(
                 src=T.address_of(src[warp_start]),
                 dst=T.address_of(dst[warp_start]),
                 size=warp_copy_size,
@@ -48,7 +48,7 @@ def ipc_kernel_pull(size, threads, unroll_factor):
             warp_idx = T.get_thread_binding(0) // 32
             warp_copy_size = T.ceildiv(size, threads // 32)
             warp_start = warp_copy_size * warp_idx
-            T.pull_warp(
+            T.get_warp(
                 src=T.address_of(src[warp_start]),
                 dst=T.address_of(dst[warp_start]),
                 size=warp_copy_size,

@@ -1,6 +1,6 @@
 /*!
  * \file tl/op/remote_copy.cc
- * \brief Push warp operator.
+ * \brief Remote copy operators.
  *
  */
 
@@ -21,7 +21,7 @@ namespace tl {
 
 using namespace tir;
 
-PrimExpr PushWarpOp::get_offset(const BufferLoadNode *load) {
+PrimExpr PutOp::get_offset(const BufferLoadNode *load) {
   PrimExpr offset = 0;
   PrimExpr stride = 1;
   auto buffer_shape = load->buffer->shape;
@@ -32,7 +32,7 @@ PrimExpr PushWarpOp::get_offset(const BufferLoadNode *load) {
   return div(offset * load->dtype.bits(), 8);
 }
 
-PushWarpOp::PushWarpOp(Array<PrimExpr> args, BufferMap vmap) {
+PutOp::PutOp(Array<PrimExpr> args, BufferMap vmap) {
   src_addr = args[0];
   dst_addr = args[1];
   ICHECK(src_addr.as<CallNode>()) << "src_addr must be a call node";
@@ -52,15 +52,23 @@ PushWarpOp::PushWarpOp(Array<PrimExpr> args, BufferMap vmap) {
   copy_size = args[2];
   dst_pe = args[3];
   unroll_factor = args[4].as<IntImm>().value()->value;
+  scope = args[5].as<StringImm>().value()->value;
   if (dst_pe.defined()) {
     is_symmetric = true;
   }
 }
 
-Stmt PushWarpOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+Stmt PutOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   Array<PrimExpr> new_args;
   std::stringstream ss;
-  ss << "tl::cp_unrolled<" << copy_size << ", " << unroll_factor << ">";
+  if (scope == "warp") {
+    ss << "tl::cp_warp<" << copy_size << ", " << unroll_factor << ">";
+  } else if (scope == "block") {
+    ss << "tl::cp_block<" << copy_size << ">";
+  } else {
+    LOG(FATAL) << "Invalid scope: " << scope;
+  }
+
   new_args.push_back(StringImm(ss.str()));
   if (is_symmetric) {
     PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
@@ -76,12 +84,11 @@ Stmt PushWarpOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     new_args.push_back(dst_addr);
   }
   new_args.push_back(src_addr);
-  auto unrolled_copy =
-      Call(DataType::Handle(), builtin::call_extern(), new_args);
-  return Evaluate(unrolled_copy);
+  auto put = Call(DataType::Handle(), builtin::call_extern(), new_args);
+  return Evaluate(put);
 }
 
-PrimExpr PullWarpOp::get_offset(const BufferLoadNode *load) {
+PrimExpr GetOp::get_offset(const BufferLoadNode *load) {
   PrimExpr offset = 0;
   PrimExpr stride = 1;
   auto buffer_shape = load->buffer->shape;
@@ -92,7 +99,7 @@ PrimExpr PullWarpOp::get_offset(const BufferLoadNode *load) {
   return div(offset * load->dtype.bits(), 8);
 }
 
-PullWarpOp::PullWarpOp(Array<PrimExpr> args, BufferMap vmap) {
+GetOp::GetOp(Array<PrimExpr> args, BufferMap vmap) {
   src_addr = args[0];
   dst_addr = args[1];
   ICHECK(src_addr.as<CallNode>()) << "src_addr must be a call node";
@@ -112,15 +119,23 @@ PullWarpOp::PullWarpOp(Array<PrimExpr> args, BufferMap vmap) {
   copy_size = args[2];
   src_pe = args[3];
   unroll_factor = args[4].as<IntImm>().value()->value;
+  scope = args[5].as<StringImm>().value()->value;
   if (src_pe.defined()) {
     is_symmetric = true;
   }
 }
 
-Stmt PullWarpOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+Stmt GetOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   Array<PrimExpr> new_args;
   std::stringstream ss;
-  ss << "tl::cp_unrolled<" << copy_size << ", " << unroll_factor << ">";
+  if (scope == "warp") {
+    ss << "tl::cp_warp<" << copy_size << ", " << unroll_factor << ">";
+  } else if (scope == "block") {
+    ss << "tl::cp_block<" << copy_size << ">";
+  } else {
+    LOG(FATAL) << "Invalid scope: " << scope;
+  }
+
   new_args.push_back(StringImm(ss.str()));
   new_args.push_back(dst_addr); // Always dst first in tl_templates
   if (is_symmetric) {
@@ -137,18 +152,17 @@ Stmt PullWarpOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     new_args.push_back(src_addr);
   }
 
-  auto unrolled_pull =
-      Call(DataType::Handle(), builtin::call_extern(), new_args);
-  return Evaluate(unrolled_pull);
+  auto get = Call(DataType::Handle(), builtin::call_extern(), new_args);
+  return Evaluate(get);
 }
 
-TIR_REGISTER_TL_OP(PushWarpOp, push_warp)
-    .set_num_inputs(5)
+TIR_REGISTER_TL_OP(PutOp, put)
+    .set_num_inputs(6)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_REGISTER_TL_OP(PullWarpOp, pull_warp)
-    .set_num_inputs(5)
+TIR_REGISTER_TL_OP(GetOp, get)
+    .set_num_inputs(6)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
