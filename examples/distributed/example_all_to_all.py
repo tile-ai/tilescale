@@ -8,12 +8,11 @@ from tilelang.distributed.utils import init_distributed
 import argparse
 import random
 
-PE_num = 4
 
 tilelang.disable_cache()
 
 
-def all_to_all(TOKEN_NUM, TOPK, HIDDEN, EXPERT_NUM, dtype="float16"):
+def all_to_all(PE_num, TOKEN_NUM, TOPK, HIDDEN, EXPERT_NUM, dtype="float16"):
 
     EXPERTS_PER_RANK = EXPERT_NUM // PE_num
 
@@ -99,8 +98,9 @@ args = parse_args()
 # nelems = M * PE_num * N
 
 WORLD_SIZE, RANK, LOCAL_RANK = init_distributed()
+PE_num = WORLD_SIZE
 
-func = all_to_all(args.M, args.topk, args.N, args.G)
+func = all_to_all(PE_num, args.M, args.topk, args.N, args.G)
 kernel = tilelang.compile(func, pass_configs={"tl.disable_tma_lower": True})
 
 # Get CUDA Source

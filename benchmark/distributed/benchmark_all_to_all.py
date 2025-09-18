@@ -5,7 +5,7 @@ from tilelang.distributed.utils import init_distributed, dtype_map
 import argparse
 import random
 from triton_dist.kernels.nvidia import fast_all_to_all, all_to_all_post_process
-from .utils import create_all_to_all_context, AllToAllContext
+from benchmark.distributed.utils import create_all_to_all_context, AllToAllContext
 from typing import Optional
 
 tilelang.disable_cache()
