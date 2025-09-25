@@ -1,13 +1,11 @@
 import torch
 import pynvshmem
-import os
 import tilelang
 import tilelang.language as T
 from tilelang.profiler import TensorSupplyType
 from tilelang.distributed.utils import init_distributed
 import argparse
 import random
-
 
 tilelang.disable_cache()
 

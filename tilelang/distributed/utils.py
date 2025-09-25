@@ -3,7 +3,7 @@ import torch.distributed as dist
 import datetime
 import os
 import inspect
-from typing import List, Union, Tuple, Callable, Sequence
+from typing import List, Union, Tuple, Callable, Sequence, Optional
 from contextlib import contextmanager
 
 import importlib.metadata
@@ -263,3 +263,36 @@ def supports_p2p_native_atomic():
         cudart.cudaDeviceP2PAttr.cudaDevP2PAttrNativeAtomicSupported, 0, 1)
     CUDA_CHECK(err)
     return support == 1
+
+
+def set_signal(signal_tensor: torch.Tensor,
+               signal: int,
+               stream: Optional[torch.cuda.Stream] = None):
+    stream = stream or torch.cuda.current_stream()
+    if signal_tensor.dtype == torch.int32:
+        (err,) = cuda.cuStreamWriteValue32(
+            stream.cuda_stream,
+            signal_tensor.data_ptr(),
+            signal,
+            cuda.CUstreamWriteValue_flags.CU_STREAM_WRITE_VALUE_DEFAULT,
+        )
+        CUDA_CHECK(err)
+    else:
+        raise Exception(f"Unsupported signal dtype {signal_tensor.dtype}")
+
+
+def wait_eq(signal_tensor: torch.Tensor,
+            signal: int,
+            stream: Optional[torch.cuda.Stream] = None,
+            require_i64=False):
+    stream = stream or torch.cuda.current_stream()
+    if signal_tensor.dtype == torch.int32:
+        (err,) = cuda.cuStreamWaitValue32(
+            stream.cuda_stream,
+            signal_tensor.data_ptr(),
+            signal,
+            cuda.CUstreamWaitValue_flags.CU_STREAM_WAIT_VALUE_EQ,
+        )
+        CUDA_CHECK(err)
+    else:
+        raise Exception(f"Unsupported signal dtype {signal_tensor.dtype}")
