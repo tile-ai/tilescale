@@ -45,14 +45,15 @@ def map_torch_type(intype: str) -> torch.dtype:
 def tensor(shape: Tuple[int, ...],
            dtype: torch.dtype,
            device: Optional[Union[str, torch.device, int]] = None,
-           allocator: Optional[BaseAllocator] = None) -> torch.Tensor:
+           allocator: Optional[BaseAllocator] = None,
+           return_peers: Optional[bool] = None) -> Union[torch.Tensor, list[torch.Tensor]]:
     if allocator is not None:
         assert allocator.initialized(), "Allocator is not initialized"
         if device is not None:
             device = parse_device(device)
             assert allocator.device == device, f"Allocator device must be the " \
                 f"same as the device of the tensor, but got {allocator.device} != {device}"
-        return allocator._allocate_tensor(shape, dtype)
+        return allocator._allocate_tensor(shape, dtype, return_peers)
     else:
         return torch.empty(shape, dtype=dtype, device=device)
 

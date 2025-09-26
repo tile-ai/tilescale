@@ -5,7 +5,7 @@ import argparse
 import torch
 import torch.distributed as dist
 import torch.multiprocessing
-from tilelang.distributed.utils import init_dist
+from tilelang.distributed import init_dist
 
 tilelang.disable_cache()
 os.environ['NCCL_DEBUG'] = 'WARN'  # silence NCCL log

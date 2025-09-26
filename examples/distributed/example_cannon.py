@@ -3,7 +3,7 @@ import torch.distributed as dist
 import pynvshmem
 import tilelang
 import tilelang.language as T
-from tilelang.distributed.utils import init_distributed, dtype_map
+from tilelang.distributed import init_distributed, dtype_map
 import math
 import argparse
 

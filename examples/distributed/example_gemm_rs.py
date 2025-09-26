@@ -2,7 +2,7 @@ import torch
 import argparse
 import os
 import tilelang
-from tilelang.distributed.utils import init_distributed, generate_data
+from tilelang.distributed import init_distributed, generate_data
 from gemm_rs_kernel import gemm_rs
 from gemm_rs_utils import create_gemm_rs_context
 from typing import Optional

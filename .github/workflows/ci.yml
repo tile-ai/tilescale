@@ -111,11 +111,49 @@ jobs:
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         cd examples
         unset PYTHONPATH
-        python -m pytest -n 4 **/test*.py -v -r fE
+
+        # find and run distributed tests with TILELANG_USE_DISTRIBUTED=1
+        mapfile -t DIST_TESTS < <(find . -type f -path '*/distributed/*' -name 'test*.py' 2>/dev/null || true)
+        if [ "${#DIST_TESTS[@]}" -gt 0 ]; then
+          echo "Running distributed examples with TILELANG_USE_DISTRIBUTED=1:"
+          printf '%s\n' "${DIST_TESTS[@]}"
+          TILELANG_USE_DISTRIBUTED=1 python -m pytest -n 4 "${DIST_TESTS[@]}" -v -r fE
+        else
+          echo "No distributed examples found."
+        fi
+
+        # run remaining example tests (non-distributed)
+        mapfile -t OTHER_TESTS < <(find . -type f -name 'test*.py' ! -path '*/distributed/*' 2>/dev/null || true)
+        if [ "${#OTHER_TESTS[@]}" -gt 0 ]; then
+          echo "Running non-distributed examples:"
+          printf '%s\n' "${OTHER_TESTS[@]}"
+          python -m pytest -n 4 "${OTHER_TESTS[@]}" -v -r fE
+        else
+          echo "No non-distributed example tests found."
+        fi
 
     - name: Run tests
       run: |
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         cd testing/python
         unset PYTHONPATH
-        python -m pytest -n 4 -v -r fE
+
+        # run distributed tests first with env var
+        mapfile -t DIST_TESTS < <(find . -type f -path '*/distributed/*' -name 'test*.py' 2>/dev/null || true)
+        if [ "${#DIST_TESTS[@]}" -gt 0 ]; then
+          echo "Running distributed tests with TILELANG_USE_DISTRIBUTED=1:"
+          printf '%s\n' "${DIST_TESTS[@]}"
+          TILELANG_USE_DISTRIBUTED=1 python -m pytest -n 4 "${DIST_TESTS[@]}" -v -r fE
+        else
+          echo "No distributed tests found under testing/python."
+        fi
+
+        # run remaining tests
+        mapfile -t OTHER_TESTS < <(find . -type f -name 'test*.py' ! -path '*/distributed/*' 2>/dev/null || true)
+        if [ "${#OTHER_TESTS[@]}" -gt 0 ]; then
+          echo "Running non-distributed tests:"
+          printf '%s\n' "${OTHER_TESTS[@]}"
+          python -m pytest -n 4 "${OTHER_TESTS[@]}" -v -r fE
+        else
+          echo "No non-distributed tests found under testing/python."
+        fi

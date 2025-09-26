@@ -4,7 +4,7 @@ import torch.distributed as dist
 import pynvshmem
 import tilelang
 import tilelang.language as T
-from tilelang.distributed.utils import init_distributed, dtype_map, perf_fn
+from tilelang.distributed import init_distributed, dtype_map, perf_fn
 
 
 def allgather(PE_num, M, N, dtype="float16", threads=128):
