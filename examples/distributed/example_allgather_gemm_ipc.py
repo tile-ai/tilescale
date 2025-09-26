@@ -139,7 +139,6 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     BLOCK_N = 128
     BLOCK_K = 64
     threads = 256
-    assert num_local_ranks == 2, "this example only supports 2 ranks copying to each other"
 
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
     allocator = tilelang.get_allocator(
