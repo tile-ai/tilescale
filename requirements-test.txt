@@ -27,3 +27,4 @@ setuptools
 einops
 scipy
 tornado
+ninja
