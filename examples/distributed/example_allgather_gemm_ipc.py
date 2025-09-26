@@ -5,9 +5,9 @@ import argparse
 import torch
 import torch.distributed as dist
 import torch.multiprocessing
-from tilelang.distributed.utils import init_dist
+from tilelang.distributed import init_dist
 from cuda import cudart
-from tilelang.distributed.utils import set_signal, wait_eq
+from tilelang.distributed import set_signal, wait_eq
 
 tilelang.disable_cache()
 os.environ['NCCL_DEBUG'] = 'WARN'  # silence NCCL log

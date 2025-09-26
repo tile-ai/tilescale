@@ -17,7 +17,7 @@ else:
     from cuda import cuda, cudart
 
 import ctypes
-from tilelang.distributed.common.ipc_ext import _create_ipc_handle, _sync_ipc_handles, _create_tensor
+from tilelang.distributed import _create_ipc_handle, _sync_ipc_handles, _create_tensor
 from functools import lru_cache
 
 dtype_map = {
@@ -296,3 +296,9 @@ def wait_eq(signal_tensor: torch.Tensor,
         CUDA_CHECK(err)
     else:
         raise Exception(f"Unsupported signal dtype {signal_tensor.dtype}")
+
+
+def cuda_stream_max_priority():
+    ret = cudart.cudaDeviceGetStreamPriorityRange()
+    CUDA_CHECK(ret[0])
+    return ret[2]  # (leastPriority, greatestPriority) -> greatestPriority is max priority

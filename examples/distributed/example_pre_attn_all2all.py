@@ -1,11 +1,9 @@
 import torch
 import torch.distributed as dist
 import pynvshmem
-import os
 import tilelang
 import tilelang.language as T
-from tilelang.profiler import TensorSupplyType
-from tilelang.distributed.utils import init_distributed, dtype_map, perf_fn
+from tilelang.distributed import init_distributed, dtype_map
 import argparse
 
 tilelang.disable_cache()
@@ -26,8 +24,6 @@ def torch_sequence_all_to_all_reference(data_src, group):
         Output tensor after all-to-all communication
     """
     world_size = dist.get_world_size(group)
-    rank = dist.get_rank(group)
-
     batch_size, num_heads, seq_per_pe, head_dim = data_src.shape
     seq_len = seq_per_pe * world_size
     heads_per_pe = num_heads // world_size
@@ -46,7 +42,7 @@ def torch_sequence_all_to_all_reference(data_src, group):
 
     # Step 2: Prepare output list for all_to_all
     output_list = []
-    for pe_idx in range(world_size):
+    for _ in range(world_size):
         # Receive [BATCH_SIZE, HEADS_PER_PE, SEQ_PER_PE, HEAD_DIM] from each PE
         recv_data = torch.empty(
             batch_size,
@@ -264,7 +260,7 @@ def test_all_to_all_with_golden_reference():
     print(f"PE {RANK} PyTorch output sample: {torch_output[0, 0, 0, :3]}")
     print(f"PE {RANK} TileLang output sample: {tilelang_output[0, 0, 0, :3]}")
 
-    verification_passed = verify_results(tilelang_output, torch_output, RANK)
+    verify_results(tilelang_output, torch_output, RANK)
 
     # Cleanup
     dist.destroy_process_group()

@@ -12,7 +12,7 @@ cd -
 ## Usage
 
 ```python
-from tilelang.distributed.utils import init_dist, create_dist_tensor, create_tensor
+from tilelang.distributed import init_dist, create_dist_tensor, create_tensor
 
 ...
 

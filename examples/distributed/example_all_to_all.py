@@ -3,7 +3,7 @@ import pynvshmem
 import tilelang
 import tilelang.language as T
 from tilelang.profiler import TensorSupplyType
-from tilelang.distributed.utils import init_distributed
+from tilelang.distributed import init_distributed
 import argparse
 import random
 
