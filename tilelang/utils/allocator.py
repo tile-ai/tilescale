@@ -5,7 +5,7 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.distributed as dist
 from tilelang.distributed import _create_ipc_handle, _sync_ipc_handles
-from tilelang.utils.cpp.alloc_cuda import tensor_from_ptr
+from alloc_cuda import tensor_from_ptr
 from tilelang.utils.target import parse_device
 import contextlib
 

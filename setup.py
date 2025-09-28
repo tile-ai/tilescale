@@ -615,6 +615,16 @@ class CythonExtension(Extension):
         self.sourcedir = os.path.abspath(sourcedir)
 
 
+class PybindExtension(Extension):
+    """
+    A specialized setuptools Extension class for building a Cython project.
+    """
+
+    def __init__(self, name, sourcedir=""):
+        super().__init__(name=name, sources=[])
+        self.sourcedir = os.path.abspath(sourcedir)
+
+
 class TilelangExtensionBuild(build_ext):
     """
     Custom build_ext command for CMake-based projects.
@@ -641,6 +651,8 @@ class TilelangExtensionBuild(build_ext):
                 self.build_cython(ext)
             elif isinstance(ext, CMakeExtension):
                 self.build_cmake(ext)
+            elif isinstance(ext, PybindExtension):
+                self.build_pybind(ext)
             else:
                 raise ValueError(f"Unsupported extension type: {type(ext)}")
 
@@ -831,6 +843,30 @@ class TilelangExtensionBuild(build_ext):
                                str(num_jobs)],
                               cwd=build_temp)
 
+    def build_pybind(self, ext, verbose: bool = True, pip_args: list[str] | None = None) -> None:
+        """
+        Build / install the pybind project that lives under self.sourcedir.
+
+        Default behaviour: run `python -m pip install .` in sourcedir.
+        - verbose: if True, stream stdout/stderr to the console (recommended).
+        - pip_args: optional extra args to pip, e.g. ["--no-deps", "-v"], or ["-e"] for editable.
+        Raises RuntimeError on failure.
+        """
+        if not os.path.isdir(ext.sourcedir):
+            raise FileNotFoundError(f"PybindExtension.sourcedir not found: {ext.sourcedir}")
+
+        pip_args = pip_args or []
+        cmd = [sys.executable, "-m", "pip", "install", "."] + pip_args
+
+        print(f"[PybindExtension] running: {' '.join(cmd)} (cwd={ext.sourcedir})")
+        # Stream output to console so users see progress/errors in real time.
+        try:
+            subprocess.run(cmd, cwd=ext.sourcedir, check=True)
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(
+                f"Failed to pip install project at {ext.sourcedir} (exit {e.returncode}). "
+                "See output above for details.") from e
+
 
 setup(
     name=PACKAGE_NAME,
@@ -863,6 +899,8 @@ setup(
     ext_modules=[
         CMakeExtension("TileLangCXX", sourcedir="."),
         CythonExtension("TileLangCython", sourcedir="."),
+        PybindExtension("alloc_cuda", sourcedir=os.path.join("tilelang", "utils", "cpp")),
+        PybindExtension("ipc_ext", sourcedir=os.path.join("tilelang", "distributed", "common")),
     ],
     cmdclass={
         "build_py": TileLangBuilPydCommand,

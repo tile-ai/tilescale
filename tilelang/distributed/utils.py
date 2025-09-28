@@ -17,7 +17,7 @@ else:
     from cuda import cuda, cudart
 
 import ctypes
-from tilelang.distributed import _create_ipc_handle, _sync_ipc_handles, _create_tensor
+from ipc_ext import _create_ipc_handle, _sync_ipc_handles, _create_tensor  # noqa: F401
 from functools import lru_cache
 
 dtype_map = {
