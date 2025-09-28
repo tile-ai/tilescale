@@ -23,6 +23,9 @@ import multiprocessing
 from setuptools.command.build_ext import build_ext
 import importlib
 import logging
+import glob
+import tempfile
+import ensurepip
 
 # Configure logging with basic settings
 logging.basicConfig(
@@ -843,29 +846,94 @@ class TilelangExtensionBuild(build_ext):
                                str(num_jobs)],
                               cwd=build_temp)
 
-    def build_pybind(self, ext, verbose: bool = True, pip_args: list[str] | None = None) -> None:
+    def build_pybind(self, ext, verbose: bool = True, pip_args: list | None = None) -> None:
         """
-        Build / install the pybind project that lives under self.sourcedir.
+        Robust single-step-friendly build/install for a pybind subproject.
 
-        Default behaviour: run `python -m pip install .` in sourcedir.
-        - verbose: if True, stream stdout/stderr to the console (recommended).
-        - pip_args: optional extra args to pip, e.g. ["--no-deps", "-v"], or ["-e"] for editable.
-        Raises RuntimeError on failure.
+        Behavior:
+        - If PIP_NO_BUILD_ISOLATION=1 is set (caller requested no isolation), run `pip install .` directly.
+        - Otherwise, ensure pip exists (ensurepip), then build a wheel and install that wheel.
+        This preserves the one-step `pip install .` UX for end users.
         """
-        if not os.path.isdir(ext.sourcedir):
-            raise FileNotFoundError(f"PybindExtension.sourcedir not found: {ext.sourcedir}")
+        sourcedir = getattr(ext, "sourcedir", None)
+        if not sourcedir or not os.path.isdir(sourcedir):
+            raise FileNotFoundError(f"PybindExtension.sourcedir not found: {sourcedir}")
 
         pip_args = pip_args or []
-        cmd = [sys.executable, "-m", "pip", "install", "."] + pip_args
 
-        print(f"[PybindExtension] running: {' '.join(cmd)} (cwd={ext.sourcedir})")
-        # Stream output to console so users see progress/errors in real time.
+        # If caller requests no build isolation (commonly used in dev/CI), just run pip install directly.
+        if os.environ.get("PIP_NO_BUILD_ISOLATION") == "1":
+            cmd = [sys.executable, "-m", "pip", "install", "."] + pip_args
+            if verbose:
+                logger.info(
+                    f"[PybindExtension] PIP_NO_BUILD_ISOLATION=1 -> running direct install: {' '.join(cmd)} (cwd={sourcedir})"
+                )
+            try:
+                subprocess.check_call(cmd, cwd=sourcedir)
+                if verbose:
+                    logger.info(f"[PybindExtension] direct install succeeded for {sourcedir}")
+                return
+            except subprocess.CalledProcessError as e:
+                raise RuntimeError(f"Direct pip install failed for {sourcedir}") from e
+
+        # Otherwise, we are likely in pip's isolated build environment: do ensurepip + wheel -> install
         try:
-            subprocess.run(cmd, cwd=ext.sourcedir, check=True)
+            import pip  # noqa: F401
+        except Exception:
+            if verbose:
+                logger.info(
+                    "[PybindExtension] pip not found in interpreter; attempting ensurepip.bootstrap()"
+                )
+            try:
+                ensurepip.bootstrap(upgrade=True)
+            except Exception as e:
+                raise RuntimeError(
+                    "pip is not available in this Python interpreter and ensurepip failed. "
+                    "Prefer to fix CI to provide pip in the interpreter (use actions/setup-python or install pip)."
+                ) from e
+
+        # upgrade packaging tools to avoid backend incompatibilities
+        try:
+            if verbose:
+                logger.info("[PybindExtension] upgrading pip/setuptools/wheel in interpreter...")
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"])
         except subprocess.CalledProcessError as e:
-            raise RuntimeError(
-                f"Failed to pip install project at {ext.sourcedir} (exit {e.returncode}). "
-                "See output above for details.") from e
+            raise RuntimeError("Failed to upgrade pip/setuptools/wheel in interpreter") from e
+
+        # Build wheel then install wheel
+        with tempfile.TemporaryDirectory() as wheel_dir:
+            build_cmd = [sys.executable, "-m", "pip", "wheel", ".", "-w", wheel_dir]
+            if verbose:
+                logger.info(
+                    f"[PybindExtension] building wheel: {' '.join(build_cmd)} (cwd={sourcedir})")
+            try:
+                subprocess.check_call(build_cmd, cwd=sourcedir)
+            except subprocess.CalledProcessError as e:
+                # include minimal diagnostics to help CI debugging
+                try:
+                    listing = "\n".join(sorted(os.listdir(sourcedir)))
+                except Exception:
+                    listing = "(failed to list directory)"
+                raise RuntimeError(
+                    f"Failed to build wheel for subproject at {sourcedir}. Directory listing:\n{listing}\n"
+                    "See pip output above for full error details.") from e
+
+            wheels = sorted(glob.glob(os.path.join(wheel_dir, "*.whl")))
+            if not wheels:
+                raise RuntimeError(f"No wheel was produced when building {sourcedir}")
+
+            wheel_path = wheels[-1]
+            install_cmd = [sys.executable, "-m", "pip", "install", wheel_path] + pip_args
+            if verbose:
+                logger.info(f"[PybindExtension] installing wheel: {' '.join(install_cmd)}")
+            try:
+                subprocess.check_call(install_cmd)
+            except subprocess.CalledProcessError as e:
+                raise RuntimeError(f"Failed to install wheel {wheel_path}") from e
+
+        if verbose:
+            logger.info(f"[PybindExtension] successfully built and installed wheel for {sourcedir}")
 
 
 setup(
