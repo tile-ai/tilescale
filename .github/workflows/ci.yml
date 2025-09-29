@@ -97,7 +97,6 @@ jobs:
             PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
           # flash attention usually requires no isolation build
           pip install flash_attn==2.5.8 --no-user --no-build-isolation
-          pip install . --no-user
           touch "$MARKER"
         fi
 
