@@ -7,7 +7,7 @@ from triton_dist.kernels.nvidia.reduce_scatter import reduce_scatter_ring_push_1
 import pynvshmem
 import tilelang
 import tilelang.language as T
-from tilelang.distributed.utils import init_distributed, dtype_map, perf_fn
+from tilelang.distributed import init_distributed, dtype_map, perf_fn
 
 tilelang.disable_cache()
 

@@ -9,7 +9,7 @@ import pynvshmem
 import tilelang
 import tilelang.language as T
 # from tilelang.carver.arch import driver
-from tilelang.distributed.utils import init_distributed, dtype_map, perf_fn
+from tilelang.distributed import init_distributed, dtype_map, perf_fn
 
 tilelang.disable_cache()
 

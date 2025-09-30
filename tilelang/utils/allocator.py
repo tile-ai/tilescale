@@ -4,8 +4,8 @@ import ctypes.util
 from typing import Optional, Tuple, Union
 import torch
 import torch.distributed as dist
-from tilelang.distributed.common.ipc_ext import _create_ipc_handle, _sync_ipc_handles
-from tilelang.utils.cpp.alloc_cuda import tensor_from_ptr
+from tilelang.distributed import _create_ipc_handle, _sync_ipc_handles
+from alloc_cuda import tensor_from_ptr
 from tilelang.utils.target import parse_device
 import contextlib
 
@@ -125,7 +125,7 @@ class BaseAllocator:
         if rc != 0:
             msg = _libcudart.cudaGetErrorString(rc)
             raise RuntimeError(f"cudaMalloc failed: {rc} {msg.decode() if msg else ''}")
-        self._ptr = self._base_ptr
+        self._ptr.value = self._base_ptr.value
 
     def _free(self):
         if getattr(self, "_base_ptr", None) and self._base_ptr.value:
@@ -166,6 +166,7 @@ class BaseAllocator:
     def _allocate_tensor(self,
                          shape: Tuple[int, ...],
                          dtype: torch.dtype,
+                         return_peers=False,
                          take_ownership: bool = False) -> torch.Tensor:
 
         numel = _prod_shape(shape)
@@ -198,13 +199,23 @@ class BaseAllocator:
 
         t = tensor_from_ptr(cur_ptr_val, shape, dtype_str, self._device, take_ownership)
 
+        if return_peers:
+            peer_ts = []
+            for i in range(self._group.size()):
+                if i == self._local_rank:
+                    peer_ts.append(t)
+                else:
+                    peer_ptr_val = int(self._buffer_ptrs[i]) + current_offset
+                    peer_t = tensor_from_ptr(peer_ptr_val, shape, dtype_str, self._device, False)
+                    peer_ts.append(peer_t)
+
         if take_ownership:
             self._ptr = ctypes.c_void_p(0)
         else:
             new_ptr_val = cur_ptr_val + bytes_alloc
             self._ptr.value = new_ptr_val
 
-        return t
+        return peer_ts if return_peers else t
 
     @property
     def ptr(self) -> int:

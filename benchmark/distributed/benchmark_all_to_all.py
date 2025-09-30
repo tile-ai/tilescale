@@ -1,7 +1,7 @@
 import torch
 import tilelang
 import tilelang.language as T
-from tilelang.distributed.utils import init_distributed, dtype_map
+from tilelang.distributed import init_distributed, dtype_map
 import argparse
 import random
 from triton_dist.kernels.nvidia import fast_all_to_all, all_to_all_post_process

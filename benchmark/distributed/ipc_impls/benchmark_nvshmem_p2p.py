@@ -9,7 +9,7 @@ import tilelang.language as T
 import argparse
 import torch
 import torch.distributed as dist
-from tilelang.distributed.utils import init_distributed, perf_fn
+from tilelang.distributed import init_distributed, perf_fn
 import pynvshmem
 
 os.environ['NCCL_DEBUG'] = 'WARN'

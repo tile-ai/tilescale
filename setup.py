@@ -90,6 +90,12 @@ def get_requirements(file_path: str = "requirements.txt") -> List[str]:
     """Get Python package dependencies from requirements.txt."""
     with open(get_path(file_path)) as f:
         requirements = f.read().strip().split("\n")
+    base_dir = Path(__file__).resolve().parent
+    requirements += [
+        f"alloc_cuda @ file://{(base_dir / 'tilelang' / 'utils' / 'cpp').resolve()}",
+        f"ipc_ext @ file://{(base_dir / 'tilelang' / 'distributed' / 'common').resolve()}",
+    ]
+
     return requirements
 
 
