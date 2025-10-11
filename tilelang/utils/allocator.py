@@ -149,7 +149,7 @@ class BaseAllocator:
         ] * self._group.size()
         local_ipc_handle = _create_ipc_handle(self._base_ptr.value)
         dist.all_gather_object(ipc_handles, local_ipc_handle, self._group)
-        buffer_ptrs = torch.empty(self._group.size(), dtype=torch.uint64)
+        buffer_ptrs = torch.empty(self._group.size(), dtype=torch.uint64, device='cuda')
         _sync_ipc_handles(self._local_rank, device_ids,
                           ctypes.c_void_p(buffer_ptrs.data_ptr()).value, ipc_handles, None)
         buffer_ptrs[self._local_rank] = self._base_ptr.value

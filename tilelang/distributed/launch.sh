@@ -20,8 +20,12 @@ nproc_per_node=${GPUS:=$(nvidia-smi --list-gpus | wc -l)}  # set env var. `GPUS`
 nnodes=${NODES:=1}  # set env var. `NODES` to # of nodes
 node_rank=${NODE_RANK:=0}  # set env var. `NODE_RANK` to the rank of current node
 
-master_addr="127.0.0.1"
-master_port="$(( RANDOM % 100 + 23400 ))"  # randomly choose a port between 23400 and 23499
+master_addr=${ARNOLD_WORKER_0_HOST:="127.0.0.1"}
+if [ -z ${ARNOLD_WORKER_0_PORT} ]; then
+  master_port="8361"
+else
+  master_port=$(echo "$ARNOLD_WORKER_0_PORT" | cut -d "," -f 1)
+fi
 additional_args="--rdzv_endpoint=${master_addr}:${master_port}"
 IB_HCA=mlx5
 
