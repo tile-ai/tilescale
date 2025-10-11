@@ -181,8 +181,8 @@ std::string CodeGenTileLangCUDA::Finish() {
   }
 
   if (use_nvshmem_) {
-    decl_stream << "#include <nvshmem.h>>\n";
-    decl_stream << "#include <nvshmemx.h>>\n";
+    decl_stream << "#include <nvshmem.h>\n";
+    decl_stream << "#include <nvshmemx.h>\n";
   }
 
   if (need_cooperative_groups_) {
