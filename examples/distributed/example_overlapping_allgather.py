@@ -1,22 +1,19 @@
-import argparse
 import torch
 import torch.distributed as dist
 import pynvshmem
 import tilelang
 import tilelang.language as T
 import os
-from tilelang.distributed.utils import init_distributed, dtype_map, perf_fn
-from tilelang.distributed.utils import init_dist
+from tilelang.distributed.utils import init_distributed
 from tilelang.env import env
 from packaging import version
 import importlib.metadata
 
 cuda_python_version = importlib.metadata.version("cuda-python")
 if version.parse(cuda_python_version) >= version.parse("12.8.0"):
-    from cuda.bindings import driver as cuda
     from cuda.bindings import runtime as cudart
 else:
-    from cuda import cuda, cudart
+    from cuda import cudart
 # NODES=2 NODE_RANK=0 ARNOLD_WORKER_0_HOST=ip0 bash tilelang/distributed/launch.sh ./examples/distributed/example_overlapping_allgather.py
 # NODES=2 NODE_RANK=1 ARNOLD_WORKER_0_HOST=ip0 bash tilelang/distributed/launch.sh ./examples/distributed/example_overlapping_allgather.py
 
