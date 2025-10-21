@@ -172,5 +172,10 @@ TIR_DEFINE_TL_BUILTIN(tl_shuffle_elect)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kPure));
 
+TIR_DEFINE_TL_BUILTIN(get_clock)
+    .set_num_inputs(0)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));                        
+
 } // namespace tl
 } // namespace tvm

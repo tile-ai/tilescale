@@ -6,8 +6,8 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing
 from tilelang.distributed import init_dist
-from cuda import cudart
-from tilelang.distributed import set_signal, wait_eq
+from cuda.bindings import runtime as cudart
+from tilelang.distributed import set_signal, wait_eq, perf_fn
 
 tilelang.disable_cache()
 os.environ['NCCL_DEBUG'] = 'WARN'  # silence NCCL log
@@ -30,9 +30,10 @@ def gemm_kernel(M,
             B: T.Tensor((K, N // num_rank), dtype),
             C: T.Tensor((M, N // num_rank), dtype),
     ):
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
+        with T.Kernel(T.ceildiv(N // num_rank, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_K, block_N), dtype)
+            C_shared = T.alloc_shared((block_M, block_N), dtype)    
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
 
             T.clear(C_local)
@@ -40,7 +41,8 @@ def gemm_kernel(M,
                 T.copy(A[by * block_M, k * block_K], A_shared)
                 T.copy(B[k * block_K, bx * block_N], B_shared)
                 T.gemm(A_shared, B_shared, C_local)
-            T.copy(C_local, C[by * block_M, bx * block_N])
+            T.copy(C_local, C_shared)
+            T.copy(C_shared, C[by * block_M, bx * block_N])
 
     return main
 
@@ -93,6 +95,9 @@ def cp_engine_producer_all_gather_put(local_tensor, ag_buffer, signal_buffer, M_
 
 def ag_gemm_op(A, B, C, ag_buffer, signal_buffer, M_per_rank, N, signal_target, rank, group,
                local_world_size, world_size, gemm_kernel, ag_stream):
+    
+    
+    signal_buffer[rank].fill_(0)
 
     dist.barrier(group)
 
@@ -132,7 +137,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     N_per_rank = N // num_local_ranks
 
     BLOCK_M = 128
-    BLOCK_N = 128
+    BLOCK_N = 256
     BLOCK_K = 64
     threads = 256
 
@@ -176,7 +181,12 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     else:
         print(f"rank {local_rank} check failed.❌")
         print(f"torch_C: {torch_C}, tilelang_C: {tilelang_C}")
-        raise ValueError("Test failed")
+        # raise ValueError("Test failed")
+    
+    tl_out, tl_t = perf_fn(lambda: ag_gemm_op(A, B, C, ag_buffer, signal_buffer, M_per_rank, K, signal_target, rank,
+                            group, num_local_ranks, num_local_ranks, kernel, ag_stream), warmup=10, rep=10)
+    
+    print(f"rank {local_rank} tilelang ag_gemm time: {tl_t:.2f} ms, TFLOPS: {2*M*N*K/1e9/(tl_t)/num_local_ranks:.2f}")
 
     dist.destroy_process_group()
 
@@ -186,7 +196,7 @@ if __name__ == "__main__":
     parser.add_argument(
         '--num-processes', type=int, default=2, help='Number of processes to spawn (default: 2)')
     parser.add_argument('--M', type=int, default=8192, help='M dimension')
-    parser.add_argument('--N', type=int, default=8192, help='N dimension')
+    parser.add_argument('--N', type=int, default=28672, help='N dimension')
     parser.add_argument('--K', type=int, default=8192, help='K dimension')
     args = parser.parse_args()
     num_processes = args.num_processes

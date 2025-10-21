@@ -320,6 +320,14 @@ TVM_DLL const Op &tl_gemm_sp();
  */
 TVM_DLL const Op &tl_shuffle_elect();
 
+/*!
+ * \brief tvm intrinsic to get the current clock cycle count.
+ *
+ *  uint64 get_clock()
+ *
+ */
+TVM_DLL const Op &get_clock();
+
 } // namespace tl
 } // namespace tvm
 

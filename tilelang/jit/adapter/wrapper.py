@@ -347,6 +347,8 @@ class TLCUDASourceWrapper(object):
             smem_str = 0 if dynamic_smem_buf is None else dynamic_smem_buf
             init_l2_persistent_map = self.generate_l2_persistent_map(function_name)
             kernel_launch_code += init_l2_persistent_map
+            
+            # kernel_launch_code += "\tfprintf(stderr, \"launch stream=%p\\n\", (void*)stream);\n"
 
             if self.use_cooperative_groups[function_name]:
                 args_list = func_call_args(declaration, function_args, desc_name_map)
@@ -582,7 +584,7 @@ class TLCUDASourceWrapper(object):
         return lib_code
 
     def get_stream_type(self) -> Dict[str, str]:
-        return {"name": "stream=cudaStreamDefault", "type": "cudaStream_t"}
+        return {"name": "stream", "type": "cudaStream_t"}
 
     @property
     def prim_func(self):
@@ -815,7 +817,7 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         return self.lib_code
 
     def get_stream_type(self) -> Dict[str, str]:
-        return {"name": "stream=0", "type": "int"}
+        return {"name": "stream", "type": "int"}
 
 
 class TLHIPSourceWrapper(TLCUDASourceWrapper):
