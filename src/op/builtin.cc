@@ -133,8 +133,10 @@ TIR_DEFINE_TL_BUILTIN(wait_wgmma)
 TIR_DEFINE_TL_BUILTIN(pack_b16).set_num_inputs(2).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));
 
-TIR_DEFINE_TL_BUILTIN(sync_grid).set_num_inputs(0).set_attr<TCallEffectKind>(
-    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
+TIR_DEFINE_TL_BUILTIN(sync_grid_cg)
+    .set_num_inputs(0)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
 
 TIR_DEFINE_TL_BUILTIN(loop_break)
     .set_num_inputs(0)
@@ -171,6 +173,9 @@ TIR_DEFINE_TL_BUILTIN(tl_shuffle_elect)
     .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kPure));
+
+TIR_DEFINE_TL_BUILTIN(get_clock).set_num_inputs(0).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kPure));
 
 } // namespace tl
 } // namespace tvm

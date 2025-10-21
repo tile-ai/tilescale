@@ -335,10 +335,10 @@ def sync_global():
     return evaluate(tir.Call("handle", "tir.tvm_storage_sync", args))
 
 
-def sync_grid():
+def sync_grid_cg():
     """Synchronize all threads in a grid.
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.sync_grid"))
+    return tir.call_intrin("handle", tir.op.Op.get("tl.sync_grid_cg"))
 
 
 def copy_unrolled(dst: PrimExpr, src: PrimExpr, size: int, unroll_factor: int = 4):
@@ -397,6 +397,16 @@ def wait_barrier_gpu(barrier: PrimExpr):
     return tir.call_intrin("handle", tir.op.Op.get("tl.wait_barrier_gpu"), address_of(barrier))
 
 
+def wait_eq(barrier: PrimExpr, expected: PrimExpr):
+    """Wait until *barrier == expected* for GPU-level synchronization.
+
+    Args:
+        barrier: The barrier to wait at
+        expected: The expected value to wait for
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.wait_eq"), address_of(barrier), expected)
+
+
 def sync_barrier_gpu(barrier: PrimExpr):
     """Synchronize at a barrier for GPU-level synchronization.
 
@@ -404,6 +414,15 @@ def sync_barrier_gpu(barrier: PrimExpr):
         barrier: The barrier to synchronize at
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.sync_barrier_gpu"), address_of(barrier))
+
+
+def sync_grid(barrier: PrimExpr):
+    """Synchronize at a barrier for GPU-level synchronization in cooperative group style.
+
+    Args:
+        barrier: The barrier to synchronize at
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.sync_grid"), address_of(barrier))
 
 
 def barrier_all_blocks_sys(barrier: PrimExpr):
@@ -429,3 +448,12 @@ def fence_gpu():
 def fence_sys():
     """Synchronize all threads at the system level (visible in a node)."""
     return tir.call_intrin("handle", tir.op.Op.get("tl.fence_sys"))
+
+
+def get_clock():
+    """Get the current clock cycle count.
+
+    Returns:
+        tir.Call: A handle to the clock cycle count operation
+    """
+    return tir.call_intrin("int64", tir.op.Op.get("tl.get_clock"))

@@ -216,3 +216,9 @@ __device__ void debug_print_buffer_value<fp8_e5_t>(const char *msg,
          msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
          threadIdx.z, buf_name, index, (float)var);
 }
+
+TL_DEVICE uint64_t get_clock() {
+  uint64_t gpu_clock;
+  asm volatile("mov.u64 %0, %%clock64;\n" : "=l"(gpu_clock) : : "memory");
+  return gpu_clock;
+}

@@ -1149,7 +1149,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::pack_b16())) {
     os << "__pack_half2(" << this->PrintExpr(op->args[0]) << ", "
        << this->PrintExpr(op->args[1]) << ")";
-  } else if (op->op.same_as(tl::sync_grid())) {
+  } else if (op->op.same_as(tl::sync_grid_cg())) {
     this->need_cooperative_groups_ = true;
     this->PrintIndent();
     this->stream << "cooperative_groups::grid_group grid = "
@@ -1173,6 +1173,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->PrintIndent();
     this->stream << "tl::sync_barrier_gpu(" << this->PrintExpr(op->args[0])
                  << ");\n";
+  } else if (op->op.same_as(tl::sync_grid())) {
+    this->PrintIndent();
+    this->stream << "tl::sync_grid(" << this->PrintExpr(op->args[0]) << ");\n";
+  } else if (op->op.same_as(tl::wait_eq())) {
+    this->PrintIndent();
+    this->stream << "tl::wait_eq(" << this->PrintExpr(op->args[0]) << ", "
+                 << this->PrintExpr(op->args[1]) << ");\n";
+  } else if (op->op.same_as(tl::get_clock())) {
+    os << "get_clock()";
   } else if (op->op.same_as(tl::loop_break())) {
     this->PrintIndent();
     this->stream << "break;\n";
