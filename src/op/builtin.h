@@ -237,10 +237,10 @@ TVM_DLL const Op &wait_wgmma();
 /*!
  * \brief Synchronize all threads in a grid
  *
- * sync_grid()
+ * sync_grid_cg()
  *
  */
-TVM_DLL const Op &sync_grid();
+TVM_DLL const Op &sync_grid_cg();
 
 /*!
  * \brief tvm intrinsic for loop continue
@@ -319,6 +319,14 @@ TVM_DLL const Op &tl_gemm_sp();
  *  This op is used to represent a shuffle elect operation in tilelang.
  */
 TVM_DLL const Op &tl_shuffle_elect();
+
+/*!
+ * \brief tvm intrinsic to get the current clock cycle count.
+ *
+ *  uint64 get_clock()
+ *
+ */
+TVM_DLL const Op &get_clock();
 
 } // namespace tl
 } // namespace tvm

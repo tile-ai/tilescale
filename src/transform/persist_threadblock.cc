@@ -38,7 +38,7 @@ public:
 
   Stmt VisitStmt_(const EvaluateNode *op) final {
     if (const auto *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(sync_grid())) {
+      if (call->op.same_as(sync_grid_cg())) {
         has_sync_grid_ = true;
       }
     }

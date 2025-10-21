@@ -13,6 +13,7 @@
 #include <tvm/tir/transform.h>
 
 #include "../op/builtin.h"
+#include "../op/sync.h"
 #include "./common/collector.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
@@ -150,7 +151,9 @@ public:
         role = Role::kProducer;
         has_bulk_copy_ = true;
       }
-      if (call->op.same_as(loop_break()))
+      if (call->op.same_as(loop_break()) || call->op.same_as(wait_eq()))
+        role = Role::kBoth;
+      if (call->op.same_as(get_clock()))
         role = Role::kBoth;
     }
     // NOTE(wt): We should have set the role for barrier ops (on device and

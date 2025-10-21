@@ -214,28 +214,19 @@ def dist_print(*args, **kwargs):
             print(*args, **kwargs)
 
 
-def perf_fn(fn: Callable, warmup: int, rep: int):
-    """Benchmark a function `fn` by running it `warmup` times for warm-up and then `rep` times for measurement.
-    Returns the output of the last run and the average time per run in milliseconds.
-    Args:
-        fn (Callable): The function to benchmark.
-        warmup (int): The number of warm-up runs.
-        rep (int): The number of measurement runs.
-    Returns:
-        output: The output of the last run of `fn`.
-        float: The average time per run in milliseconds.
-    """
-    st = torch.cuda.Event(enable_timing=True)
-    ed = torch.cuda.Event(enable_timing=True)
-    for i in range(warmup + rep):
-        if i == warmup:
-            st.record()
+def perf_fn(fn, rep, warmup):
+    start_event = torch.cuda.Event(enable_timing=True)
+    stop_event = torch.cuda.Event(enable_timing=True)
+    for n in range(rep + warmup):
+        if n == warmup:
+            start_event.record()
         output = fn()
-    ed.record()
-    st.wait()
-    ed.wait()
+    stop_event.record()
+    start_event.wait()
+    stop_event.wait()
     torch.cuda.current_stream().synchronize()
-    return output, st.elapsed_time(ed) / rep
+    duration_ms = start_event.elapsed_time(stop_event)
+    return output, duration_ms / rep
 
 
 def CUDA_CHECK(err):
@@ -269,7 +260,7 @@ def set_signal(signal_tensor: torch.Tensor,
                signal: int,
                stream: Optional[torch.cuda.Stream] = None):
     stream = stream or torch.cuda.current_stream()
-    if signal_tensor.dtype == torch.int32:
+    if signal_tensor.dtype in (torch.int32, torch.uint32):
         (err,) = cuda.cuStreamWriteValue32(
             stream.cuda_stream,
             signal_tensor.data_ptr(),

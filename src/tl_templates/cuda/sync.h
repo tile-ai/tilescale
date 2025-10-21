@@ -61,6 +61,12 @@ TL_DEVICE int ld_volatile_global_s32(const int *ptr) {
   return ret;
 }
 
+TL_DEVICE int ld_acquire(const int *ptr) {
+  int ret = 0;
+  asm volatile("ld.global.acquire.gpu.b32 %0, [%1];\n" : "=r"(ret) : "l"(ptr));
+  return ret;
+}
+
 // Initialize a GPU barrier
 template <const uint32_t kExpected>
 TL_DEVICE void init_barrier_gpu(uint32_t *barrier) {
@@ -91,7 +97,8 @@ TL_DEVICE void wait_barrier_gpu(uint32_t *barrier) {
 
 // Synchronize at a GPU barrier (arrive + wait)
 TL_DEVICE void sync_barrier_gpu(uint32_t *barrier) {
-  memory_fence_gpu();
+  // memory_fence_gpu();
+  __syncthreads();
   if (IS_MASTER_THREAD()) {
     atomic_add_release_gpu_u32(barrier, 1);
     uint32_t arrive = ld_acquire_gpu_u32(barrier);
@@ -100,6 +107,46 @@ TL_DEVICE void sync_barrier_gpu(uint32_t *barrier) {
     }
   }
   __syncthreads();
+}
+
+// cooperative groups version of GPU barrier arrive
+TL_DEVICE unsigned int sync_grids_arrive(uint32_t *barrier) {
+  unsigned int oldArrive = 0;
+
+  __syncthreads();
+
+  if (IS_MASTER_THREAD()) {
+    unsigned int expected = gridDim.x * gridDim.y * gridDim.z;
+    unsigned int nb = 1;
+    if (IS_MASTER_BLOCK()) {
+      nb = 0x80000000 - (expected - 1);
+    }
+    asm volatile("atom.add.release.gpu.u32 %0,[%1],%2;"
+                 : "=r"(oldArrive)
+                 : "l"((unsigned int *)barrier), "r"(nb)
+                 : "memory");
+  }
+
+  return oldArrive;
+}
+
+// cooperative groups version of GPU barrier arrive
+TL_DEVICE void sync_grids_wait(unsigned int oldArrive, uint32_t *barrier) {
+  if (IS_MASTER_THREAD()) {
+    unsigned int current_arrive;
+    do {
+      asm volatile("ld.acquire.gpu.u32 %0,[%1];"
+                   : "=r"(current_arrive)
+                   : "l"((unsigned int *)barrier)
+                   : "memory");
+    } while (!(((oldArrive ^ current_arrive) & 0x80000000) != 0));
+  }
+  __syncthreads();
+}
+
+TL_DEVICE void sync_grid(uint32_t *barrier) {
+  unsigned int token = sync_grids_arrive(barrier);
+  sync_grids_wait(token, barrier);
 }
 
 // Synchronize all blocks at a system-level barrier
@@ -112,7 +159,7 @@ TL_DEVICE void barrier_all_blocks_sys(int offset, int rank, int num_ranks) {
 
   memory_fence_sys();
   __syncthreads();
-  
+
   int tid = threadIdx.x;
   if (tid < num_ranks) {
     atomicAdd_system(BARRIER_PTR(rank) + tid, 1);
@@ -129,6 +176,14 @@ TL_DEVICE void barrier_all_blocks_sys(int offset, int rank, int num_ranks) {
   __syncthreads();
 
 #undef BARRIER_PTR
+}
+
+template <typename T> TL_DEVICE void wait_eq(void *barrier, T val = 1) {
+  T *flag_ptr = reinterpret_cast<T *>(barrier);
+// Spin-loop
+#pragma unroll 1
+  while (ld_acquire(flag_ptr) != val) {
+  }
 }
 
 } // namespace tl

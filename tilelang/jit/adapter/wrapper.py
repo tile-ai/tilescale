@@ -582,7 +582,7 @@ class TLCUDASourceWrapper(object):
         return lib_code
 
     def get_stream_type(self) -> Dict[str, str]:
-        return {"name": "stream=cudaStreamDefault", "type": "cudaStream_t"}
+        return {"name": "stream", "type": "cudaStream_t"}
 
     @property
     def prim_func(self):
@@ -815,7 +815,7 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         return self.lib_code
 
     def get_stream_type(self) -> Dict[str, str]:
-        return {"name": "stream=0", "type": "int"}
+        return {"name": "stream", "type": "int"}
 
 
 class TLHIPSourceWrapper(TLCUDASourceWrapper):

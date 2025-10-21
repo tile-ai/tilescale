@@ -39,11 +39,26 @@ TVM_DLL const Op &arrive_barrier_gpu();
 TVM_DLL const Op &wait_barrier_gpu();
 
 /*!
+ * \brief Wait until *addr == expected* for GPU-level synchronization
+ * void wait_eq(barrier, expected)
+ */
+
+TVM_DLL const Op &wait_eq();
+
+/*!
  * \brief Synchronize at a barrier for GPU-level synchronization
  *
  * void sync_barrier_gpu(barrier)
  */
 TVM_DLL const Op &sync_barrier_gpu();
+
+/*!
+ * \brief Synchronize at a barrier for GPU-level synchronization in cooperative
+ * group style
+ *
+ * void sync_grid(barrier)
+ */
+TVM_DLL const Op &sync_grid();
 
 /*!
  * \brief Synchronize all blocks at a system-level barrier
