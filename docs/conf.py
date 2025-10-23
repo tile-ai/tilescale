@@ -5,7 +5,11 @@ copyright = f"2025-2025, {author}"
 
 # Version information.
 with open("../VERSION") as f:
+    version = f.read().strip()
+release = version
+
 extensions = [
+    "sphinx_tabs.tabs",
     "sphinx_toolbox.collapse",
     "sphinxcontrib.httpdomain",
     "sphinx.ext.napoleon",
