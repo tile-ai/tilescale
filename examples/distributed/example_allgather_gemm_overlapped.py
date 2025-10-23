@@ -22,64 +22,24 @@ os.environ['NCCL_DEBUG'] = 'WARN'  # silence NCCL log
 
 
 @tilelang.jit(pass_configs={"tl.disable_warp_specialized": True, "tl.disable_tma_lower": True})
-def copy_and_barrier_all_intra_node_kernel(local_rank,
-                                           rank,
-                                           num_ranks,
-                                           M,
-                                           K,
-                                           block_M,
-                                           block_K,
-                                           threads,
-                                           dtype="float16"):
-
-    M_per_rank = T.ceildiv(M, num_ranks)
-    sm_num = driver.get_num_sms()
-    m_blocks = T.ceildiv(M_per_rank, block_M)
-    k_blocks = T.ceildiv(K, block_K)
-    waves = T.ceildiv(m_blocks * k_blocks, sm_num)
-
-    @T.macro
-    def copy_kernel(src: T.Tensor((M_per_rank, K), dtype), dst: T.Tensor((M, K), dtype),
-                    data_shared: T.Tensor((block_M, block_K), dtype), block_id):
-        for w in T.serial(waves):
-            tile_id = sm_num * w + block_id
-            bx = tile_id % m_blocks
-            by = tile_id // m_blocks
-
-            if by < k_blocks:
-                T.copy(src[bx * block_M, by * block_K], data_shared)
-                T.copy(data_shared, dst[rank * M_per_rank + bx * block_M, by * block_K])
-
-    @T.macro
-    def barrier_all_intra_node_non_atomic(
-            sync_buffer: T.Tensor((3 * num_ranks), "uint32"), block_id):
-        if block_id == 0:
-            T.barrier_all_blocks_sys(sync_buffer)
-        # barrier all CTAs
-        T.sync_grid(sync_buffer[2 * num_ranks])
+def set_signal_kernel(local_rank,
+                    rank,
+                    num_ranks,
+                    threads):
 
     @T.prim_func
-    def local_copy(
-            A: T.Tensor((M_per_rank, K), dtype),
-            ag_buffer: T.Tensor((M, K), dtype),
+    def _set_signal_kernel(
             signal_buffer: T.Tensor((num_ranks), "uint32"),
-            sync_buffer: T.Tensor((3 * num_ranks), "uint32"),
     ):
-        with T.Kernel(sm_num, threads=threads) as (block_id):
-            data_shared = T.alloc_shared((block_M, block_K), dtype)
-            T.annotate_layout({data_shared: tilelang.layout.make_swizzled_layout(data_shared)})
-
-            barrier_all_intra_node_non_atomic(sync_buffer, block_id)
-            copy_kernel(A, ag_buffer, data_shared, block_id)
+        with T.Kernel(1, threads=threads) as (block_id):
             tx = T.get_thread_binding(0)
-            if block_id == 0 and tx < num_ranks:  # set symm barrier
+            if tx < num_ranks:
                 if tx == rank:
                     signal_buffer[tx] = 1
                 else:
                     signal_buffer[tx] = 0
-            barrier_all_intra_node_non_atomic(sync_buffer, block_id)
 
-    return local_copy
+    return _set_signal_kernel
 
 
 @tilelang.jit
@@ -174,12 +134,11 @@ def cp_engine_producer_all_gather_full_mesh_pull(
 
 
 def ag_gemm_op(A, B, C, ag_buffer, signal_buffer, sync_buffer, M_per_rank, N, signal_target, rank,
-               group, local_world_size, world_size, local_copy_kernel, gemm_kernel, gemm_stream,
+               group, local_world_size, world_size, set_signal_kernel, gemm_kernel, gemm_stream,
                ag_stream):
 
     with torch.cuda.stream(gemm_stream):
-        local_copy_kernel(
-            A, ag_buffer[rank], signal_buffer[rank], sync_buffer, stream=gemm_stream.cuda_stream)
+        set_signal_kernel(signal_buffer[rank], stream=gemm_stream.cuda_stream)
 
     ag_stream.wait_stream(gemm_stream)
 
@@ -228,27 +187,23 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         local_rank=local_rank,
         num_local_ranks=num_local_ranks,
         group=group)
-    kernel = gemm_kernel(M, N, K, num_ranks, rank, BLOCK_M, BLOCK_N, BLOCK_K, threads)
-    local_copy_kernel = copy_and_barrier_all_intra_node_kernel(
+    gemm_func = gemm_kernel(M, N, K, num_ranks, rank, BLOCK_M, BLOCK_N, BLOCK_K, threads)
+    set_signal_func = set_signal_kernel(
         local_rank=local_rank,
         rank=local_rank,
         num_ranks=num_ranks,
-        M=M,
-        K=K,
-        block_M=64,
-        block_K=64,
         threads=128,
     )
-    kernel.initialize(allocator=allocator)
-    local_copy_kernel.initialize(allocator=allocator)
+    gemm_func.initialize(allocator=allocator)
+    set_signal_func.initialize(allocator=allocator)
     if local_rank == 1:
-        print(kernel.get_kernel_source())
-        print(local_copy_kernel.get_kernel_source())
+        print(gemm_func.get_kernel_source())
+        print(set_signal_func.get_kernel_source())
 
-    A = tilelang.tensor((M_per_rank, K), dtype, allocator=allocator).normal_()
     B = tilelang.tensor((K, N_per_rank), dtype, allocator=allocator).normal_()
     C = tilelang.tensor((M, N_per_rank), dtype, allocator=allocator)
     ag_buffer = tilelang.tensor((M, K), dtype, allocator=allocator, return_peers=True)
+    A = ag_buffer[local_rank][M_per_rank * local_rank:M_per_rank * (local_rank + 1), :].normal_()
     signal_buffer = tilelang.tensor((num_local_ranks,),
                                     torch.uint32,
                                     allocator=allocator,
@@ -259,10 +214,12 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     gemm_stream = torch.cuda.Stream()
     ag_stream = torch.cuda.Stream(priority=-1)
     signal_target = 1
+    
+    dist.barrier()
 
     tilelang_C = ag_gemm_op(A, B, C, ag_buffer, signal_buffer, sync_buffer, M_per_rank, K,
                             signal_target, rank, group, num_local_ranks, num_local_ranks,
-                            local_copy_kernel, kernel, gemm_stream, ag_stream)
+                            set_signal_func, gemm_func, gemm_stream, ag_stream)
 
     torch_ag_buffer = torch.empty([M, K], dtype=dtype, device="cuda")
     torch_C = torch_ag_gemm(group, A, B, torch_ag_buffer)
@@ -276,7 +233,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     tl_out, tl_t = perf_fn(
         lambda: ag_gemm_op(A, B, C, ag_buffer, signal_buffer, sync_buffer, M_per_rank, K,
                            signal_target, rank, group, num_local_ranks, num_local_ranks,
-                           local_copy_kernel, kernel, gemm_stream, ag_stream),
+                           set_signal_func, gemm_func, gemm_stream, ag_stream),
         warmup=5,
         rep=10)
 
