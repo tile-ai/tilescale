@@ -126,7 +126,7 @@ jobs:
         if [ "${#OTHER_TESTS[@]}" -gt 0 ]; then
           echo "Running non-distributed examples:"
           printf '%s\n' "${OTHER_TESTS[@]}"
-          python -m pytest -n 1 "${OTHER_TESTS[@]}" -v -r fE
+          python -m pytest -n 4 "${OTHER_TESTS[@]}" -v -r fE
         else
           echo "No non-distributed example tests found."
         fi
@@ -152,7 +152,7 @@ jobs:
         if [ "${#OTHER_TESTS[@]}" -gt 0 ]; then
           echo "Running non-distributed tests:"
           printf '%s\n' "${OTHER_TESTS[@]}"
-          python -m pytest -n 1 "${OTHER_TESTS[@]}" -v -r fE
+          python -m pytest -n 4 "${OTHER_TESTS[@]}" -v -r fE
         else
           echo "No non-distributed tests found under testing/python."
         fi
