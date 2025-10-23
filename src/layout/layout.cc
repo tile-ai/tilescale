@@ -115,13 +115,32 @@ Array<PrimExpr> LayoutNode::OutputShape() const {
 Array<PrimExpr> LayoutNode::Forward(const Array<PrimExpr> &vars) const {
   if (vars.empty())
     return forward_index_;
-  ICHECK_EQ(vars.size(), InputDim());
+  ICHECK_GE(vars.size(), InputDim());
+
+  // Take the last InputDim() elements for transformation
+  Array<PrimExpr> transform_vars;
+  for (size_t i = vars.size() - InputDim(); i < vars.size(); i++) {
+    transform_vars.push_back(vars[i]);
+  }
+
   Map<Var, PrimExpr> vmap;
   for (size_t i = 0; i < InputDim(); i++) {
-    vmap.Set(InputPlaceholder(i), vars[i]);
+    vmap.Set(InputPlaceholder(i), transform_vars[i]);
   }
-  return forward_index_.Map(
+
+  Array<PrimExpr> transformed = forward_index_.Map(
       [&](const PrimExpr &e) { return Substitute(e, vmap); });
+
+  // Concatenate with the remaining elements from vars
+  Array<PrimExpr> result;
+  for (size_t i = 0; i < vars.size() - InputDim(); i++) {
+    result.push_back(vars[i]);
+  }
+  for (const auto &expr : transformed) {
+    result.push_back(expr);
+  }
+
+  return result;
 }
 
 Fragment FragmentNode::Repeat(const Array<PrimExpr> &repeats,
@@ -210,11 +229,34 @@ Fragment FragmentNode::BindThreadRange(Range thread_range) const {
   return Fragment(n);
 }
 
-Layout LayoutNode::Inverse() const {
+std::pair<Layout, arith::IterMapLevel> LayoutNode::InverseWithLevel() const {
   arith::Analyzer analyzer;
+  auto collect_symbolic = [&](const Array<PrimExpr> &shape) {
+    Array<PrimExpr> symbolic_dims;
+    for (const auto &dim : shape) {
+      if (!as_const_int(dim)) {
+        symbolic_dims.push_back(dim);
+      }
+    }
+    return symbolic_dims;
+  };
+  Array<PrimExpr> symbolic_dims = collect_symbolic(input_size_);
+  Array<PrimExpr> output_shape = OutputShape();
+  symbolic_dims.insert(symbolic_dims.end(), output_shape.begin(),
+                       output_shape.end());
+  symbolic_dims = collect_symbolic(symbolic_dims);
+  bool is_static_shape = symbolic_dims.empty();
+  auto level = is_static_shape ? arith::IterMapLevel::Bijective
+                               : arith::IterMapLevel::NoCheck;
+  if (!is_static_shape) {
+    // Runtime guards keep dynamic tails safe, so we allow NoCheck here and
+    // warn.
+    LOG(WARNING) << "Layout::Inverse on symbolic layout, falling back to "
+                    "NoCheck; symbolic dims: "
+                 << symbolic_dims;
+  }
   arith::IterMapResult res =
-      arith::DetectIterMap(forward_index_, getVarMap(), 1,
-                           arith::IterMapLevel::Bijective, &analyzer);
+      arith::DetectIterMap(forward_index_, getVarMap(), 1, level, &analyzer);
   ICHECK(res->errors.empty())
       << "Layout " << DebugOutput() << " has errors: " << res->errors;
 
@@ -235,9 +277,13 @@ Layout LayoutNode::Inverse() const {
     }
   }
 
-  return Layout(outputs_shape, backward_index);
+  return {Layout(outputs_shape, backward_index), level};
 }
 
+Layout LayoutNode::Inverse() const {
+  auto inverse_result = InverseWithLevel();
+  return std::move(inverse_result.first);
+}
 PrimExpr infer_fragment_index(const Map<Var, Range> &input_iters,
                               const PrimExpr &forward_thread,
                               arith::Analyzer *analyzer) {
@@ -307,6 +353,13 @@ Fragment::Fragment(Array<PrimExpr> input_size, Array<PrimExpr> forward_index,
   data_ = std::move(n);
 }
 
+// which means the forward_thread is rep_var -> lambda i, rep: rep
+bool FragmentNode::IsCompletedReplicated() const {
+  arith::Analyzer analyzer;
+  return ExprDeepEqual()(analyzer.Simplify(forward_thread_),
+                         ReplicationPlaceholder());
+}
+
 PrimExpr FragmentNode::ThreadExtent() const {
   Array<PrimExpr> ret(OutputDim(), 1);
   arith::Analyzer analyzer;
@@ -340,6 +393,11 @@ PrimExpr FragmentNode::ForwardThread(const Array<PrimExpr> &vars,
 }
 
 Layout FragmentNode::Inverse() const {
+  auto result = InverseWithLevel();
+  return std::move(result.first);
+}
+
+std::pair<Layout, arith::IterMapLevel> FragmentNode::InverseWithLevel() const {
   auto input_size_copy = input_size_;
   input_size_copy.push_back(ReplicateExtent());
   auto forward_index_copy = forward_index_;
@@ -347,8 +405,7 @@ Layout FragmentNode::Inverse() const {
       Substitute(forward_thread_,
                  {{ReplicationPlaceholder(), InputPlaceholder(InputDim())}}));
   auto fwd = Layout(input_size_copy, forward_index_copy);
-  auto bwd = fwd->Inverse();
-  return bwd;
+  return fwd->InverseWithLevel();
 }
 
 Fragment FragmentNode::CondenseReplicateVar() const {
@@ -458,6 +515,11 @@ TVM_FFI_STATIC_INIT_BLOCK({
            [](Layout layout) { return layout->GetForwardIndex(); })
       .def("tl.Layout_forward_vars",
            [](Layout layout) { return layout->GetForwardVars(); })
+      .def("tl.Layout_is_equal",
+           [](Layout layout, Layout other) {
+             const LayoutNode *other_node = other.as<LayoutNode>();
+             return layout->IsEqual(other_node);
+           })
       .def_packed("tl.Fragment",
                   [](PackedArgs args, Any *rv) {
                     *rv = Fragment(
@@ -466,6 +528,11 @@ TVM_FFI_STATIC_INIT_BLOCK({
                         /*forward_thread=*/args[2].cast<PrimExpr>(),
                         /*thread_replicate=*/args[3].cast<IterVar>());
                   })
+      .def("tl.Fragment_is_equal",
+           [](Fragment fragment, Fragment other) {
+             const FragmentNode *other_node = other.as<FragmentNode>();
+             return fragment->IsEqual(other_node);
+           })
       .def("tl.Fragment_thread_size",
            [](Fragment fragment) { return fragment->ThreadExtent(); })
       .def("tl.Fragment_thread",
@@ -483,10 +550,38 @@ TVM_FFI_STATIC_INIT_BLOCK({
       .def("tl.Fragment_condense_rep_var",
            [](Fragment fragment) { return fragment->CondenseReplicateVar(); })
       .def("tl.make_swizzled_layout",
+           [](int stride, int continuous, int element_size, bool k_inner,
+              bool allow_pad = true) {
+             if (allow_pad) {
+               return makeGemmABLayout(stride, continuous, continuous,
+                                       element_size, k_inner);
+             } else {
+               return makeGemmABLayoutHopper(stride, continuous, continuous,
+                                             element_size, k_inner);
+             }
+           })
+      .def("tl.make_wgmma_swizzled_layout",
+           [](int stride, int mat_continuous, int continuity, int element_size,
+              bool k_inner) {
+             return makeGemmABLayoutHopper(stride, mat_continuous, continuity,
+                                           element_size, k_inner);
+           })
+      .def("tl.make_full_bank_swizzled_layout",
            [](int stride, int continuous, int element_size) {
-             return makeGemmABLayout(stride, continuous, continuous,
-                                     element_size, 0);
-           });
+             return makeFullBankSwizzleLayout(stride, continuous, element_size);
+           })
+      .def("tl.make_half_bank_swizzled_layout",
+           [](int stride, int continuous, int element_size) {
+             return makeHalfBankSwizzleLayout(stride, continuous, element_size);
+           })
+      .def("tl.make_quarter_bank_swizzled_layout",
+           [](int stride, int continuous, int element_size) {
+             return makeQuarterBankSwizzleLayout(stride, continuous,
+                                                 element_size);
+           })
+      .def("tl.make_linear_layout", [](int stride, int continuous) {
+        return makeGemmLayoutLinear(stride, continuous);
+      });
 });
 
 TVM_FFI_STATIC_INIT_BLOCK({

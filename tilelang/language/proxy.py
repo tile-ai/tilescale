@@ -1,7 +1,7 @@
 """The language interface for tl programs."""
 
 from __future__ import annotations
-from typing import Any, Optional, Sequence, SupportsIndex, TYPE_CHECKING, Tuple, Union
+from typing import Any, Sequence, SupportsIndex, TYPE_CHECKING
 from typing_extensions import Self
 
 from tvm import tir
@@ -70,7 +70,7 @@ class BufferProxy:
 
 class BaseTensorProxy:
     """Base proxy class for tensor types with configurable defaults.
-    
+
     This class serves as a foundation for different tensor proxy types, providing
     customizable default values for scope, alignment, and offset factors. It implements
     the core functionality for creating TIR buffers with specific memory configurations.
@@ -137,13 +137,13 @@ class BaseTensorProxy:
 
 class TensorProxy(BaseTensorProxy):
     """Main tensor proxy class for global scope buffers.
-    
+
     This class implements the default tensor proxy with global memory scope,
     the tensor should be by default contiguous.
     """
 
     @staticmethod
-    def _construct_strides(shape: Tuple[Any]):
+    def _construct_strides(shape: tuple[Any]):
         s, strides = 1, [1]
         for dim in shape[:0:-1]:
             s *= dim
@@ -151,10 +151,10 @@ class TensorProxy(BaseTensorProxy):
         return tuple(reversed(strides))
 
     def __call__(self,
-                 shape: Union[Tuple[Any], PrimExpr, int],
+                 shape: tuple[Any] | PrimExpr | int,
                  dtype: str = "float32",
                  data=None,
-                 buffer_type="") -> tir.Buffer:
+                 scope=None) -> tir.Buffer:
         if isinstance(shape, (int, PrimExpr)):
             shape = (shape,)
         return super().__call__(
@@ -162,7 +162,7 @@ class TensorProxy(BaseTensorProxy):
             dtype=dtype,
             strides=TensorProxy._construct_strides(shape),
             data=data,
-            buffer_type=buffer_type)
+            scope=scope)
 
 
 class StridedTensorProxy(BaseTensorProxy):
@@ -172,20 +172,18 @@ class StridedTensorProxy(BaseTensorProxy):
     """
 
     def __call__(self,
-                 shape: Tuple[Any],
-                 strides: Tuple[Any],
-                 dtype: str = "float32") -> tir.Buffer:
+                 shape: tuple[Any],
+                 strides: tuple[Any],
+                 dtype: str = "float32",
+                 scope=None) -> tir.Buffer:
         if len(shape) != len(strides):
             raise ValueError("Invalid shape/strides' dimensions")
-        if not bool(strides[-1] == 1):
-            # TODO(chenggang): shall we support non-contiguous even for the last dimension?
-            raise ValueError("The stride of the last dimension must be 1 (contiguous)")
-        return super().__call__(shape, dtype=dtype, strides=strides)
+        return super().__call__(shape, dtype=dtype, strides=strides, scope=scope)
 
 
 class FragmentBufferProxy(BaseTensorProxy):
     """Proxy class for fragment memory buffers.
-    
+
     This class represents tensor proxies specifically for local fragment memory,
     typically used in GPU tensor core operations.
     """
@@ -194,7 +192,7 @@ class FragmentBufferProxy(BaseTensorProxy):
 
 class SharedBufferProxy(BaseTensorProxy):
     """Proxy class for shared memory buffers.
-    
+
     This class represents tensor proxies for dynamic shared memory,
     commonly used in GPU shared memory operations.
     """
@@ -203,7 +201,7 @@ class SharedBufferProxy(BaseTensorProxy):
 
 class LocalBufferProxy(BaseTensorProxy):
     """Proxy class for local memory buffers.
-    
+
     This class represents tensor proxies for local memory scope,
     typically used for temporary computations in GPU kernels.
     """
@@ -272,7 +270,7 @@ else:
     LocalBuffer = LocalBufferProxy()  # pylint: disable=invalid-name
 
 
-def ptr(dtype: Optional[str] = None,
+def ptr(dtype: str | None = None,
         storage_scope: str = "global",
         *,
         is_size_var: bool = False) -> Var:

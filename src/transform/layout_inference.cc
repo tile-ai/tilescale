@@ -14,12 +14,16 @@
 #include <queue>
 
 #include "../layout/utils.h"
+#include "../op/copy.h"
 #include "../op/parallel.h"
+#include "../op/region.h"
+
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
 #include "common/loop_fusion_utils.h"
 #include "common/loop_parallel_transform_utils.h"
 #include "common/union_find.h"
+#include "layout_reducer.h"
 #include "loop_partition.h"
 #include "loop_vectorize.h"
 #include "runtime/thread_storage_scope.h"
@@ -62,6 +66,8 @@ public:
   BufferUseDefCollector(bool skip_thread_partition)
       : skip_thread_partition_(skip_thread_partition) {}
 
+  using arith::IRVisitorWithAnalyzer::IRVisitorWithAnalyzer;
+
   void RunInferStep(int cur_infer_id, InferLevel level, bool update_queue,
                     LayoutMap &layout_map, const LayoutMap &strict_layout_map,
                     std::queue<int> &q, std::vector<bool> &in_queue) {
@@ -78,9 +84,10 @@ public:
     auto &next = infer_list_[cur_infer_id];
     auto iter_var = thread_var_vec_[cur_infer_id];
     auto thread_bounds = thread_bounds_vec_[cur_infer_id];
+    auto buffer_oob = buffer_oob_vec_[cur_infer_id];
     // Double-check that 'next' is valid
-    ICHECK(next != nullptr)
-        << "infer_list_[" << cur_infer_id << "] is null inside run_infer_step.";
+    ICHECK(next.defined()) << "infer_list_[" << cur_infer_id
+                           << "] is null inside run_infer_step.";
 
     // Check iter_var->dom and dom->extent
     ICHECK(iter_var.defined())
@@ -98,10 +105,16 @@ public:
            "required for layout inference.";
 
     // Run InferLayout
-    auto updates = next->InferLayout(
-        LayoutInferArgs{target_, thread_bounds, layout_map}, level);
+    DLOG(INFO) << "[RunInferStep] working on " << cur_infer_id << '\n';
+    auto updates =
+        next->InferLayout(LayoutInferArgs{target_, thread_bounds, layout_map,
+                                          &analyzer_, buffer_oob},
+                          level);
     // Process the returned updates
     for (const auto &[buffer, layout] : updates) {
+      DLOG(INFO) << "    consider update " << buffer << " as "
+                 << layout->DebugOutput() << '\n';
+
       // Basic validity checks
       ICHECK(buffer.defined()) << "InferLayout returned an undefined buffer.";
       ICHECK(layout.defined()) << "InferLayout returned an undefined layout.";
@@ -112,9 +125,19 @@ public:
             level != InferLevel::kStrict && !strict_layout_map.count(buffer)) {
           // Actually this test has been done in ParallelOp::InferLayout
           // already. Just do it again to avoid missing implementations in other
-          // `Operator`s.
-          auto dst_layout = layout.as<Fragment>().value();
-          auto src_layout = layout_map[buffer].as<Fragment>().value();
+          // `TileOperator`s.
+
+          auto dst_layout_opt = layout.as<Fragment>();
+          ICHECK(dst_layout_opt.has_value())
+              << "Failed to cast layout to Fragment for buffer " << buffer
+              << ", layout type is " << layout->GetTypeKey();
+          const auto &dst_layout = dst_layout_opt.value();
+          auto src_layout_opt = layout_map[buffer].as<Fragment>();
+          ICHECK(src_layout_opt.has_value())
+              << "Failed to cast layout_map[buffer] to Fragment for buffer "
+              << buffer << ", layout type is "
+              << layout_map[buffer]->GetTypeKey();
+          const auto &src_layout = src_layout_opt.value();
           ICHECK(dst_layout->InputDim() == src_layout->InputDim());
           Array<PrimExpr> indices;
           indices.reserve(dst_layout->InputDim());
@@ -130,17 +153,20 @@ public:
           if (ProveFragmentContains(src_layout, dst_layout, indices, indices,
                                     inner_analyzer)) {
             layout_map.Set(buffer, layout);
+            DLOG(INFO) << "    layout broadcast from "
+                       << src_layout->DebugOutput() << ", accepted" << '\n';
             continue;
           }
         }
         // If already in map, ensure they are structurally equal
-        ICHECK(StructuralEqual()(layout, layout_map[buffer]))
+        ICHECK(layout->IsEqual(layout_map[buffer].get()))
             << "Get different layout for " << buffer
             << "\n current layout: " << layout->DebugOutput()
             << "\n previous layout: " << layout_map[buffer]->DebugOutput();
       } else {
         // Otherwise, update map
         layout_map.Set(buffer, layout);
+        DLOG(INFO) << "    new layout accepted" << '\n';
         if (!update_queue)
           continue;
 
@@ -196,6 +222,14 @@ public:
     ICHECK_EQ(thread_bounds_vec_.size(), infer_list_.size())
         << "Size mismatch: thread_bounds_vec_ and infer_list_ must match in "
            "length.";
+    ICHECK_EQ(buffer_oob_vec_.size(), infer_list_.size())
+        << "Size mismatch: buffer_oob_vec_ and infer_list_ must match in "
+           "length.";
+
+    DLOG(INFO) << "[InferLayout] all participating operators:" << '\n';
+    for (int i = 0; i < infer_list_stmt_.size(); ++i) {
+      DLOG(INFO) << "    op " << i << ":" << infer_list_stmt_[i] << '\n';
+    }
 
     // If needed, you can also check that annotated_layout_map_ is not empty, or
     // anything else relevant to your setup.
@@ -210,7 +244,7 @@ public:
     std::vector<bool> in_queue(num_infer, true);
     for (int i = 0; i < num_infer; i++) {
       // Check that each infer_list_ entry is valid
-      ICHECK(infer_list_[i] != nullptr)
+      ICHECK(infer_list_[i].defined())
           << "infer_list_[" << i
           << "] is null. The inference object is not allocated properly.";
 
@@ -253,13 +287,13 @@ public:
     ICHECK(infer_list_.size() == thread_var_vec_.size())
         << "infer_list_ and thread_var_vec_ size mismatch";
     for (int i = 0; i < infer_list_.size(); i++) {
-      std::unique_ptr<Operator> base_infer = std::move(infer_list_[i]);
+      TileOperator base_infer = std::move(infer_list_[i]);
       auto thread_var = thread_var_vec_[i];
 
       // Check if base_infer is valid
-      ICHECK(base_infer != nullptr) << "Null pointer encountered in "
-                                       "infer_list_ while collecting for_map.";
-      if (auto for_infer = dynamic_cast<ParallelOp *>(base_infer.get())) {
+      ICHECK(base_infer.defined()) << "Null pointer encountered in "
+                                      "infer_list_ while collecting for_map.";
+      if (auto for_infer = base_infer.as<ParallelOpNode>()) {
         // Check that the loop layout is defined
         ICHECK(for_infer->GetLoopLayout().defined())
             << "The Layout for Parallel for cannot be inferred correctly:\n"
@@ -297,14 +331,13 @@ private:
       return;
 
     auto p = ParseOperator(GetRef<Call>(op), buffer_data_to_buffer_);
-    if (p != nullptr) {
+    if (p.defined()) {
       for (const auto &arg : op->args) {
         if (auto buffer = getBufferFromAccessPtr(arg)) {
           addToUseList(buffer.value());
         }
       }
-      infer_list_stmt_.push_back(GetRef<ObjectRef>(op));
-      infer_list_.push_back(std::move(p));
+      // Compute thread_var_ and thread_bounds_
       thread_var_vec_.push_back(thread_var_);
       if (analyzer_.const_int_bound.IsBound(thread_var_->var)) {
         auto const_int_bound = analyzer_.const_int_bound(thread_var_);
@@ -317,6 +350,39 @@ private:
       } else {
         thread_bounds_vec_.push_back(Range::FromMinExtent(0, 1));
       }
+
+      // Compute buffer oob for each buffer in the op
+      if (const auto *copy = p.as<CopyNode>()) {
+        auto src_tensor = copy->src;
+        auto dst_tensor = copy->dst;
+        auto src_range = copy->src_range;
+        auto dst_range = copy->dst_range;
+        bool src_oob = false;
+        bool dst_oob = false;
+        for (size_t i = 0; i < src_range.size(); i++) {
+          if (!analyzer_.CanProve(src_range[i]->min + src_range[i]->extent <=
+                                      src_tensor->shape[i],
+                                  arith::ProofStrength::kSymbolicBound)) {
+            src_oob = true;
+            break;
+          }
+        }
+        for (size_t i = 0; i < dst_range.size(); i++) {
+          if (!analyzer_.CanProve(dst_range[i]->min + dst_range[i]->extent <=
+                                      dst_tensor->shape[i],
+                                  arith::ProofStrength::kSymbolicBound)) {
+            dst_oob = true;
+            break;
+          }
+        }
+        buffer_oob_vec_.push_back(src_oob || dst_oob);
+      } else {
+        buffer_oob_vec_.push_back(false);
+      }
+
+      // Add the tile operator to infer_list_
+      infer_list_stmt_.push_back(GetRef<ObjectRef>(op));
+      infer_list_.push_back(std::move(p));
     }
   }
 
@@ -326,7 +392,13 @@ private:
       return std::nullopt;
     }
     if (call->op.same_as(builtin::tvm_access_ptr())) {
-      auto var = call->args[1].as<Var>().value();
+      auto var_opt = call->args[1].as<Var>();
+      if (!var_opt.has_value()) {
+        DLOG(WARNING) << "[getBufferFromAccessPtr] args[1] is not a Var, type: "
+                      << call->args[1]->GetTypeKey();
+        return std::nullopt;
+      }
+      const auto &var = var_opt.value();
       return buffer_data_to_buffer_[var];
     } else if (call->op.same_as(RegionOp::Get())) {
       return call->args[0].as<BufferLoadNode>()->buffer;
@@ -344,7 +416,7 @@ private:
 
   void VisitStmt_(const ForNode *op) final {
     if (op->kind == ForKind::kParallel) {
-      auto infer = std::make_unique<ParallelOp>(GetRef<For>(op));
+      auto infer = ParallelOp(GetRef<For>(op));
       for (const auto &[buffer, _] : infer->GetIndiceMap()) {
         addToUseList(buffer);
       }
@@ -362,6 +434,7 @@ private:
       } else {
         thread_bounds_vec_.push_back(Range::FromMinExtent(0, 1));
       }
+      buffer_oob_vec_.push_back(false);
     } else {
       IRVisitorWithAnalyzer::VisitStmt(op->body);
     }
@@ -399,7 +472,7 @@ private:
 
   Map<Var, Buffer> buffer_data_to_buffer_;
   std::vector<ObjectRef> infer_list_stmt_;
-  std::vector<std::unique_ptr<Operator>> infer_list_;
+  std::vector<TileOperator> infer_list_;
   std::unordered_map<Buffer, std::vector<int>, ObjectPtrHash, ObjectPtrEqual>
       use_list_;
   // This is a workaround for cpu backend,
@@ -408,12 +481,13 @@ private:
                                 IterVarType::kDataPar);
   std::vector<IterVar> thread_var_vec_;
   std::vector<Range> thread_bounds_vec_;
+  std::vector<bool> buffer_oob_vec_;
   Target target_;
   LayoutMap annotated_layout_map_;
   bool skip_thread_partition_{false};
 
-  std::vector<std::unique_ptr<Operator>> BackupInferList() {
-    std::vector<std::unique_ptr<Operator>> back_infer_list;
+  std::vector<TileOperator> BackupInferList() {
+    std::vector<TileOperator> back_infer_list;
     back_infer_list.reserve(infer_list_.size());
     for (auto &&p : infer_list_) {
       back_infer_list.push_back(p->Clone());
@@ -423,6 +497,13 @@ private:
 
   void InferInFreeMode(LayoutMap &layout_map,
                        const LayoutMap &strict_layout_map) {
+
+    DLOG(INFO) << "Enforced layout maps:" << '\n';
+    for (auto &&[k, v] : layout_map) {
+      DLOG(INFO) << "    " << k << ": " << v->DebugOutput() << '\n';
+    }
+    DLOG(INFO) << '\n';
+
     // Group operators into connected components
     UnionFind<int> uf;
     for (int i = 0; i < infer_list_.size(); i++) {
@@ -443,63 +524,68 @@ private:
       int root = uf.Find(i);
       components[root].push_back(i);
     }
+    // Create a map from root to buffers
     std::unordered_map<int, std::vector<Buffer>> components_buffers;
     for (const auto &[buffer, infer_indices] : use_list_) {
       int root = uf.Find(infer_indices[0]);
       components_buffers[root].push_back(buffer);
     }
+    // Keep components_buffers for debug purpose
+    (void)components_buffers;
 
     // For each component, try each op as root, and determine the least
     // replicated one
     std::queue<int> q;
     std::vector<bool> in_queue(infer_list_.size(), false);
+
     for (auto &&[root, members] : components) {
+      DLOG(INFO) << "======================= processing component " << root
+                 << '\n';
       decltype(infer_list_) best_infer_list;
       LayoutMap best_layout_map;
       int64_t min_reg_num = INT64_MAX;
+      int min_reg_num_infer_root = -1;
+
+      // Try each member as the root of inference for this component
       for (int attempt_infer_root : members) {
-        // backup infer_list_ in class member
+        DLOG(INFO) << "----------------------- try root " << attempt_infer_root
+                   << '\n';
+        // Backup the current infer_list_ state
         auto back_infer_list = BackupInferList();
-        // create temporarily used layout_map, new handle so that it copies on
-        // write
+        // Copy the current layout_map for temporary use
         LayoutMap tmp_layout_map = layout_map;
-        // infer from attempt_infer_root in free mode
         bool do_update = true;
         try {
+          // Run inference starting from attempt_infer_root
           RunInferStep(attempt_infer_root, InferLevel::kFree, true,
                        tmp_layout_map, strict_layout_map, q, in_queue);
           FinishInferQueue(InferLevel::kFree, tmp_layout_map, strict_layout_map,
                            q, in_queue);
 
-          // Silly workaround: we have no clue if single root will iterate over
-          // the entire component, since the InferLayout implementations have
-          // complicated conditioning inside and we know nothing about it.
-          // This would constantly result in incomplete layouts for buffers in
-          // this component. Instead of trying all combinations of root
-          // selection order, we simply go through all other loops in order
-          // after the first search from attempt_infer_root.
+          // After the first search, run inference for all other members in
+          // order
           for (int other_infer_root : members) {
             if (other_infer_root != attempt_infer_root) {
               RunInferStep(other_infer_root, InferLevel::kFree, true,
                            tmp_layout_map, strict_layout_map, q, in_queue);
-              // must also be kFree here to avoid conflicts.
               FinishInferQueue(InferLevel::kFree, tmp_layout_map,
                                strict_layout_map, q, in_queue);
             }
           }
-        } catch (LayoutConflictException e) {
-          // such an order fails, try others
+        } catch (const LayoutConflictException &e) {
           do_update = false;
-        } catch (NormalizeIterException e) {
-          // such an order encounters iterators that is not normalizable, try
-          // others e.g. i * 576 % 2048
+          DLOG(INFO) << "attempt failed due to LayoutConflictException "
+                     << e.what() << '\n';
+        } catch (const NormalizeIterException &e) {
           do_update = false;
+          DLOG(INFO) << "attempt failed due to NormalizeIterException "
+                     << e.what() << '\n';
         }
 
         if (do_update) {
-          // compute total register number
+          // Compute the total register number for this layout
           int64_t reg_num = 0;
-          for (auto &&[buffer, layout] : tmp_layout_map) {
+          for (const auto &[buffer, layout] : tmp_layout_map) {
             if (auto frag = layout.as<Fragment>()) {
               int64_t frag_reg_num = 1;
               for (auto i : frag.value()->OutputShape()) {
@@ -510,21 +596,24 @@ private:
               reg_num += frag_reg_num;
             }
           }
-          // if it's any better, update the best_* storage
+          // Update the best plan if this one uses fewer registers
           if (reg_num < min_reg_num) {
-            best_infer_list = std::move(infer_list_);
+            best_infer_list =
+                BackupInferList(); // Use backup to avoid moving out infer_list_
             best_layout_map = tmp_layout_map;
             min_reg_num = reg_num;
+            min_reg_num_infer_root = attempt_infer_root;
           }
         }
-        // recover stateful infer_list_, head on next
+        // Restore infer_list_ state for the next attempt
         infer_list_ = std::move(back_infer_list);
       }
-      if (min_reg_num < INT64_MAX) {
-        // now apply the best plan for this component
-        infer_list_ = std::move(best_infer_list);
-        layout_map = best_layout_map;
-      }
+      ICHECK(min_reg_num < INT64_MAX) << "no available layout found" << '\n';
+      // Apply the best plan for this component
+      infer_list_ = std::move(best_infer_list);
+      layout_map = best_layout_map;
+      DLOG(INFO) << "[InferInFreeMode] Final selection is attempt_infer_root = "
+                 << min_reg_num_infer_root << '\n';
     }
   }
 };
@@ -544,11 +633,27 @@ public:
   }
 
 private:
-  LayoutInferencer(const LayoutInferenceResult result,
+  LayoutInferencer(const LayoutInferenceResult &result,
                    bool skip_thread_partition, arith::Analyzer *analyzer)
       : arith::IRMutatorWithAnalyzer(analyzer), result_(result),
-        skip_thread_partition_(skip_thread_partition){};
+        skip_thread_partition_(skip_thread_partition) {};
 
+  using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
+
+  /**
+   * @brief Visit and mutate a Block node to attach inferred layout information.
+   *
+   * Converts the visited Block via the base visitor, asserts that every buffer
+   * allocated with scope "local.framgent" has an inferred layout in
+   * result_.layout_map, and attaches result_.layout_map to the Block's
+   * annotations under attr::kLayoutMap.
+   *
+   * If any "local.framgent" buffer lacks an entry in result_.layout_map an
+   * ICHECK will fail with the offending buffer printed.
+   *
+   * @return Stmt The (possibly modified) Block statement with the layout-map
+   * annotation set.
+   */
   Stmt VisitStmt_(const BlockNode *op) final {
     Block block = Downcast<Block>(IRMutatorWithAnalyzer::VisitStmt_(op));
 
@@ -563,7 +668,48 @@ private:
     return block;
   }
 
+  /**
+   * @brief Visit and transform For nodes according to inferred layout
+   * information.
+   *
+   * If the For node is present in result_.for_map, this method applies
+   * loop-level layout-driven transformations: it optionally partitions the loop
+   * across the thread index, vectorizes the loop body, and wraps the loop with
+   * a predicate if one was inferred for the loop root.
+   *
+   * Detailed behavior:
+   * - Reads reducer information from the For node's attr::kReducerInfo
+   * annotation (if present) to detect reduction targets.
+   * - Detects register-local buffer stores (buffers with scope "local") in the
+   *   original loop body; if only register-local stores are present the loop is
+   *   treated as a register-local scenario and is not partitioned across
+   * threads.
+   * - Obtains the loop layout from result_.for_map[root] and, unless the loop
+   * is register-local or skip_thread_partition_ is set, partitions the loop via
+   *   PartitionLoop using thread_var_ and analyzer_.
+   * - Scans the transformed loop body to determine whether it accesses any
+   *   non-local buffers (scopes other than "local" or "local.fragment").
+   * - Scans the transformed loop body to detect reducers (based on
+   * reducer_info). If a reducer is present the loop is NOT vectorized
+   * (reduction axes are excluded from vectorization as a conservative
+   * workaround).
+   * - If the loop has non-local accesses and no reducer, the loop is vectorized
+   *   via VectorizeLoop.
+   * - If a predicate exists in result_.predicate_map for the loop root and the
+   *   loop was partitioned, the method returns an IfThenElse surrounding the
+   *   (possibly partitioned/vectorized) loop with that predicate; otherwise it
+   *   returns the transformed For.
+   *
+   * @return The possibly transformed For statement (or an IfThenElse wrapping
+   * it)
+   */
   Stmt VisitStmt_(const ForNode *op) final {
+    Map<Var, ReducerInfo> reducer_info;
+    if (op->annotations.count(attr::kReducerInfo))
+      reducer_info = op->annotations.Get(attr::kReducerInfo)
+                         ->as<Map<Var, ReducerInfo>>()
+                         .value();
+
     For for_node = Downcast<For>(IRMutatorWithAnalyzer::VisitStmt_(op));
     if (result_.for_map.count(GetRef<For>(op))) {
       auto root = GetRef<For>(op);
@@ -573,21 +719,44 @@ private:
       //     A_local[i] = A_global[i]
       // Here, A_local is a register-local buffer held independently by each
       // thread, so explicit thread binding is not required.
-      //
-      // We use PostOrderVisit to detect whether the buffer store targets a
-      // "local" buffer, which indicates register usage and justifies skipping
-      // thread binding.
-      bool is_register_store = false;
+      bool store_into_local = false;
       PostOrderVisit(root, [&](const ObjectRef &obj) {
         if (const auto *store = obj.as<BufferStoreNode>()) {
           if (store->buffer.scope() == "local") {
-            is_register_store = true;
+            store_into_local = true;
+          }
+          // if the case is like:
+          // for i in T.Parallel(1024):
+          //     A_local[i] = B_global[i]
+          //     A_frag[i] = A_global[i]
+          // exception will be raise in Parallel::LayoutInference
+        }
+      });
+      // This check if for the loop that only manuplates "local" buffers,
+      // for i in T.Parallel(1024):
+      //     A_local[i] = B_local[i]
+      // Though this might be illegal
+      // We use PostOrderVisit to detect whether the loop only manuplates
+      // "local" buffers, which indicates register usage and justifies skipping
+      // thread binding.
+      bool local_register_only = true;
+      PostOrderVisit(root, [&](const ObjectRef &obj) {
+        if (const auto *store = obj.as<BufferStoreNode>()) {
+          if (store->buffer.scope() != "local") {
+            local_register_only = false;
+          }
+        } else if (const auto *load = obj.as<BufferLoadNode>()) {
+          if (load->buffer.scope() != "local") {
+            local_register_only = false;
           }
         }
       });
 
       auto loop_layout = result_.for_map[root];
-      bool parallel_loop = !is_register_store && !skip_thread_partition_;
+      // FIXME: tell in-Parallel and out-of-Parallel `local`s apart
+      // NOTE(lei): a bit ugly, we should rethink about this part in future.
+      bool parallel_loop =
+          !skip_thread_partition_ && !local_register_only && !store_into_local;
 
       if (parallel_loop) {
         for_node =
@@ -608,8 +777,17 @@ private:
           }
         }
       });
+      // Workaround: if reducer is presented, don't vectorize loop
+      // Best solution should be isolate reduction axis out of vectorization
+      bool has_reducer = false;
+      PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
+        if (!has_reducer)
+          if (const auto *store = obj.as<BufferStoreNode>()) {
+            has_reducer = reducer_info.count(store->buffer->data) != 0;
+          }
+      });
 
-      if (has_non_local) {
+      if (has_non_local && !has_reducer) {
         for_node = VectorizeLoop(for_node);
       }
 
@@ -642,11 +820,11 @@ private:
 
 tvm::transform::Pass LayoutInference() {
   using namespace tir::transform;
-  auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     f.CopyOnWrite()->body = ParallelLoopTransformer::Substitute(f->body);
     ThreadBindingCollector collector;
     collector(f->body);
-    bool has_thread_binding = collector.thread_binding_.size() > 0;
+    bool has_thread_binding = !collector.thread_binding_.empty();
     bool skip_thread_partition = !has_thread_binding;
     return LayoutInferencer::Substitute(std::move(f), skip_thread_partition);
   };

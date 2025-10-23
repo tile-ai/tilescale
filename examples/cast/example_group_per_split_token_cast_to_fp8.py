@@ -29,7 +29,7 @@ def group_per_split_token_cast_to_fp8(M, M_max, N, BG, blk_m):
             y_s_local = T.alloc_fragment((blk_m,), accum_dtype)
             y_q_local = T.alloc_fragment((blk_m, group_size), accum_dtype)
             y_q_local_fp8 = T.alloc_fragment((blk_m, group_size), "float8_e4m3")
-            row_offset = T.alloc_local((1,), "int32")
+            row_offset = T.alloc_fragment((1,), "int32")
 
             T.annotate_layout({
                 y_local:
@@ -161,8 +161,7 @@ def ref_program(x: torch.Tensor, batch_sizes: torch.Tensor) -> \
     return x_fp8
 
 
-def main():
-    M, N, BG, blk_m = 8192, 8192, 2, 8
+def main(M=8192, N=8192, BG=2, blk_m=8):
     if dtype == "float":
         x = torch.randn(M, N, device="cuda", dtype=torch.float32)
     elif dtype == "float16":

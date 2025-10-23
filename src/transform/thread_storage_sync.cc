@@ -30,7 +30,9 @@
 
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
+#include "../op/builtin.h"
 #include "./common/thread_sync_types.h"
 #include "./storage_access.h"
 #include "arith/ir_mutator_with_analyzer.h"
@@ -46,7 +48,7 @@ using arith::IRMutatorWithAnalyzer;
 class TileLangThreadSyncPlanner : public TileLangStorageAccessVisitor {
 public:
   explicit TileLangThreadSyncPlanner(StorageScope sync_scope)
-      : sync_scope_(sync_scope) {}
+      : sync_scope_(std::move(sync_scope)) {}
 
   // The syncs inserted before each statement
   std::unordered_set<const Object *> syncs_inserted_;
@@ -404,7 +406,7 @@ private:
 class ThreadSyncAfterWaitQueueInserter : public StmtExprMutator {
 public:
   explicit ThreadSyncAfterWaitQueueInserter(StorageScope sync_scope)
-      : sync_scope_(sync_scope) {}
+      : sync_scope_(std::move(sync_scope)) {}
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
     if (op->attr_key == tvm::tir::attr::async_wait_queue_scope) {
@@ -430,10 +432,10 @@ class ThreadSyncInserter : public StmtExprMutator {
 public:
   ThreadSyncInserter(StorageScope sync_scope,
                      const std::unordered_set<const Object *> &syncs)
-      : sync_scope_(sync_scope), syncs_(syncs) {}
+      : sync_scope_(std::move(sync_scope)), syncs_(syncs) {}
 
   Stmt VisitStmt(const Stmt &stmt) final {
-    if (syncs_.size() == 0)
+    if (syncs_.empty())
       return stmt;
     if (syncs_.count(stmt.get())) {
       Stmt barrier;
@@ -535,7 +537,7 @@ private:
 
   // Get current storage scope.
   StorageScope GetScope(Var buffer_var) const {
-    return StorageScope::Create(GetPtrStorageScope(buffer_var));
+    return StorageScope::Create(GetPtrStorageScope(std::move(buffer_var)));
   }
 
   // private functions.
@@ -612,10 +614,10 @@ private:
   Stmt VisitStmt_(const EvaluateNode *op) final {
     const CallNode *call = nullptr;
     if (op->value->IsInstance<CallNode>()) {
-      call = static_cast<const CallNode *>(op->value.get());
+      call = op->value.as<CallNode>();
       if (call->op.same_as(builtin::tvm_storage_sync())) {
         const auto &args = call->args;
-        ICHECK(args.size() > 0);
+        ICHECK(!args.empty());
         const auto *scope_node = args[0].as<StringImmNode>();
         ICHECK(scope_node != nullptr);
         const std::string &scope = scope_node->value;
@@ -741,11 +743,11 @@ private:
   std::unordered_map<ThreadBoundKey, size_t> thread_count_map_;
 };
 
-PrimFunc TileLangThreadSync(PrimFunc func, std::string storage_scope) {
+PrimFunc TileLangThreadSync(PrimFunc func, const std::string &storage_scope) {
   StorageScope sync_scope = StorageScope::Create(storage_scope);
   auto *n = func.CopyOnWrite();
   auto stmt = n->body;
-  if (sync_scope.rank == StorageRank::kShared && sync_scope.tag == "") {
+  if (sync_scope.rank == StorageRank::kShared && sync_scope.tag.empty()) {
     stmt = ThreadSyncAfterWaitQueueInserter(sync_scope)(stmt);
   }
   TileLangThreadSyncPlanner planner(sync_scope);
@@ -764,9 +766,16 @@ using namespace tir::transform;
 
 namespace transform {
 
-tvm::transform::Pass ThreadSync(String storage_scope) {
-  auto pass_func = [storage_scope](PrimFunc f, IRModule m, PassContext ctx) {
+tvm::transform::Pass ThreadSync(const String &storage_scope) {
+  auto pass_func = [storage_scope](PrimFunc f, const IRModule &m,
+                                   const PassContext &ctx) {
     auto *n = f.CopyOnWrite();
+    // Check if thread storage sync is disabled
+    bool disable_syncthreads =
+        ctx->GetConfig(kDisableThreadStorageSync, Bool(false)).value()->value;
+    if (disable_syncthreads) {
+      return f;
+    }
     return tl::TileLangThreadSync(std::move(f), storage_scope);
     ;
   };

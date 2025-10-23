@@ -1,7 +1,7 @@
 """The language interface for tl programs."""
+from __future__ import annotations
 
 from tvm import tir
-from typing import Optional
 from tilelang.language import copy, macro, alloc_shared
 
 
@@ -94,8 +94,8 @@ def reduce_sum(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool =
         clear (bool, optional): If True, output buffer will be cleared before reduction.
                               If False, results will be accumulated on existing values.
                               Defaults to True.
-    Note: When clear=True, reduce_sum will not compute directly on the output buffer. This is because 
-          during warp reduction, the same value would be accumulated multiple times (number of threads 
+    Note: When clear=True, reduce_sum will not compute directly on the output buffer. This is because
+          during warp reduction, the same value would be accumulated multiple times (number of threads
           in the warp). Therefore, the implementation with clear=True follows these steps:
         1. create a temp buffer with same shape and dtype as out
         2. copy out to temp buffer
@@ -139,6 +139,51 @@ def reduce_absmax(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: boo
     return reduce(buffer, out, "absmax", dim, clear)
 
 
+def reduce_bitand(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True):
+    """Perform reduce bitwise-and on input buffer, store the result to output buffer.
+
+    Args:
+        buffer (tir.Buffer): The input buffer
+        out (tir.Buffer): The output buffer
+        dim (int): The dimension to perform reduce on
+
+    Returns:
+        tir.Call: Handle to the reduction operation
+    """
+    dim = _legalize_dim(buffer, dim)
+    return reduce(buffer, out, "bitand", dim, clear)
+
+
+def reduce_bitor(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True):
+    """Perform reduce bitwise-or on input buffer, store the result to output buffer.
+
+    Args:
+        buffer (tir.Buffer): The input buffer
+        out (tir.Buffer): The output buffer
+        dim (int): The dimension to perform reduce on
+
+    Returns:
+        tir.Call: Handle to the reduction operation
+    """
+    dim = _legalize_dim(buffer, dim)
+    return reduce(buffer, out, "bitor", dim, clear)
+
+
+def reduce_bitxor(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True):
+    """Perform reduce bitwise-xor on input buffer, store the result to output buffer.
+
+    Args:
+        buffer (tir.Buffer): The input buffer
+        out (tir.Buffer): The output buffer
+        dim (int): The dimension to perform reduce on
+
+    Returns:
+        tir.Call: Handle to the reduction operation
+    """
+    dim = _legalize_dim(buffer, dim)
+    return reduce(buffer, out, "bitxor", dim, clear)
+
+
 @macro
 def cumsum_fragment(src: tir.Buffer, dst: tir.Buffer, dim: int, reverse: bool) -> tir.PrimExpr:
     cumsum_smem = alloc_shared(src.shape, src.dtype, "shared.dyn")
@@ -154,17 +199,37 @@ def cumsum_fragment(src: tir.Buffer, dst: tir.Buffer, dim: int, reverse: bool) -
     copy(cumsum_smem, dst)
 
 
-def cumsum(src: tir.Buffer, dst: Optional[tir.Buffer] = None, dim: int = 0, reverse: bool = False):
-    """Perform cumulative sum on input buffer, store the result to output buffer.
+def cumsum(src: tir.Buffer, dst: tir.Buffer | None = None, dim: int = 0, reverse: bool = False):
+    """
+    Compute the cumulative sum of `src` along `dim`, writing results to `dst`.
 
-    Args:
-        src (tir.Buffer): The input buffer
-        dst (tir.Buffer, optional): The output buffer. Defaults to None.
-        dim (int, optional): The dimension to perform cumulative sum on. Defaults to 0.
-        reverse (bool, optional): Whether to perform reverse cumulative sum. Defaults to False.
+    Negative `dim` indices are normalized (Python-style). If `dst` is None, the operation is performed in-place into `src`. Raises ValueError when `dim` is out of bounds for `src.shape`. When `src.scope() == "local.fragment"`, this delegates to `cumsum_fragment`; otherwise it emits the `tl.cumsum` intrinsic.
+
+    Examples:
+        A 1D inclusive scan that writes the result into a separate shared-memory buffer:
+
+        >>> import tilelang.language as T
+        >>> @T.prim_func
+        ... def kernel(A: T.Tensor((128,), "float32"), B: T.Tensor((128,), "float32")):
+        ...     with T.Kernel(1, threads=128):
+        ...         A_shared = T.alloc_shared((128,), "float32")
+        ...         T.copy(A, A_shared)
+        ...         T.cumsum(src=A_shared, dst=A_shared, dim=0)
+        ...         T.copy(A_shared, B)
+
+        A 2D prefix sum along the last dimension with reverse accumulation:
+
+        >>> import tilelang.language as T
+        >>> @T.prim_func
+        ... def kernel2d(A: T.Tensor((64, 64), "float16"), B: T.Tensor((64, 64), "float16")):
+        ...     with T.Kernel(1, 1, threads=256):
+        ...         tile = T.alloc_shared((64, 64), "float16")
+        ...         T.copy(A, tile)
+        ...         T.cumsum(src=tile, dim=1, reverse=True)
+        ...         T.copy(tile, B)
 
     Returns:
-        tir.Call: Handle to the cumulative sum operation
+        tir.Call: A handle to the emitted cumulative-sum operation.
     """
 
     shape = src.shape
@@ -184,4 +249,24 @@ def cumsum(src: tir.Buffer, dst: Optional[tir.Buffer] = None, dim: int = 0, reve
         dst.access_ptr("w"),
         dim,
         reverse,
+    )
+
+
+def finalize_reducer(reducer: tir.Buffer):
+    """
+    Finalize a reducer buffer by emitting the `tl.finalize_reducer` intrinsic.
+
+    This returns a TVM `tir.Call` handle that finalizes the given reducer using its writable pointer.
+    The call does not modify Python objects directly; it produces the low-level intrinsic call used by the IR.
+
+    Parameters:
+        reducer (tir.Buffer): Reducer buffer whose writable pointer will be finalized.
+
+    Returns:
+        tir.Call: Handle to the finalize reducer intrinsic call.
+    """
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.finalize_reducer"),
+        reducer.access_ptr("w"),
     )

@@ -1,12 +1,20 @@
-# lint requirements
--r requirements-lint.txt
-# build requirements
-Cython
+# Lint requirements
+--requirement requirements-lint.txt
+
+# Build requirements
+cython
 cmake>=3.26
-# runtime requirements
+setuptools
+scikit-build-core
+ninja
+
+# Runtime requirements
+--requirement requirements.txt
+
+# Test requirements
 cffi
 cpplint
-Cython
+cython
 docutils
 dtlib
 numpy>=1.23.5
@@ -29,3 +37,7 @@ scipy
 tornado
 ninja==1.10.0
 cuda-python>=12.0.0
+pytest-xdist>=2.2.1
+pytest-durations
+pytest-timeout
+pyyaml

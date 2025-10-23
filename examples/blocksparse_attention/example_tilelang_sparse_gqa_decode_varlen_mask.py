@@ -17,7 +17,10 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
     accum_dtype = "float"
     kv_group_num = heads // heads_kv
 
-    @tilelang.jit(out_idx=[-1])
+    @tilelang.jit(
+        out_idx=[-1], pass_configs={
+            tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+        })
     def kernel_func(block_N, block_H, num_split, num_stages, threads, max_cache_seqlen, num_blocks):
         shape_q = [batch, heads, dim]
         shape_k = [batch, max_cache_seqlen, heads_kv, dim]
@@ -190,11 +193,11 @@ class SparseFlashAttn(torch.nn.Module):
         self.kernel = flashattn(batch, heads, heads_kv, dim, dim_v)(
             block_N=block_size,
             block_H=self.block_H,
-            num_split=T.symbolic("num_split"),
+            num_split=T.dynamic("num_split"),
             num_stages=2,
             threads=128,
-            max_cache_seqlen=T.symbolic("max_cache_seqlen"),
-            num_blocks=T.symbolic("num_blocks"))
+            max_cache_seqlen=T.dynamic("max_cache_seqlen"),
+            num_blocks=T.dynamic("num_blocks"))
 
         props = torch.cuda.get_device_properties(torch.device("cuda:0"))
         self.num_sm = props.multi_processor_count
@@ -279,11 +282,11 @@ def sparse_gqa_decode_varlen_mask(query, key, value, block_mask, cache_seqlens, 
     kernel = flashattn(batch, heads, heads_kv, dim, dim_v)(
         block_N=block_size,
         block_H=block_H,
-        num_split=T.symbolic("num_split"),
+        num_split=T.dynamic("num_split"),
         num_stages=2,
         threads=128,
-        max_cache_seqlen=T.symbolic("max_cache_seqlen"),
-        num_blocks=T.symbolic("num_blocks"))
+        max_cache_seqlen=T.dynamic("max_cache_seqlen"),
+        num_blocks=T.dynamic("num_blocks"))
     glse = torch.empty((batch, heads, num_split), dtype=torch.float32, device='cuda')
     Output_partial = torch.empty((batch, heads, num_split, dim_v),
                                  dtype=torch.float32,

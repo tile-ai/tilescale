@@ -10,6 +10,15 @@
 // Template declaration for device-side debug printing (variable only)
 template <typename T> __device__ void debug_print_var(const char *msg, T var);
 
+// Overload for pointer type (supports any cv-qualified T*)
+template <typename T> __device__ void debug_print_var(const char *msg, T *var) {
+  printf(
+      "msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): dtype=pointer "
+      "value=%p\n",
+      msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+      threadIdx.z, var);
+}
+
 // Specialization for signed char type
 template <>
 __device__ void debug_print_var<signed char>(const char *msg, signed char var) {
@@ -35,6 +44,16 @@ __device__ void debug_print_var<unsigned char>(const char *msg,
 template <> __device__ void debug_print_var<int>(const char *msg, int var) {
   printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): dtype=int "
          "value=%d\n",
+         msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+         threadIdx.z, var);
+}
+
+// Specialization for unsigned integer type
+template <>
+__device__ void debug_print_var<unsigned int>(const char *msg,
+                                              unsigned int var) {
+  printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): dtype=int "
+         "value=%u\n",
          msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
          threadIdx.z, var);
 }
@@ -140,6 +159,17 @@ __device__ void debug_print_buffer_value<int>(const char *msg,
          threadIdx.z, buf_name, index, var);
 }
 
+// Specialization for unsigned integer type
+template <>
+__device__ void
+debug_print_buffer_value<unsigned int>(const char *msg, const char *buf_name,
+                                       int index, unsigned int var) {
+  printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): buffer=%s, "
+         "index=%d, dtype=int value=%u\n",
+         msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+         threadIdx.z, buf_name, index, var);
+}
+
 // Specialization for float type
 template <>
 __device__ void debug_print_buffer_value<float>(const char *msg,
@@ -217,7 +247,18 @@ __device__ void debug_print_buffer_value<fp8_e5_t>(const char *msg,
          threadIdx.z, buf_name, index, (float)var);
 }
 
-TL_DEVICE uint64_t get_clock() {
+// Specialization for int16 type
+template <>
+__device__ void debug_print_buffer_value<int16_t>(const char *msg,
+                                                  const char *buf_name,
+                                                  int index, int16_t var) {
+  printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): buffer=%s, "
+         "index=%d, dtype=int16_t value=%d\n",
+         msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+         threadIdx.z, buf_name, index, (int32_t)var);
+}
+
+__device__ uint64_t get_clock() {
   uint64_t gpu_clock;
   asm volatile("mov.u64 %0, %%clock64;\n" : "=l"(gpu_clock) : : "memory");
   return gpu_clock;

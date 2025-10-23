@@ -3,6 +3,7 @@
 This module provides functionality for auto-tuning tilelang programs, including JIT compilation
 and performance optimization through configuration search.
 """
+from __future__ import annotations
 
 import tilelang
 from tilelang import tvm as tvm
@@ -10,7 +11,7 @@ from tvm.tir import PrimFunc, Var
 from tvm.target import Target
 import inspect
 from functools import partial
-from typing import (Callable, List, Literal, Any, Optional, Union, Dict, overload, Tuple)
+from typing import (Callable, Literal, Any, overload)
 from tqdm import tqdm
 import logging
 import functools
@@ -28,8 +29,9 @@ from pathlib import Path
 from tilelang import env
 from tilelang.autotuner.param import CompileArgs, ProfileArgs, AutotuneResult
 from tilelang.autotuner.capture import get_autotune_inputs
+from tilelang.utils.target import determine_target
 from tilelang.jit.param import _P, _RProg
-from tilelang.version import __version__
+from tilelang import __version__
 
 
 class TimeoutException(Exception):
@@ -102,7 +104,8 @@ class AutoTuner:
     compile_args = CompileArgs()
     profile_args = ProfileArgs()
 
-    _kernel_parameters: Optional[Tuple[str, ...]] = None
+    _kernel_parameters: tuple[str, ...] | None = None
+    _function_parameters: dict[str, Any] | None = None
     _lock = threading.Lock()  # For thread safety
     _memory_cache = {}  # In-memory cache dictionary
     cache_dir: Path = Path(env.TILELANG_CACHE_DIR) / "autotuner"
@@ -129,12 +132,12 @@ class AutoTuner:
         return cls(kernel, configs)
 
     def set_compile_args(self,
-                         out_idx: Union[List[int], int, None] = None,
+                         out_idx: list[int] | int | None = None,
                          target: Literal['auto', 'cuda', 'hip'] = 'auto',
                          execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
-                         target_host: Union[str, Target] = None,
+                         target_host: str | Target = None,
                          verbose: bool = False,
-                         pass_configs: Optional[Dict[str, Any]] = None):
+                         pass_configs: dict[str, Any] | None = None):
         """Set compilation arguments for the auto-tuner.
 
         Args:
@@ -150,7 +153,7 @@ class AutoTuner:
         """
         self.compile_args = CompileArgs(
             out_idx=out_idx,
-            target=target,
+            target=Target(determine_target(target)),
             execution_backend=execution_backend,
             target_host=target_host,
             verbose=verbose,
@@ -221,13 +224,24 @@ class AutoTuner:
 
         return self
 
-    def set_kernel_parameters(self, parameters: Tuple[str, ...]):
+    def set_kernel_parameters(self, k_parameters: tuple[str, ...], f_parameters: dict[str, Any]):
         # for cache key generation
-        self._kernel_parameters = parameters
+        self._kernel_parameters = k_parameters
+        self._function_parameters = f_parameters
 
-    def generate_cache_key(self, parameters: Dict[str, Any]) -> Optional[AutotuneResult]:
+    def generate_cache_key(self, parameters: dict[str, Any]) -> AutotuneResult | None:
         """Generate a cache key for the auto-tuning process.
         """
+
+        def _normalize_param(value):
+            if isinstance(value, Var):
+                return str(value)
+            if isinstance(value, (list, tuple)):
+                return [_normalize_param(v) for v in value]
+            if isinstance(value, dict):
+                return {str(k): _normalize_param(v) for k, v in value.items()}
+            return value
+
         # extract parameters from the function signature
         op_parameters = []
         for _, default_value in parameters.items():
@@ -235,7 +249,7 @@ class AutoTuner:
                 op_parameters.append(default_value.default)
 
         if self._kernel_parameters is not None:
-            op_parameters += self._kernel_parameters
+            op_parameters += _normalize_param(self._kernel_parameters)
 
         func_source = inspect.getsource(self.fn)
         key_data = {
@@ -294,8 +308,8 @@ class AutoTuner:
                     return result
 
         best_latency: float = 1e8
-        best_config: Optional[Dict[str, Any]] = None
-        best_kernel: Optional[tilelang.JITKernel] = None
+        best_config: dict[str, Any] | None = None
+        best_kernel: tilelang.JITKernel | None = None
 
         def _compile(**config_arg) -> tilelang.JITKernel:
             compile_args = self.compile_args
@@ -416,8 +430,15 @@ class AutoTuner:
             key_args_tuple, key_kwargs_tuple = self._kernel_parameters
             tunable_arguments = [key for key, _ in top_config.items()]
 
+            def check_tunable_argument_value(key, parameters, key_args_tuple) -> bool:
+                params_list = list(parameters.keys())
+                assert key in params_list, f"Tunable argument {key} not found in function parameters"
+                return params_list.index(key) < len(key_args_tuple)
+
             # Check if all tunable arguments have been tuned by comparing config keys with key_kwargs_tuple
-            if any(key in top_config for key, _ in key_kwargs_tuple):
+            if any(key in top_config for key, _ in key_kwargs_tuple) or any(
+                    check_tunable_argument_value(key, self._function_parameters, key_args_tuple)
+                    for key in tunable_arguments):
                 logger.warning(
                     f"Tunable parameters {tunable_arguments} already provided during auto-tuning. Skipping compilation and using direct JIT"
                 )
@@ -455,13 +476,24 @@ class AutoTuner:
         futures = []
         future_to_index = {}
 
-        def device_wrapper(func, device, **config_arg):
-            torch.cuda.set_device(device)
-            return func(**config_arg)
+        def cuda_device_wrapper(func, device):
+
+            def inner(**config_arg):
+                torch.cuda.set_device(device)
+                return func(**config_arg)
+
+            return inner
 
         for i, config_arg in enumerate(config_args):
+            compile_func = self.jit_compile
+
+            if torch.cuda.is_available():
+                device = torch.cuda.current_device()
+
+                compile_func = cuda_device_wrapper(self.jit_compile, device)
+
             future = pool.submit(
-                functools.partial(device_wrapper, self.jit_compile, torch.cuda.current_device()),
+                compile_func,
                 **config_arg,
             )
             futures.append(future)
@@ -533,7 +565,7 @@ class AutoTuner:
             func=best_kernel.prim_func,
             kernel=best_kernel)
 
-        if self.compile_args.execution_backend == "dlpack":
+        if self.compile_args.execution_backend in ("dlpack", "torch"):
             logger.warning("DLPack backend does not support cache saving to disk.")
         else:
             with self._lock:
@@ -560,7 +592,7 @@ class _AutoTunerImplementation:
     warmup: int = 25
     rep: int = 100
     timeout: int = 100
-    configs: Union[Dict, Callable] = None
+    configs: dict | Callable = None
     supply_type: tilelang.TensorSupplyType = tilelang.TensorSupplyType.Auto
     ref_prog: Callable = None
     supply_prog: Callable = None
@@ -572,7 +604,7 @@ class _AutoTunerImplementation:
     cache_input_tensors: bool = False
 
     def __init__(self,
-                 configs: Union[Dict, Callable],
+                 configs: dict | Callable,
                  warmup: int = 25,
                  rep: int = 100,
                  timeout: int = 100,
@@ -622,12 +654,12 @@ class _AutoTunerImplementation:
         self.cache_input_tensors = cache_input_tensors  # Reuse inputs
 
         # Cache for storing tuned kernel implementations
-        self._tuner_cache: Dict[tuple, tilelang.JITKernel] = {}  # (args, kwargs) -> compiled kernel
+        self._tuner_cache: dict[tuple, tilelang.JITKernel] = {}  # (args, kwargs) -> compiled kernel
 
     # This tells the type checker what the *wrapper* function will return.
     # this is for linting, please do not remove it.
     @overload
-    def __call__(self, fn: Callable[_P, _RProg]) -> Callable[_P, Tuple[_RProg, AutotuneResult]]:
+    def __call__(self, fn: Callable[_P, _RProg]) -> Callable[_P, tuple[_RProg, AutotuneResult]]:
         ...
 
     @overload
@@ -675,7 +707,7 @@ class _AutoTunerImplementation:
                     )
 
                 autotuner.jit_compile = jit_compile
-                autotuner.set_kernel_parameters(key)
+                autotuner.set_kernel_parameters(key, inspect.signature(fn).parameters)
 
                 autotuner.run = partial(autotuner.run, warmup, rep, timeout)
 
@@ -689,9 +721,9 @@ class _AutoTunerImplementation:
 
 
 def autotune(  # This is the new public interface
-    func: Union[Callable[_P, _RProg], PrimFunc, None] = None,
+    func: Callable[_P, _RProg] | PrimFunc | None = None,
     *,  # Indicates subsequent arguments are keyword-only
-    configs: Union[Dict, Callable],
+    configs: dict | Callable,
     # profile arguments
     warmup: int = 25,
     rep: int = 100,
@@ -712,7 +744,7 @@ def autotune(  # This is the new public interface
 
     This decorator can be used without arguments (e.g., `@tilelang.jit`):
        Applies JIT compilation with default settings.
-    
+
     Tips:
         - If you want to skip the auto-tuning process, you can set override the tunable parameters in the function signature.
             ```python

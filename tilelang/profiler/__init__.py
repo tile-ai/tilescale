@@ -1,6 +1,7 @@
 """The profiler and convert to torch utils"""
+from __future__ import annotations
 
-from typing import List, Optional, Callable, Any
+from typing import Callable, Any, Literal
 from functools import partial
 import torch
 from contextlib import suppress
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class Profiler:
     """A profiler class for benchmarking and validating kernel implementations.
-    
+
     Attributes:
         params: List of kernel parameters defining the input/output specifications
         result_idx: Indices indicating which parameters are output tensors
@@ -33,17 +34,17 @@ class Profiler:
         adapter: Optional kernel adapter for interfacing with different backends
     """
 
-    params: List[KernelParam]
-    result_idx: List[int]
+    params: list[KernelParam]
+    result_idx: list[int]
     supply_type: TensorSupplyType
-    adapter: Optional[BaseKernelAdapter] = None
+    adapter: BaseKernelAdapter | None = None
 
     def __post_init__(self):
         """Initialize tensor supply after dataclass initialization"""
         self.result_idx = self._legalize_result_idx(self.result_idx)
         self.supply = get_tensor_supply(self.supply_type)
 
-    def _legalize_result_idx(self, result_idx: Optional[List[int]] = None) -> List[int]:
+    def _legalize_result_idx(self, result_idx: list[int] | None = None) -> list[int]:
         params = self.params
         # result_idx is a list of indices of the output tensors
         if result_idx is None:
@@ -60,7 +61,7 @@ class Profiler:
 
         return result_idx
 
-    def with_default_adapter(self, adapter: BaseKernelAdapter) -> "Profiler":
+    def with_default_adapter(self, adapter: BaseKernelAdapter) -> Profiler:
         self.adapter = adapter
         return self
 
@@ -140,13 +141,13 @@ class Profiler:
     def assert_allclose(
         self,
         reference_program: Callable,
-        input_tensors: Optional[List[torch.Tensor]] = None,
+        input_tensors: list[torch.Tensor] | None = None,
         atol: float = 1e-2,
         rtol: float = 1e-2,
         max_mismatched_ratio=0.01,
     ):
         """Validates kernel output against a reference implementation.
-        
+
         Args:
             reference_program: Reference implementation to compare against
             input_tensors: Optional pre-generated input tensors
@@ -194,9 +195,17 @@ class Profiler:
             if lhs is not None and rhs is not None:
                 # in case of numsplit template, the ref output may be None
                 # which means the value is invalid, so we skip the comparison
+                def is_float8(tensor: torch.Tensor) -> bool:
+                    return tensor.dtype in {
+                        torch.float8_e5m2,
+                        torch.float8_e5m2fnuz,
+                        torch.float8_e4m3fn,
+                        torch.float8_e4m3fnuz,
+                    }
+
                 torch_assert_close(
-                    lhs,
-                    rhs,
+                    lhs if not is_float8(lhs) else lhs.to(torch.float32),
+                    rhs if not is_float8(rhs) else rhs.to(torch.float32),
                     rtol=rtol,
                     atol=atol,
                     max_mismatched_ratio=max_mismatched_ratio,
@@ -207,11 +216,11 @@ class Profiler:
     def manual_assert_close(
         self,
         reference_program: Callable,
-        input_tensors: Optional[List[torch.Tensor]] = None,
+        input_tensors: list[torch.Tensor] | None = None,
         manual_check_prog: Callable = None,
     ):
         """Validates kernel output against a reference implementation.
-        
+
         Args:
             reference_program: Reference implementation to compare against
             input_tensors: Optional pre-generated input tensors
@@ -237,7 +246,7 @@ class Profiler:
 
     def assert_consistent(self, repeat=10):
         """Checks for kernel consistency across multiple runs.
-        
+
         Args:
             repeat: Number of times to repeat the consistency check
         """
@@ -268,13 +277,13 @@ class Profiler:
             func = self.__call__
         return func(*ins)
 
-    def determine_profiler(self, func: Optional[Callable] = None):
+    def determine_profiler(self, func: Callable | None = None):
         """Determines which profiler backend to use based on function type.
-        
+
         Args:
             func: Function to be profiled
             profiler: Explicitly specified profiler type or "auto" for automatic detection
-        
+
         Returns:
             str: The determined profiler type ("torch" or "tvm")
         """
@@ -285,15 +294,18 @@ class Profiler:
 
     def do_bench(
         self,
-        func: Optional[Callable] = None,
+        func: Callable | None = None,
         warmup: int = 25,
         rep: int = 100,
         n_warmup: int = 1,
         n_repeat: int = 1,
-        input_tensors: List[torch.Tensor] = None,
+        input_tensors: list[torch.Tensor] = None,
+        backend: Literal["event", "cupti"] = "event",
+        quantiles: list[float] | None = None,
+        return_mode: Literal["min", "max", "mean", "median"] = "mean",
     ) -> float:
         """Benchmarks the execution time of a given function.
-        
+
         Args:
             func: Function to benchmark (uses adapter if None)
             warmup: Warmup time in milliseconds
@@ -302,7 +314,7 @@ class Profiler:
             n_repeat: Number of timing iterations
             profiler: Which profiling backend to use
             input_tensors: Optional pre-generated input tensors
-            
+
         Returns:
             float: Average execution time in milliseconds
         """
@@ -323,6 +335,9 @@ class Profiler:
                 rep=rep,
                 _n_warmup=n_warmup,
                 _n_repeat=n_repeat,
+                quantiles=quantiles,
+                backend=backend,
+                return_mode=return_mode,
             )
         elif profiler == "tvm":
             assert func is not None, "func should not be None"

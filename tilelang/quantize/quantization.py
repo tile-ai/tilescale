@@ -31,10 +31,10 @@ def _tir_u8_to_f4_to_bf16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, scale
                           dtype: str):
     """
         Convert a packed 4-bit field stored in a uint8 into a bfloat16 value using an exponent scale.
-        
+
         This function expects a storage field of width `nbit == 4` packed into the 8-bit input `val` and returns
         a bfloat16 constructed from the unpacked sign, a scaled exponent, and the 1-bit mantissa.
-        
+
         Behavior:
         - Validates `nbit == 4`, `dtype == "bfloat16"`, and `val.dtype == "uint8"` (AssertionError if violated).
         - Extracts the 4-bit field at position `pos` (fields are packed consecutively in `val`).
@@ -75,16 +75,16 @@ def _tir_u8_to_f4_to_bf16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, scale
 def _tir_f32x2_to_bf16x2_to_u32(v0: tir.PrimExpr, v1: tir.PrimExpr, round_to_even: bool = True):
     """
     Convert two float32 values to bfloat16 and pack them into a single uint32.
-    
+
     The two inputs v0 and v1 (float32 PrimExpr) are reinterpreted as uint32 bit patterns, optionally rounded to nearest-even
     by adding a rounding bias, then truncated to their upper 16 bits (bfloat16 representation). The two 16-bit results are
     packed into a uint32 with v0 in the lower 16 bits and v1 in the upper 16 bits.
-    
+
     Parameters:
         v0 (tir.PrimExpr): First float32 value to convert and pack.
         v1 (tir.PrimExpr): Second float32 value to convert and pack.
         round_to_even (bool): If True, apply round-to-nearest-even bias before truncation (default True).
-    
+        
     Returns:
         tir.PrimExpr: A uint32 PrimExpr containing the packed bfloat16 representations (v0 low 16 bits, v1 high 16 bits).
     """
@@ -223,7 +223,7 @@ def _tir_u8_to_f8_e4m3_to_f16_naive(nbit: int, val: tir.PrimExpr, dtype: str):
     e4 = val & tir.const(0x40, "uint16")
     prefix = tir.Select(e4 == tir.const(0, "uint16"), tir.const(0x2000, "uint16"),
                         tir.const(0x4000, "uint16"))
-    e_f16 = (((val & tir.const(63, "uint16")) << tir.const(7, "uint16"))) | prefix
+    e_f16 = ((val & tir.const(63, "uint16")) << tir.const(7, "uint16")) | prefix
     return tir.reinterpret("float16", s_f16 | e_f16)
 
 
@@ -232,7 +232,7 @@ def _tir_u8_to_f8_e4m3_to_f16(nbit: int, val: tir.PrimExpr, dtype: str):
     assert dtype == "float16"
     s_f16 = (val >> tir.const(7, "uint16")) << tir.const(15, "uint16")
     e4 = val & tir.const(0x40, "uint16")
-    e_f16 = (((val & tir.const(63, "uint16")) << tir.const(7, "uint16"))) | (e4 << tir.const(8, "uint16")) | (e4 << tir.const(7, "uint16"))
+    e_f16 = ((val & tir.const(63, "uint16")) << tir.const(7, "uint16")) | (e4 << tir.const(8, "uint16")) | (e4 << tir.const(7, "uint16"))
     e_f16 = e_f16 ^ tir.const(0x2000, "uint16")
     return tir.reinterpret("float16", s_f16 | e_f16)
 

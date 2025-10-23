@@ -19,7 +19,15 @@ class PassConfigKey(str, Enum):
     """Disable warp specialization optimization. Default: False"""
 
     TL_DISABLE_FAST_MATH = "tl.disable_fast_math"
-    """Disable fast math optimization. Default: False"""
+    """Disable fast math optimization. Default: True
+    will be deprecated in the 0.1.7 release
+    """
+
+    TL_ENABLE_FAST_MATH = "tl.enable_fast_math"
+    """
+        Enable fast math optimization. Default: False
+        if enabled, --use_fast_math will be passed to nvcc
+    """
 
     TL_PTXAS_REGISTER_USAGE_LEVEL = "tl.ptxas_register_usage_level"
     """The PTXAS register usage level in [0, 10], which controls the 
@@ -37,6 +45,11 @@ class PassConfigKey(str, Enum):
     TL_DISABLE_SAFE_MEMORY_ACCESS = "tl.disable_safe_memory_legalize"
     """Disable safe memory access optimization. Default: False"""
 
+    TL_DISABLE_VECTORIZE_256 = "tl.disable_vectorize_256"
+    """Disable usage of LDG/STG 256. Default: False"""
+    TL_DISABLE_WGMMA = "tl.disable_wgmma"
+    """Disable usage of Hopper WGMMA. Default: False"""
+
     TL_DEBUG_MERGE_SHARED_MEMORY_ALLOCATIONS = "tl.debug_merge_shared_memory_allocations"
     """Enable debug information for merge shared memory allocations. Default: False"""
 
@@ -49,6 +62,56 @@ class PassConfigKey(str, Enum):
     TL_DISABLE_RDC = "tl.disable_rdc"
     """Disable RDC (Relocatable Device Code) compilation in distributed programming. Default: False"""
     # (wt) Introduced to temporarily avoid the bug in https://github.com/tile-ai/tilelang/issues/659
+    
+    TL_DISABLE_THREAD_STORAGE_SYNC = "tl.disable_thread_storage_sync"
+    """Disable thread storage synchronization pass. When enabled, disables the
+    automatic insertion of thread synchronization barriers (e.g., __syncthreads())
+    for shared memory access coordination. This can be useful for performance
+    optimization in cases where manual synchronization is preferred or when
+    synchronization is not needed. Default: False"""
+
+    TL_FORCE_LET_INLINE = "tl.force_let_inline"
+    """Force TileLang to inline let bindings during simplification. Default: False"""
+
+    TL_STORAGE_REWRITE_DETECT_INPLACE = "tl.storage_rewrite_detect_inplace"
+    """Control StorageRewrite inplace detection.
+
+    When False (default) StorageRewrite keeps distinct temporaries for patterns
+    such as `dst[i] = f(src[i])`, avoiding implicit aliasing:
+
+    ```
+    read = T.allocate([1], "int32", "local.var")
+    write = T.allocate([1], "int32", "local.var")
+    read_buf = T.Buffer((1,), "int32", data=read, scope="local.var")
+    write_buf = T.Buffer((1,), "int32", data=write, scope="local.var")
+    write_buf[0] = read_buf[0] * 2
+    f(write_buf[0])
+    ```
+
+    Setting the flag to True allows StorageRewrite to reuse the `read` buffer
+    for the write when it can prove the update is safely inplace, producing IR
+    like:
+
+    ```
+    read = T.allocate([1], "int32", "local.var")
+    read_buf = T.Buffer((1,), "int32", data=read, scope="local.var")
+    read_buf[0] = read_buf[0] * 2
+    f(read_buf[0])
+    ```
+
+    This reduces local memory usage but introduces aliasing between the buffers.
+
+    Usage:
+
+    ```python
+    from tilelang.transform import PassContext, PassConfigKey
+
+    with PassContext(
+        config={PassConfigKey.TL_STORAGE_REWRITE_DETECT_INPLACE.value: True}
+    ):
+        mod = tilelang.transform.StorageRewrite()(mod)
+    ```
+    """
 
     # TIR related configs
     TIR_ENABLE_EQUIV_TERMS_IN_CSE = "tir.enable_equiv_terms_in_cse_tir"

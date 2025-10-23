@@ -4,7 +4,7 @@
  *
  */
 
-#include "op.h"
+#include "operator.h"
 #include <tvm/ir/transform.h>
 
 namespace tvm {

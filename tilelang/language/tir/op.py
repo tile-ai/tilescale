@@ -1,4 +1,5 @@
-from typing import Any, Optional
+from __future__ import annotations
+from typing import Any
 import tvm
 from tvm.ir import PrimExpr
 from tvm.ir.base import Span
@@ -1061,6 +1062,88 @@ def ptx_mma_sp(
     )
 
 
+def ptx_wgmma_ss(
+    dtype,
+    wgmma_prefix,
+    a_is_k_major,
+    b_is_k_major,
+    a_dtype_abbrv,
+    b_dtype_abbrv,
+    accum_dtype_abbrv,
+    A_desc,
+    A_offset,
+    B_desc,
+    B_offset,
+    C_data,
+    C_offset,
+    scale_out,
+    scale_in_a,
+    scale_in_b,
+):
+    """TVM intrinsic for ptx tensor core wmma instructions
+    https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#warp-level-matrix-instructions-for-wmma
+    """
+    return call_intrin(
+        dtype,
+        _tvm_op.Op.get("tl.ptx_wgmma_ss"),
+        wgmma_prefix,
+        a_is_k_major,
+        b_is_k_major,
+        a_dtype_abbrv,
+        b_dtype_abbrv,
+        accum_dtype_abbrv,
+        A_desc,
+        A_offset,
+        B_desc,
+        B_offset,
+        C_data,
+        C_offset,
+        scale_out,
+        scale_in_a,
+        scale_in_b,
+    )
+
+
+def ptx_wgmma_rs(
+    dtype,
+    wgmma_prefix,
+    a_is_k_major,
+    b_is_k_major,
+    a_dtype_abbrv,
+    b_dtype_abbrv,
+    accum_dtype_abbrv,
+    A_buf,
+    A_offset,
+    B_desc,
+    B_offset,
+    C_data,
+    C_offset,
+    scale_out,
+    scale_in_a,
+    scale_in_b,
+):
+
+    return call_intrin(
+        dtype,
+        _tvm_op.Op.get("tl.ptx_wgmma_rs"),
+        wgmma_prefix,
+        a_is_k_major,
+        b_is_k_major,
+        a_dtype_abbrv,
+        b_dtype_abbrv,
+        accum_dtype_abbrv,
+        A_buf,
+        A_offset,
+        B_desc,
+        B_offset,
+        C_data,
+        C_offset,
+        scale_out,
+        scale_in_a,
+        scale_in_b,
+    )
+
+
 def mma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride):
     """TVM intrinsic for storing the result of PTX MMA into a destination pointer
 
@@ -1321,8 +1404,9 @@ def tvm_mfma(
     call : PrimExpr
         The call expression.
     """
-    return _tvm_op.tvm_mfma(
+    return call_intrin(
         dtype,
+        _tvm_op.Op.get("tl.tvm_mfma"),
         shape,
         A_layout,
         B_layout,
@@ -1369,7 +1453,16 @@ def tvm_mfma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride):
     call : PrimExpr
         The call expression.
     """
-    return _tvm_op.tvm_mfma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride)
+    return call_intrin(
+        dtype,
+        _tvm_op.Op.get("tl.tvm_mfma_store"),
+        m,
+        n,
+        dst_ptr,
+        src_ptr,
+        src_offset,
+        dst_stride,
+    )
 
 
 def tvm_rdna_wmma(
@@ -1436,8 +1529,9 @@ def tvm_rdna_wmma(
     call : PrimExpr
         The call expression.
     """
-    return _tvm_op.tvm_rdna_wmma(
+    return call_intrin(
         dtype,
+        _tvm_op.Op.get("tl.tvm_rdna_wmma"),
         shape,
         A_layout,
         B_layout,
@@ -1484,7 +1578,16 @@ def tvm_rdna_wmma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride):
     call : PrimExpr
         The call expression.
     """
-    return _tvm_op.tvm_rdna_wmma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride)
+    return call_intrin(
+        dtype,
+        _tvm_op.Op.get("tl.tvm_rdna_wmma_store"),
+        m,
+        n,
+        dst_ptr,
+        src_ptr,
+        src_offset,
+        dst_stride,
+    )
 
 
 def ptx_cp_async_barrier(barrier_id):
@@ -1755,7 +1858,7 @@ def min_value(dtype, span=None):
     return _tvm_op.min_value(dtype, span)
 
 
-def max_value(dtype: str, span: Optional[Span] = None) -> Any:
+def max_value(dtype: str, span: Span | None = None) -> Any:
     """maximum value of dtype
 
     Parameters
@@ -1774,7 +1877,7 @@ def max_value(dtype: str, span: Optional[Span] = None) -> Any:
     return _tvm_op.max_value(dtype, span)
 
 
-def infinity(dtype: str, span: Optional[Span] = None) -> Any:
+def infinity(dtype: str, span: Span | None = None) -> Any:
     """infinity value of dtype
 
     Parameters
@@ -1793,7 +1896,7 @@ def infinity(dtype: str, span: Optional[Span] = None) -> Any:
     return _tvm_op.infinity(dtype, span)
 
 
-def reinterpret(dtype, value, span: Optional[Span] = None) -> Any:
+def reinterpret(dtype, value, span: Span | None = None) -> Any:
     """infinity value of dtype
 
     Parameters

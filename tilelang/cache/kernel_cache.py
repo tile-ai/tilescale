@@ -1,4 +1,5 @@
 """The cache utils with class and database persistence - KernelCache Class"""
+from __future__ import annotations
 
 import json
 import logging
@@ -7,7 +8,7 @@ import shutil
 import threading
 import uuid
 from hashlib import sha256
-from typing import Callable, List, Literal, Optional, Union
+from typing import Callable, Literal
 
 import cloudpickle
 from tvm.target import Target
@@ -16,7 +17,7 @@ from tvm.tir import PrimFunc
 from tilelang.engine.param import KernelParam
 from tilelang import env
 from tilelang.jit import JITKernel
-from tilelang.version import __version__
+from tilelang import __version__
 
 KERNEL_PATH = "kernel.cu"
 WRAPPED_KERNEL_PATH = "wrapped_kernel.cu"
@@ -67,12 +68,13 @@ class KernelCache:
     def _generate_key(
         self,
         func: Callable,
-        out_idx: List[int],
+        out_idx: list[int],
         execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         args=None,
-        target: Union[str, Target] = "auto",
-        target_host: Union[str, Target] = None,
+        target: str | Target = "auto",
+        target_host: str | Target = None,
         pass_configs: dict = None,
+        compile_flags: list[str] | str | None = None,
     ) -> str:
         """
         Generates a unique hash key for caching compiled kernels.
@@ -101,6 +103,7 @@ class KernelCache:
             "target_host": str(target_host) if target_host else None,
             "execution_backend": execution_backend,
             "pass_configs": pass_configs,
+            "compile_flags": compile_flags,
         }
         # Sort keys to ensure consistency
         key_string = json.dumps(key_data, sort_keys=True)
@@ -110,14 +113,14 @@ class KernelCache:
     def cached(
         self,
         func: PrimFunc = None,
-        out_idx: List[int] = None,
+        out_idx: list[int] = None,
         *args,
-        target: Union[str, Target] = "auto",
-        target_host: Union[str, Target] = None,
+        target: str | Target = "auto",
+        target_host: str | Target = None,
         execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         verbose: bool = False,
         pass_configs: dict = None,
-        compile_flags: Optional[List[str]] = None,
+        compile_flags: list[str] | str | None = None,
     ) -> JITKernel:
         """
         Caches and reuses compiled kernels to avoid redundant compilation.
@@ -152,6 +155,7 @@ class KernelCache:
             target=target,
             target_host=target_host,
             pass_configs=pass_configs,
+            compile_flags=compile_flags,
         )
         with self._lock:
             # First check in-memory cache
@@ -165,7 +169,8 @@ class KernelCache:
 
             # Then check disk cache
             kernel = self._load_kernel_from_disk(key, target, target_host, out_idx,
-                                                 execution_backend, pass_configs, func, verbose)
+                                                 execution_backend, pass_configs, compile_flags,
+                                                 func, verbose)
             if kernel is not None:
                 if verbose:
                     self.logger.debug(
@@ -185,9 +190,10 @@ class KernelCache:
             target_host=target_host,
             verbose=verbose,
             pass_configs=pass_configs,
+            compile_flags=compile_flags,
         )
-        if execution_backend == "dlpack":
-            self.logger.warning("DLPack backend does not support cache saving to disk.")
+        if execution_backend in ("dlpack", "torch"):
+            self.logger.warning("DLPack or torch backend does not support cache saving to disk.")
         else:
             with self._lock:
                 if env.is_cache_enabled():
@@ -262,9 +268,9 @@ class KernelCache:
             kernel_path = os.path.join(cache_path, KERNEL_PATH)
             if verbose:
                 self.logger.debug(f"Saving kernel source code to file: {kernel_path}")
-            if kernel.artifact.kernel_source is not None:
+            if kernel.kernel_source is not None:
                 KernelCache._safe_write_file(kernel_path, "w",
-                                             lambda file: file.write(kernel.artifact.kernel_source))
+                                             lambda file: file.write(kernel.kernel_source))
         except Exception as e:
             self.logger.error(f"Error saving kernel source code to disk: {e}")
 
@@ -317,14 +323,15 @@ class KernelCache:
     def _load_kernel_from_disk(
         self,
         key: str,
-        target: Union[str, Target] = "auto",
-        target_host: Union[str, Target] = None,
-        out_idx: List[int] = None,
+        target: str | Target = "auto",
+        target_host: str | Target = None,
+        out_idx: list[int] = None,
         execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         pass_configs: dict = None,
+        compile_flags: list[str] | str | None = None,
         func: Callable = None,
         verbose: bool = False,
-    ) -> Optional[JITKernel]:
+    ) -> JITKernel | None:
         """
         Loads a previously compiled kernel from disk cache.
 
@@ -349,15 +356,15 @@ class KernelCache:
         if not all([os.path.exists(file) for file in (kernel_lib_path, params_path)]):
             return None
 
-        kernel_global_source: Optional[str] = None
-        kernel_params: Optional[List[KernelParam]] = None
+        kernel_global_source: str | None = None
+        kernel_params: list[KernelParam] | None = None
 
         # Load the kernel source file (optional)
         try:
             if verbose:
                 self.logger.debug(
                     f"Loading wrapped kernel source code from file: {wrapped_kernel_path}")
-            with open(wrapped_kernel_path, "r") as f:
+            with open(wrapped_kernel_path) as f:
                 kernel_global_source = f.read()
         except Exception as e:
             self.logger.error(f"Error loading wrapped kernel source code from disk: {e}")
@@ -382,6 +389,7 @@ class KernelCache:
                 out_idx=out_idx,
                 execution_backend=execution_backend,
                 pass_configs=pass_configs,
+                compile_flags=compile_flags,
             )
         else:
             return None

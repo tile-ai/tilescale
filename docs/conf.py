@@ -1,17 +1,11 @@
-# -*- coding: utf-8 -*-
-
 # General information about the project.
 project = "Tile Language <br>"
 author = "Tile Lang Contributors"
-copyright = "2025-2025, %s" % author
+copyright = f"2025-2025, {author}"
 
 # Version information.
-with open("../VERSION", "r") as f:
-    version = f.read().strip()
-release = version
-
+with open("../VERSION") as f:
 extensions = [
-    "sphinx_tabs.tabs",
     "sphinx_toolbox.collapse",
     "sphinxcontrib.httpdomain",
     "sphinx.ext.napoleon",
