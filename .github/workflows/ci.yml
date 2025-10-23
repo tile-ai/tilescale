@@ -116,7 +116,7 @@ jobs:
         if [ "${#DIST_TESTS[@]}" -gt 0 ]; then
           echo "Running distributed examples with TILELANG_USE_DISTRIBUTED=1:"
           printf '%s\n' "${DIST_TESTS[@]}"
-          TILELANG_USE_DISTRIBUTED=1 python -m pytest -n 4 "${DIST_TESTS[@]}" -v -r fE
+          TILELANG_USE_DISTRIBUTED=1 python -m pytest -n 1 "${DIST_TESTS[@]}" -v -r fE
         else
           echo "No distributed examples found."
         fi
@@ -126,7 +126,7 @@ jobs:
         if [ "${#OTHER_TESTS[@]}" -gt 0 ]; then
           echo "Running non-distributed examples:"
           printf '%s\n' "${OTHER_TESTS[@]}"
-          python -m pytest -n 4 "${OTHER_TESTS[@]}" -v -r fE
+          python -m pytest -n 1 "${OTHER_TESTS[@]}" -v -r fE
         else
           echo "No non-distributed example tests found."
         fi
@@ -142,7 +142,7 @@ jobs:
         if [ "${#DIST_TESTS[@]}" -gt 0 ]; then
           echo "Running distributed tests with TILELANG_USE_DISTRIBUTED=1:"
           printf '%s\n' "${DIST_TESTS[@]}"
-          TILELANG_USE_DISTRIBUTED=1 python -m pytest -n 4 "${DIST_TESTS[@]}" -v -r fE
+          TILELANG_USE_DISTRIBUTED=1 python -m pytest -n 1 "${DIST_TESTS[@]}" -v -r fE
         else
           echo "No distributed tests found under testing/python."
         fi
@@ -152,7 +152,7 @@ jobs:
         if [ "${#OTHER_TESTS[@]}" -gt 0 ]; then
           echo "Running non-distributed tests:"
           printf '%s\n' "${OTHER_TESTS[@]}"
-          python -m pytest -n 4 "${OTHER_TESTS[@]}" -v -r fE
+          python -m pytest -n 1 "${OTHER_TESTS[@]}" -v -r fE
         else
           echo "No non-distributed tests found under testing/python."
         fi
