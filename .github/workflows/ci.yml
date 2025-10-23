@@ -62,7 +62,7 @@ jobs:
         commit_message: "lint"
 
   build-test-nvidia:
-    runs-on: [self-hosted, nvidia]
+    runs-on: [self-hosted, nvidia, hopper]
     needs: format-check
     permissions:
       contents: read
