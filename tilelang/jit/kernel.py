@@ -414,7 +414,7 @@ class JITKernel:
         if result != 0:
             error_msg = self.adapter.lib.get_last_error().decode('utf-8')
             raise RuntimeError(f"Initialization failed: {error_msg}")
-        
+
     def run_once(self, func: Callable | None = None) -> None:
         return self.get_profiler().run_once(func)
 

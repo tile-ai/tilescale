@@ -6,10 +6,8 @@ from tvm.runtime import ndarray
 from tvm import tir
 from torch.utils.dlpack import to_dlpack
 import numpy as np
-from typing import Optional, Tuple
 from tilelang.utils.allocator import BaseAllocator
 from tilelang.utils.target import parse_device
-from typing import Union
 
 
 class TensorSupplyType(Enum):
@@ -42,11 +40,11 @@ def map_torch_type(intype: str) -> torch.dtype:
         return getattr(torch, intype)
 
 
-def tensor(shape: Tuple[int, ...],
+def tensor(shape: tuple[int, ...],
            dtype: torch.dtype,
-           device: Optional[Union[str, torch.device, int]] = None,
-           allocator: Optional[BaseAllocator] = None,
-           return_peers: Optional[bool] = None) -> Union[torch.Tensor, list[torch.Tensor]]:
+           device: str | torch.device | int | None = None,
+           allocator: BaseAllocator | None = None,
+           return_peers: bool | None = None) -> torch.Tensor | list[torch.Tensor]:
     if allocator is not None:
         assert allocator.initialized(), "Allocator is not initialized"
         if device is not None:
@@ -207,7 +205,7 @@ def _equalize_attributes(actual: torch.Tensor,
         actual (Tensor): Actual tensor.
         expected (Tensor): Expected tensor.
     Returns:
-        (Tuple[Tensor, Tensor]): Equalized tensors.
+        (tuple[Tensor, Tensor]): Equalized tensors.
     """
     # The comparison logic uses operators currently not supported by the MPS backends.
     #  See https://github.com/pytorch/pytorch/issues/77144 for details.

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import torch
 import tilelang
 import tilelang.language as T
@@ -6,7 +8,6 @@ import argparse
 import random
 from triton_dist.kernels.nvidia import fast_all_to_all, all_to_all_post_process
 from benchmark.distributed.utils import create_all_to_all_context, AllToAllContext
-from typing import Optional
 
 tilelang.disable_cache()
 
@@ -72,7 +73,7 @@ class TilelangAllToAll:
             print(self.kernel.get_kernel_source())
 
     def __call__(self, send_tensor: torch.Tensor, send_split_cumsum: torch.Tensor,
-                 send_scale: Optional[torch.Tensor]):
+                 send_scale: torch.Tensor | None):
         """
         low-latency all-to-all communication
         """
@@ -149,7 +150,6 @@ def splits_to_cumsum(splits: torch.Tensor):
     return out
 
 
-import torch
 import torch.distributed
 import triton
 import triton.language as tl

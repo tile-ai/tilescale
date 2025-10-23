@@ -1,5 +1,5 @@
 # IPC Extension
-This extension provides APIs for creating IPC-based intranode communiation handles.
+This extension provides APIs for creating IPC-based intranode communication handles.
 
 ## Installation
 

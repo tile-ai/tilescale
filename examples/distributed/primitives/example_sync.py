@@ -1,6 +1,5 @@
 import os
 import tilelang
-import tilelang.language as T
 import argparse
 import torch
 import torch.distributed as dist
@@ -10,10 +9,9 @@ from tilelang.distributed import init_dist
 tilelang.disable_cache()
 os.environ['NCCL_DEBUG'] = 'WARN'  # silence NCCL log
 
+
 def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     M = args.M if args else 65536
-    BLOCK_M = 4096
-    threads = 128
     assert num_local_ranks == 2, "this example only supports 2 ranks copying to each other"
 
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
@@ -27,15 +25,15 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     dst = tilelang.tensor((M), torch.float32, allocator=allocator)
     srcs = tilelang.tensor((M), torch.float32, allocator=allocator, return_peers=True)
-    
+
     print(f"Before: rank {rank}; src: {srcs[rank]}")
     if rank == 0:
         srcs[1][0:10] = torch.arange(10, dtype=torch.float32) + 100
-        
+
     dist.barrier(group)
     print(f"After: rank {rank}; src: {srcs[rank]}")
     print(f"After: rank {rank}; dst: {dst}")
-    
+
     dist.destroy_process_group()
 
 

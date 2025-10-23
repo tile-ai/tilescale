@@ -82,9 +82,8 @@ void check_nvshmem_init() {
 NVSHMEMI_REPT_FOR_STANDARD_RMA_TYPES(NVSHMEMI_TYPENAME_P_IMPL_PYBIND)
 #undef NVSHMEMI_TYPENAME_P_IMPL_PYBIND
 
-inline torch::Tensor 
-nvshmem_create_tensor(const std::vector<int64_t> &shape,
-                                   c10::ScalarType dtype) {
+inline torch::Tensor nvshmem_create_tensor(const std::vector<int64_t> &shape,
+                                           c10::ScalarType dtype) {
   check_nvshmem_init();
   auto current_device = c10::cuda::current_device();
   auto option_gpu =
@@ -97,25 +96,25 @@ nvshmem_create_tensor(const std::vector<int64_t> &shape,
   void *ptr = nvshmem_malloc(size);
   CHECK(ptr != nullptr) << " nvshmem_malloc failed for malloc " << size;
   return at::from_blob(
-          ptr, shape,
-          [=](void *ptr) {
-            // std::cerr << "enter nvshmem_free "
-            // << ptr << "\n";
-            at::cuda::CUDAGuard guard(current_device);
-            at::cuda::device_synchronize();
-            // std::cerr << "do nvshmem_free " <<
-            // ptr << "\n";
-            nvshmem_free(ptr);
-            at::cuda::device_synchronize();
-            // std::cerr << "exit nvshmem_free "
-            // << ptr << "\n";
-          },
-          option_gpu);
+      ptr, shape,
+      [=](void *ptr) {
+        // std::cerr << "enter nvshmem_free "
+        // << ptr << "\n";
+        at::cuda::CUDAGuard guard(current_device);
+        at::cuda::device_synchronize();
+        // std::cerr << "do nvshmem_free " <<
+        // ptr << "\n";
+        nvshmem_free(ptr);
+        at::cuda::device_synchronize();
+        // std::cerr << "exit nvshmem_free "
+        // << ptr << "\n";
+      },
+      option_gpu);
 }
 
 std::vector<torch::Tensor>
 nvshmem_create_tensor_list_intra_node(const std::vector<int64_t> &shape,
-                           c10::ScalarType dtype) {
+                                      c10::ScalarType dtype) {
   check_nvshmem_init();
   auto current_device = c10::cuda::current_device();
   auto option_gpu =
@@ -168,7 +167,6 @@ nvshmem_create_tensor_list_intra_node(const std::vector<int64_t> &shape,
 
   return tensors;
 }
-
 
 PYBIND11_MODULE(_pynvshmem, m) {
   /* Basic queries */

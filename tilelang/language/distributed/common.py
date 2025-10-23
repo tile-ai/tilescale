@@ -1,7 +1,7 @@
 """The language interface for tl programs."""
+from __future__ import annotations
 
 from tvm import tir
-from typing import Optional
 from tvm.tir import PrimExpr
 
 
@@ -20,7 +20,7 @@ def get_num_ranks():
 def put_warp(src: PrimExpr,
              dst: PrimExpr,
              size: PrimExpr,
-             dst_pe: Optional[PrimExpr] = None,
+             dst_pe: PrimExpr | None = None,
              unroll_factor: int = 4):
     """Put to a remote buffer with unrolled loop.
 
@@ -31,7 +31,7 @@ def put_warp(src: PrimExpr,
             The destination address.
         size: PrimExpr
             The size of the put in elements.
-        dst_pe: Optional[PrimExpr]
+        dst_pe: PrimExpr | None
             The PE index of the destination.
             If provided, the dst is a symmetric address, otherwise it is a UVA address.
             If not provided, the dst is a UVA address and dst_pe is None.
@@ -45,7 +45,7 @@ def put_warp(src: PrimExpr,
 def get_warp(src: PrimExpr,
              dst: PrimExpr,
              size: PrimExpr,
-             src_pe: Optional[PrimExpr] = None,
+             src_pe: PrimExpr | None = None,
              unroll_factor: int = 4):
     """Get from a remote buffer with unrolled loop.
 
@@ -56,7 +56,7 @@ def get_warp(src: PrimExpr,
             The destination address.
         size: PrimExpr
             The size of the get in elements.
-        src_pe: Optional[PrimExpr]
+        src_pe: PrimExpr | None
             The PE index of the source.
             If provided, the src is a symmetric address, otherwise it is a UVA address.
             If not provided, the src is a UVA address and src_pe is None.
@@ -67,7 +67,7 @@ def get_warp(src: PrimExpr,
                            "warp")
 
 
-def put_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, dst_pe: Optional[PrimExpr] = None):
+def put_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, dst_pe: PrimExpr | None = None):
     """Put to a remote buffer.
 
     Args:
@@ -77,7 +77,7 @@ def put_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, dst_pe: Optional[Pri
             The destination address.
         size: PrimExpr
             The size of the put in elements.
-        dst_pe: Optional[PrimExpr]
+        dst_pe: PrimExpr | None
             The PE index of the destination.
             If provided, the dst is a symmetric address, otherwise it is a UVA address.
             If not provided, the dst is a UVA address and dst_pe is None.
@@ -87,7 +87,7 @@ def put_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, dst_pe: Optional[Pri
     )  # NOTE(wt): unroll_factor is not needed because currently we implement block-level comm based on NVSHMEM-style copy
 
 
-def get_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, src_pe: Optional[PrimExpr] = None):
+def get_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, src_pe: PrimExpr | None = None):
     """Get from a remote buffer.
 
     Args:
@@ -97,7 +97,7 @@ def get_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, src_pe: Optional[Pri
             The destination address.
         size: PrimExpr
             The size of the get in elements.
-        src_pe: Optional[PrimExpr]
+        src_pe: PrimExpr | None
             The PE index of the source.
             If provided, the src is a symmetric address, otherwise it is a UVA address.
             If not provided, the src is a UVA address and src_pe is None.

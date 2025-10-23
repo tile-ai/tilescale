@@ -6,7 +6,7 @@ from tilelang.language import ptx_arrive_barrier, evaluate, address_of
 from tilelang.language.kernel import get_thread_bindings, get_block_extents
 from tilelang.utils.target import check_hip_availability
 from tvm import tir
-from typing import Union, Any
+from typing import Any
 import tilelang.language as T
 from tvm.tir import PrimExpr, Var, Call, Buffer, BufferLoad
 
@@ -567,7 +567,7 @@ def alloc_barrier_gpu():
 
 def init_barrier_gpu(barrier: PrimExpr, expected: int):
     """Initialize a barrier for GPU-level synchronization.
-    
+
     Args:
         barrier: The barrier to initialize
         expected (int): The number of threads that need to arrive at the barrier.

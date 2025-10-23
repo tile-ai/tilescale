@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import sys
 import torch
 import torch.distributed
@@ -12,7 +14,6 @@ if version.parse(cuda_python_version) >= version.parse("12.8.0"):
 else:
     from cuda import cuda, cudart
 
-from typing import Optional
 from enum import IntEnum
 
 try:
@@ -66,12 +67,12 @@ def init_nvshmem_by_uniqueid(group: torch.distributed.ProcessGroup):
 """Host-side signaling functions."""
 
 
-def write32_on_stream(tensor: torch.Tensor, value: int, stream: Optional[torch.cuda.Stream] = None):
+def write32_on_stream(tensor: torch.Tensor, value: int, stream: torch.cuda.Stream | None = None):
     """Atomic write an 32-bit value to a tensor.
     Args:
         tensor (torch.Tensor): The tensor to write to.
         value (int): The value to write.
-        stream (Optional[torch.cuda.Stream]): The CUDA stream to use for the operation.
+        stream (torch.cuda.Stream | None): The CUDA stream to use for the operation.
             If None, the current stream will be used.
     """
     assert isinstance(tensor, torch.Tensor) and tensor.dtype in (torch.int32, torch.uint32), \
@@ -88,12 +89,12 @@ def write32_on_stream(tensor: torch.Tensor, value: int, stream: Optional[torch.c
     _CUDA_CHECK(err)
 
 
-def write64_on_stream(tensor: torch.Tensor, value: int, stream: Optional[torch.cuda.Stream] = None):
+def write64_on_stream(tensor: torch.Tensor, value: int, stream: torch.cuda.Stream | None = None):
     """Atomic write an 64-bit value to a tensor.
     Args:
         tensor (torch.Tensor): The tensor to write to.
         value (int): The value to write.
-        stream (Optional[torch.cuda.Stream]): The CUDA stream to use for the operation.
+        stream (torch.cuda.Stream | None): The CUDA stream to use for the operation.
             If None, the current stream will be used.
     """
     assert isinstance(tensor, torch.Tensor) and tensor.dtype in (torch.int64, torch.uint64), \

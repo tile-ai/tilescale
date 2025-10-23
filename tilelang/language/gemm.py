@@ -310,25 +310,6 @@ def gemm_v2(
             raise ValueError(
                 f"Unsupported retrieve_stride argument type: {type(object)} for buffer {object}")
 
-    def retrieve_stride(object: Union[tir.Buffer, tir.BufferRegion]) -> List[int]:
-        if isinstance(object, tir.Buffer):
-            strides = []
-            stride = 1
-            for s in reversed(object.shape):
-                strides.insert(0, stride)
-                stride *= s
-            return strides
-        elif isinstance(object, tir.BufferRegion):
-            buffer, _ = object.buffer, object.region
-            strides = []
-            stride = 1
-            for s in reversed(buffer.shape):
-                strides.insert(0, stride)
-                stride *= s
-            return strides
-        else:
-            raise ValueError(f"Unsupported argument type: {type(object)} for buffer {object}")
-
     A_shape = retrieve_shape(A)
     B_shape = retrieve_shape(B)
     C_shape = retrieve_shape(C)
@@ -412,26 +393,6 @@ def gemm_v2(
         else:
             raise ValueError(
                 f"Unsupported retrieve_offset argument type: {type(object)} for buffer {object}")
-
-    A_offset = retrieve_offset(A)
-    B_offset = retrieve_offset(B)
-    assert A_offset[-2] == 0, "The offset of the first dimension of A must be 0"
-    assert B_offset[-2] == 0, "The offset of the first dimension of B must be 0"
-    offset_a = A_offset[-1]
-    offset_b = B_offset[-1]
-
-    def retrieve_offset(object: Union[tir.Buffer, tir.BufferRegion]) -> tir.PrimExpr:
-        """Retrieve the offset of the buffer or buffer region."""
-        if isinstance(object, tir.Buffer):
-            return [0] * len(object.shape)
-        elif isinstance(object, tir.BufferRegion):
-            _, region = object.buffer, object.region
-            indices = []
-            for r in region:
-                indices.append(r.min)
-            return indices
-        else:
-            raise ValueError(f"Unsupported argument type: {type(object)} for buffer {object}")
 
     A_offset = retrieve_offset(A)
     B_offset = retrieve_offset(B)

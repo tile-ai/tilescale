@@ -1,5 +1,6 @@
+from __future__ import annotations
+
 from tilelang import tvm as tvm
-from typing import List
 from tvm import tir
 from tvm.tir import PrimExpr, Buffer, BufferLoad, op
 from tilelang import language as T
@@ -42,13 +43,13 @@ def buffer_to_tile_region(buffer: Buffer, access_type: str):
     return region(T.BufferLoad(buffer, mins), access_type, *extents)
 
 
-def buffer_load_to_tile_region(load: BufferLoad, access_type: str, extents: List[PrimExpr]):
+def buffer_load_to_tile_region(load: BufferLoad, access_type: str, extents: list[PrimExpr]):
     """Convert a buffer load operation to a tile region descriptor.
 
     Args:
         load (tir.BufferLoad): The buffer load operation
         access_type (str): Type of access - 'r' for read, 'w' for write, 'rw' for read-write
-        extents (List[tir.PrimExpr]): List of expressions defining the region size
+        extents (list[tir.PrimExpr]): list of expressions defining the region size
 
     Returns:
         tir.Call: A region descriptor for the loaded area
@@ -69,7 +70,7 @@ def buffer_load_to_tile_region(load: BufferLoad, access_type: str, extents: List
 
 
 def buffer_region_to_tile_region(buffer_region: tir.BufferRegion, access_type: str,
-                                 extents: List[tir.PrimExpr]):
+                                 extents: list[tir.PrimExpr]):
     """Convert a buffer region to a tile region descriptor.
 
     Args:
@@ -88,7 +89,7 @@ def buffer_region_to_tile_region(buffer_region: tir.BufferRegion, access_type: s
     return region(T.BufferLoad(buffer_region.buffer, mins), access_type, *region_extents)
 
 
-def index_to_coordinates(index, shape) -> List[PrimExpr]:
+def index_to_coordinates(index, shape) -> list[PrimExpr]:
     """
     Convert a flat (linear) index into multi-dimensional coordinates for a given shape.
 
@@ -99,7 +100,7 @@ def index_to_coordinates(index, shape) -> List[PrimExpr]:
         shape (Sequence[int]): The extents of each dimension (length >= 1).
 
     Returns:
-        List[PrimExpr]: Coordinates for each dimension in the same order as `shape`.
+        list[PrimExpr]: Coordinates for each dimension in the same order as `shape`.
     """
     coordinates = []
     dims = len(shape)

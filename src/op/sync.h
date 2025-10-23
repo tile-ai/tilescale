@@ -68,9 +68,9 @@ TVM_DLL const Op &sync_grid();
  */
 class BarrierAllBlocksSysOpNode : public TileOperatorNode {
 public:
-  PrimExpr local_bar_addr;      ///< Address expression for the local barrier
-  PrimExpr offset;              ///< Byte offset within the barrier buffer
-  Buffer local_bar;             ///< Local barrier buffer reference
+  PrimExpr local_bar_addr;       ///< Address expression for the local barrier
+  PrimExpr offset;               ///< Byte offset within the barrier buffer
+  Buffer local_bar;              ///< Local barrier buffer reference
   Array<PrimExpr> local_indices; ///< Indices used to access the barrier buffer
 
   static constexpr const char *_type_key = "tl.BarrierAllBlocksSysOp";

@@ -17,7 +17,8 @@ namespace tl {
 
 using namespace tir;
 
-PrimExpr BarrierAllBlocksSysOpNode::get_offset(const BufferLoadNode *load) const {
+PrimExpr
+BarrierAllBlocksSysOpNode::get_offset(const BufferLoadNode *load) const {
   PrimExpr offset = 0;
   PrimExpr stride = 1;
   auto buffer_shape = load->buffer->shape;
@@ -119,8 +120,7 @@ TileOperator BarrierAllBlocksSysOpNode::Clone() const {
   return BarrierAllBlocksSysOp(node);
 }
 
-PrimExpr BarrierAllBlocksSysOpNode::MakeLocalBarAddr(
-    const LowerArgs &T) const {
+PrimExpr BarrierAllBlocksSysOpNode::MakeLocalBarAddr(const LowerArgs &T) const {
   const auto *call = local_bar_addr.as<CallNode>();
   ICHECK(call && call->op.same_as(builtin::address_of()))
       << "local_bar_addr must remain an address_of call";

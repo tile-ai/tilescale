@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import torch
 import torch.distributed as dist
 import datetime
 import os
 import inspect
-from typing import List, Union, Tuple, Callable, Sequence, Optional
+from typing import Callable, Sequence
 from contextlib import contextmanager
 
 import importlib.metadata
@@ -82,7 +84,7 @@ def init_distributed(return_tp_group=False, init_nvshmem=True):
         return WORLD_SIZE, RANK, LOCAL_RANK
 
 
-def create_tensor(shape: List[int], dtype: torch.dtype) -> torch.Tensor:
+def create_tensor(shape: list[int], dtype: torch.dtype) -> torch.Tensor:
     # NOTE(wt): We discovered that IPC only works with tensors explicitly allocated by `cudaMalloc` somehow.
     return _create_tensor(shape, dtype)
 
@@ -131,9 +133,9 @@ def is_fp8_dtype(dtype: torch.dtype) -> bool:
 
 
 def _make_tensor(
-    shape: List[Union[int, Callable[[], int]]],
+    shape: list[int | Callable[[], int]],
     dtype: torch.dtype,
-    init_args: Union[Tuple[float, float], Tuple[int, int]],
+    init_args: tuple[float, float] | tuple[int, int],
     device: str = "cuda",
 ):
     """
@@ -173,7 +175,7 @@ def generate_data(configs):
 def dist_print(*args, **kwargs):
     """A wrapped distributed version of the built-in `print` function.
     Args:
-        allowed_ranks (List[int] or "all"): The ranks that are allowed to print. Default: [0].
+        allowed_ranks (list[int] or "all"): The ranks that are allowed to print. Default: [0].
         prefix (bool): Whether to add a prefix indicating the rank number. Default: False.
         need_sync (bool): Whether to synchronize all ranks before printing. Default: False.
     Note:
@@ -256,9 +258,7 @@ def supports_p2p_native_atomic():
     return support == 1
 
 
-def set_signal(signal_tensor: torch.Tensor,
-               signal: int,
-               stream: Optional[torch.cuda.Stream] = None):
+def set_signal(signal_tensor: torch.Tensor, signal: int, stream: torch.cuda.Stream | None = None):
     stream = stream or torch.cuda.current_stream()
     if signal_tensor.dtype in (torch.int32, torch.uint32):
         (err,) = cuda.cuStreamWriteValue32(
@@ -274,7 +274,7 @@ def set_signal(signal_tensor: torch.Tensor,
 
 def wait_eq(signal_tensor: torch.Tensor,
             signal: int,
-            stream: Optional[torch.cuda.Stream] = None,
+            stream: torch.cuda.Stream | None = None,
             require_i64=False):
     stream = stream or torch.cuda.current_stream()
     if signal_tensor.dtype == torch.int32:

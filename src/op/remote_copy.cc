@@ -83,8 +83,7 @@ PutOp::PutOp(Array<PrimExpr> args, BufferMap vmap) {
   (void)vmap;
 }
 
-Stmt PutOpNode::Lower(const LowerArgs &T,
-                      arith::Analyzer *analyzer) const {
+Stmt PutOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   (void)analyzer;
   Array<PrimExpr> new_args;
   std::stringstream ss;
@@ -188,8 +187,7 @@ GetOp::GetOp(Array<PrimExpr> args, BufferMap vmap) {
   (void)vmap;
 }
 
-Stmt GetOpNode::Lower(const LowerArgs &T,
-                      arith::Analyzer *analyzer) const {
+Stmt GetOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   (void)analyzer;
   Array<PrimExpr> new_args;
   std::stringstream ss;

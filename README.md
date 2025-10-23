@@ -7,7 +7,7 @@ As AI model entering the "scaling-law" era, modern AI infrastructure is also sca
 
 TileScale is the first programming and compiler stack to unify these intra-chip and inter-chip compute resources into a unified, hierarchical, distributed architecture, which virtualizes the whole distributed system as a unified "mega-device" to users. To facilitate programming, TileScale provides a set of consistent tile-level primitives across all hardware layers for compute, memory, and communication. Thus, users can just write tile-level computing logic or flow at certain layers of interest, then TileScale automatically compiles and optimizes the scheduling of computation, communication, memory access, and their overlap. The goal of TileScale is to define an open, streamlined programming model for future distributed architectures and systems, addressing the emerging needs of modern AI computation, such as fine-grained computation and communication overlap, flexible parallel mechanisms, dataflow computation, NUMA programming, etc.
 
-#### The full technical white-paper is comming soon.
+#### The full technical white-paper is coming soon.
 
 ## Hierarchical Distributed Architecture (HDA)
 Unlike traditional GPU SIMT programming, which assumes thread-level computation on a single device, TileScale is designed to manage compute, memory, and communication across all hierarchical scales, from threads and PEs to dies, chips, and nodes. It introduces a unified virtual device architecture, called Hierarchical Distributed Architecture (HDA), to abstract these distributed systems.
@@ -111,7 +111,7 @@ def gemm(
         C: T.Tensor((M, N), dtype),
 ):
     with T.Kernel( # launch config
-        deivce=(4),
+        device=(4),
         block=(T.ceildiv(N, block_N), T.ceildiv(M, block_M)),
         threads=256
     ):

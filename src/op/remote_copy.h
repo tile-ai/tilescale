@@ -20,19 +20,20 @@ using namespace tir;
 
 class PutOpNode : public TileOperatorNode {
 public:
-  PrimExpr src_addr;             ///< Address of the source buffer (address_of)
-  PrimExpr dst_addr;             ///< Address of the destination buffer
-  PrimExpr src_offset;           ///< Byte offset within the source buffer
-  PrimExpr dst_offset;           ///< Byte offset within the destination buffer
-  PrimExpr copy_size;            ///< Number of bytes/elements to copy
-  PrimExpr dst_pe;               ///< Destination processing element (optional)
-  int unroll_factor;             ///< Unroll factor for warp copies
-  bool is_symmetric{false};      ///< Whether remote copy is symmetric
-  Buffer src_buffer;             ///< Source buffer reference
-  Buffer dst_buffer;             ///< Destination buffer reference
-  Array<PrimExpr> src_indices;   ///< Source indices used for address computation
-  Array<PrimExpr> dst_indices;   ///< Destination indices used for address computation
-  std::string scope;             ///< Scope: {warp, block}
+  PrimExpr src_addr;           ///< Address of the source buffer (address_of)
+  PrimExpr dst_addr;           ///< Address of the destination buffer
+  PrimExpr src_offset;         ///< Byte offset within the source buffer
+  PrimExpr dst_offset;         ///< Byte offset within the destination buffer
+  PrimExpr copy_size;          ///< Number of bytes/elements to copy
+  PrimExpr dst_pe;             ///< Destination processing element (optional)
+  int unroll_factor;           ///< Unroll factor for warp copies
+  bool is_symmetric{false};    ///< Whether remote copy is symmetric
+  Buffer src_buffer;           ///< Source buffer reference
+  Buffer dst_buffer;           ///< Destination buffer reference
+  Array<PrimExpr> src_indices; ///< Source indices used for address computation
+  Array<PrimExpr>
+      dst_indices;   ///< Destination indices used for address computation
+  std::string scope; ///< Scope: {warp, block}
 
   static constexpr const char *_type_key = "tl.PutOp";
   TVM_DECLARE_FINAL_OBJECT_INFO(PutOpNode, TileOperatorNode);
@@ -64,15 +65,13 @@ public:
            equal(dst_addr, other->dst_addr) &&
            equal(src_offset, other->src_offset) &&
            equal(dst_offset, other->dst_offset) &&
-           equal(copy_size, other->copy_size) &&
-           equal(dst_pe, other->dst_pe) &&
+           equal(copy_size, other->copy_size) && equal(dst_pe, other->dst_pe) &&
            equal(unroll_factor, other->unroll_factor) &&
            equal(is_symmetric, other->is_symmetric) &&
            equal(src_buffer, other->src_buffer) &&
            equal(dst_buffer, other->dst_buffer) &&
            equal(src_indices, other->src_indices) &&
-           equal(dst_indices, other->dst_indices) &&
-           scope == other->scope;
+           equal(dst_indices, other->dst_indices) && scope == other->scope;
   }
 
   void SHashReduce(SHashReducer hash_reduce) const {
@@ -112,19 +111,20 @@ public:
 
 class GetOpNode : public TileOperatorNode {
 public:
-  PrimExpr src_addr;             ///< Remote source buffer address
-  PrimExpr dst_addr;             ///< Local destination buffer address
-  PrimExpr src_offset;           ///< Byte offset within the source buffer
-  PrimExpr dst_offset;           ///< Byte offset within the destination buffer
-  PrimExpr copy_size;            ///< Number of bytes/elements to copy
-  PrimExpr src_pe;               ///< Source processing element (optional)
-  int unroll_factor;             ///< Unroll factor for warp copies
-  bool is_symmetric{false};      ///< Whether remote copy is symmetric
-  Buffer src_buffer;             ///< Source buffer reference
-  Buffer dst_buffer;             ///< Destination buffer reference
-  Array<PrimExpr> src_indices;   ///< Source indices used for address computation
-  Array<PrimExpr> dst_indices;   ///< Destination indices used for address computation
-  std::string scope;             ///< Scope: {warp, block}
+  PrimExpr src_addr;           ///< Remote source buffer address
+  PrimExpr dst_addr;           ///< Local destination buffer address
+  PrimExpr src_offset;         ///< Byte offset within the source buffer
+  PrimExpr dst_offset;         ///< Byte offset within the destination buffer
+  PrimExpr copy_size;          ///< Number of bytes/elements to copy
+  PrimExpr src_pe;             ///< Source processing element (optional)
+  int unroll_factor;           ///< Unroll factor for warp copies
+  bool is_symmetric{false};    ///< Whether remote copy is symmetric
+  Buffer src_buffer;           ///< Source buffer reference
+  Buffer dst_buffer;           ///< Destination buffer reference
+  Array<PrimExpr> src_indices; ///< Source indices used for address computation
+  Array<PrimExpr>
+      dst_indices;   ///< Destination indices used for address computation
+  std::string scope; ///< Scope: {warp, block}
 
   static constexpr const char *_type_key = "tl.GetOp";
   TVM_DECLARE_FINAL_OBJECT_INFO(GetOpNode, TileOperatorNode);
@@ -156,15 +156,13 @@ public:
            equal(dst_addr, other->dst_addr) &&
            equal(src_offset, other->src_offset) &&
            equal(dst_offset, other->dst_offset) &&
-           equal(copy_size, other->copy_size) &&
-           equal(src_pe, other->src_pe) &&
+           equal(copy_size, other->copy_size) && equal(src_pe, other->src_pe) &&
            equal(unroll_factor, other->unroll_factor) &&
            equal(is_symmetric, other->is_symmetric) &&
            equal(src_buffer, other->src_buffer) &&
            equal(dst_buffer, other->dst_buffer) &&
            equal(src_indices, other->src_indices) &&
-           equal(dst_indices, other->dst_indices) &&
-           scope == other->scope;
+           equal(dst_indices, other->dst_indices) && scope == other->scope;
   }
 
   void SHashReduce(SHashReducer hash_reduce) const {

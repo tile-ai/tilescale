@@ -66,12 +66,12 @@ def determine_target(target: str | Target | Literal["auto"] = "auto",
     Determine the appropriate target for compilation (CUDA, HIP, or manual selection).
 
     Args:
-        target (Union[str, Target, Literal["auto"]]): User-specified target.
+        target (str | Target | Literal["auto"]): User-specified target.
             - If "auto", the system will automatically detect whether CUDA or HIP is available.
             - If a string or Target, it is directly validated.
 
     Returns:
-        Union[str, Target]: The selected target ("cuda", "hip", or a valid Target object).
+        str | Target: The selected target ("cuda", "hip", or a valid Target object).
 
     Raises:
         ValueError: If no CUDA or HIP is available and the target is "auto".
@@ -124,7 +124,7 @@ def determine_target(target: str | Target | Literal["auto"] = "auto",
     return return_var
 
 
-def parse_device(device: Union[str, torch.device, int]) -> int:
+def parse_device(device: str | torch.device | int) -> int:
     if isinstance(device, str):
         if device.startswith("cuda"):
             return torch.cuda.current_device()
@@ -138,7 +138,7 @@ def parse_device(device: Union[str, torch.device, int]) -> int:
         return device
     else:
         raise TypeError("device must be str|torch.device|int")
-    
+
 
 def target_is_cuda(target: Target) -> bool:
     return _ffi_api.TargetIsCuda(target)

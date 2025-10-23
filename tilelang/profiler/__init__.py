@@ -85,7 +85,11 @@ class Profiler:
 
         torch.cuda.synchronize()
         if env.USE_NVSHMEM:
-            import pynvshmem
+            try:
+                import pynvshmem
+            except ImportError as e:
+                raise ValueError(
+                    "pynvshmem is not installed but required for distributed inputs") from e
             pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
 
     def _get_inputs(self, with_output=False):
@@ -96,6 +100,15 @@ class Profiler:
         return ins
 
     def _get_distributed_inputs(self, with_output=False):
+        if not env.USE_NVSHMEM:
+            raise ValueError("NVSHMEM is required for distributed inputs but USE_NVSHMEM is False")
+
+        try:
+            import pynvshmem
+        except ImportError as e:
+            raise ValueError(
+                "pynvshmem is not installed but required for distributed inputs") from e
+
         ins = []
         for i in range(len(self.params)):
             if with_output or i not in self.result_idx:
@@ -267,7 +280,7 @@ class Profiler:
                     rhs,
                 ]
 
-    def run_once(self, func: Optional[Callable] = None):
+    def run_once(self, func: Callable | None = None):
         if env.USE_DISTRIBUTED:  # noqa: SIM108
             # self.init_distributed()
             ins = self._get_distributed_inputs()

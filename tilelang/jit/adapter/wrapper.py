@@ -693,7 +693,7 @@ class TLCUDASourceWrapper:
         lib_code = self.source + init_func + host_func
         return lib_code
 
-    def get_stream_type(self) -> Dict[str, str]:
+    def get_stream_type(self) -> dict[str, str]:
         return {"name": "stream", "type": "cudaStream_t"}
 
     @property
@@ -938,7 +938,7 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         self.host_func = self.create_dispatch_func(code, function_informations)
         return self.lib_code
 
-    def get_stream_type(self) -> Dict[str, str]:
+    def get_stream_type(self) -> dict[str, str]:
         return {"name": "stream", "type": "int"}
 
 

@@ -30,7 +30,7 @@ class PassConfigKey(str, Enum):
     """
 
     TL_PTXAS_REGISTER_USAGE_LEVEL = "tl.ptxas_register_usage_level"
-    """The PTXAS register usage level in [0, 10], which controls the 
+    """The PTXAS register usage level in [0, 10], which controls the
     aggressiveness of optimizations that affect register usage. Default: None"""
 
     TL_ENABLE_PTXAS_VERBOSE_OUTPUT = "tl.enable_ptxas_verbose_output"
@@ -62,7 +62,7 @@ class PassConfigKey(str, Enum):
     TL_DISABLE_RDC = "tl.disable_rdc"
     """Disable RDC (Relocatable Device Code) compilation in distributed programming. Default: False"""
     # (wt) Introduced to temporarily avoid the bug in https://github.com/tile-ai/tilelang/issues/659
-    
+
     TL_DISABLE_THREAD_STORAGE_SYNC = "tl.disable_thread_storage_sync"
     """Disable thread storage synchronization pass. When enabled, disables the
     automatic insertion of thread synchronization barriers (e.g., __syncthreads())

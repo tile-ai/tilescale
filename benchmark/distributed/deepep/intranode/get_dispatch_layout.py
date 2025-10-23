@@ -1,10 +1,11 @@
 # For intranode only
+from __future__ import annotations
 
 import torch
 import tilelang
 import tilelang.language as T
 from tilelang.profiler import do_bench
-from typing import Optional, Tuple
+from typing import tuple
 import sys
 from argparse import ArgumentParser
 
@@ -14,7 +15,7 @@ tilelang.disable_cache()
 # TODO(wt): Add async functionality
 def get_dispatch_layout(
         topk_idx: torch.Tensor, num_experts: int,
-        num_ranks: int) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, torch.Tensor]:
+        num_ranks: int) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
     """Calculate the layout required for later communication.
 
     Arguments:
@@ -200,16 +201,22 @@ def test_get_dispatch_layout(
     # Validate correctness
     topk_idx = gen_topk_idx(num_tokens, num_topk, num_experts)
     buffer = deep_ep_cpp.Buffer(0, num_ranks, 0, 0, False, False)
-    deepep_impl = lambda: buffer.get_dispatch_layout(topk_idx, num_experts, None, False, False)
+
+    def deepep_impl():
+        return buffer.get_dispatch_layout(topk_idx, num_experts, None, False, False)
+
     ref_num_tokens_per_rank, _, ref_num_tokens_per_expert, ref_is_token_in_rank, _ = deepep_impl()
-    tl_impl = lambda: get_dispatch_layout(topk_idx, num_experts, num_ranks)
+
+    def tl_impl():
+        return get_dispatch_layout(topk_idx, num_experts, num_ranks)
+
     num_tokens_per_rank, _, num_tokens_per_expert, is_token_in_rank = tl_impl()
 
     assert torch.allclose(num_tokens_per_expert, ref_num_tokens_per_expert), \
         f"num_tokens_per_expert mismatch, max err: {(num_tokens_per_expert - ref_num_tokens_per_expert).abs().max()}"
 
     assert torch.equal(is_token_in_rank, ref_is_token_in_rank), \
-        f"is_token_in_rank mismatch"
+        "is_token_in_rank mismatch"
 
     assert torch.equal(num_tokens_per_rank, ref_num_tokens_per_rank), \
         f"num_tokens_per_rank mismatch, max err: {(num_tokens_per_rank - ref_num_tokens_per_rank).abs().max()}"

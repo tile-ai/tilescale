@@ -15,7 +15,6 @@ if version.parse(cuda_python_version) >= version.parse("12.8.0"):
     from cuda.bindings import driver as cuda
 else:
     from cuda import cuda
-from tilelang.distributed import perf_fn
 
 tilelang.disable_cache()
 os.environ['NCCL_DEBUG'] = 'WARN'  # silence NCCL log
@@ -57,7 +56,7 @@ def copy_and_barrier_all_intra_node_kernel(local_rank,
             T.barrier_all_blocks_sys(sync_buffer, phase)
         # barrier all CTAs
         T.sync_grid(sync_buffer[2 * num_ranks])
-        
+
         if block_id == 0:
             T.barrier_all_blocks_sys(sync_buffer[num_ranks], phase)
         # barrier all CTAs
@@ -179,13 +178,18 @@ def cp_engine_producer_all_gather_full_mesh_pull(
             )
 
 
-def ag_gemm_op(A, B, C, ag_buffer, signal_buffer, sync_buffer, phase, M_per_rank, N, signal_target, rank,
-               group, local_world_size, world_size, local_copy_kernel, gemm_kernel, gemm_stream,
-               ag_stream):
+def ag_gemm_op(A, B, C, ag_buffer, signal_buffer, sync_buffer, phase, M_per_rank, N, signal_target,
+               rank, group, local_world_size, world_size, local_copy_kernel, gemm_kernel,
+               gemm_stream, ag_stream):
 
     with torch.cuda.stream(gemm_stream):
         local_copy_kernel(
-            A, ag_buffer[rank], signal_buffer[rank], sync_buffer, phase, stream=gemm_stream.cuda_stream)
+            A,
+            ag_buffer[rank],
+            signal_buffer[rank],
+            sync_buffer,
+            phase,
+            stream=gemm_stream.cuda_stream)
         phase[0] += 2
 
     ag_stream.wait_stream(gemm_stream)
