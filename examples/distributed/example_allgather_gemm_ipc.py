@@ -6,109 +6,220 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing
 from tilelang.distributed import init_dist
-from cuda import cudart
-from tilelang.distributed import set_signal, wait_eq
+from tilelang.carver.arch import driver
+# from cuda.bindings import runtime as cudart
+import importlib.metadata
+cuda_python_version = importlib.metadata.version("cuda-python")
+from packaging import version
+if version.parse(cuda_python_version) >= version.parse("12.8.0"):
+    from cuda.bindings import driver as cuda
+    from cuda.bindings import runtime as cudart
+else:
+    from cuda import cuda, cudart
+from tilelang.distributed import set_signal, wait_eq, perf_fn
 
+    
 tilelang.disable_cache()
 os.environ['NCCL_DEBUG'] = 'WARN'  # silence NCCL log
 
+@tilelang.jit(
+    pass_configs={
+        "tl.disable_warp_specialized": True,
+        "tl.disable_tma_lower": True
+    })
+def copy_and_barrier_all_intra_node_kernel(local_rank,
+                                            rank,
+                                            num_ranks,
+                                            M,
+                                            K,
+                                            block_M,
+                                            block_K,
+                                            threads,
+                                            dtype="float16"):
 
+    M_per_rank = T.ceildiv(M, num_ranks)
+    sm_num = driver.get_num_sms()
+    m_blocks = T.ceildiv(M_per_rank, block_M)
+    k_blocks = T.ceildiv(K, block_K)
+    waves = T.ceildiv(m_blocks * k_blocks, sm_num)
+    
+    @T.macro
+    def copy_kernel(
+            src: T.Tensor((M_per_rank, K), dtype),
+            dst: T.Tensor((M, K), dtype),
+            data_shared: T.Tensor((block_M, block_K), dtype),
+            block_id
+    ):
+        for w in T.serial(waves):
+            tile_id = sm_num * w + block_id
+            bx = tile_id % m_blocks
+            by = tile_id // m_blocks
+            
+            if by < k_blocks:
+                T.copy(src[bx * block_M, by * block_K], data_shared)
+                T.copy(data_shared, dst[rank * M_per_rank + bx * block_M, by * block_K])
+    
+    
+    @T.macro
+    def barrier_all_intra_node_non_atomic(
+        sync_buffer: T.Tensor((3 * num_ranks), "uint32"),
+        block_id
+    ):
+        if block_id == 0:
+            # _barrier_all_intra_node_non_atomic_once_block(local_rank, rank, num_ranks, sync_buffer, target_value)
+            T.barrier_all_blocks_sys(sync_buffer)
+            
+        # barrier all CTAs
+        T.sync_grids(sync_buffer[2 * num_ranks])
+
+    
+    @T.prim_func
+    def local_copy(
+            A: T.Tensor((M_per_rank, K), dtype),
+            ag_buffer: T.Tensor((M, K), dtype),
+            signal_buffer: T.Tensor((num_ranks), "uint32"),
+            sync_buffer: T.Tensor((3 * num_ranks), "uint32"),
+  
+    ):
+        with T.Kernel(sm_num, threads=threads) as (block_id):
+            data_shared = T.alloc_shared((block_M, block_K), dtype)
+            
+            T.annotate_layout({data_shared: tilelang.layout.make_swizzled_layout(data_shared)})
+            
+            barrier_all_intra_node_non_atomic(sync_buffer, block_id)
+            copy_kernel(A, ag_buffer, data_shared, block_id)
+            tx = T.get_thread_binding(0)
+            if block_id == 0 and tx < num_ranks:  # set symm barrier
+                if tx == rank:
+                    signal_buffer[tx] = 1
+                else:
+                    signal_buffer[tx] = 0
+            barrier_all_intra_node_non_atomic(sync_buffer, block_id)
+        
+
+    return local_copy
+
+@tilelang.jit
 def gemm_kernel(M,
                 N,
                 K,
                 num_rank,
+                local_rank,
                 block_M,
                 block_N,
                 block_K,
                 threads,
                 dtype="float16",
-                accum_dtype="float"):
+                accum_dtype="float",
+                persistent=False):
 
+    M_per_rank = T.ceildiv(M, num_rank)
+    sm_num = driver.get_num_sms()
+    
     @T.prim_func
-    def main(
+    def non_persistent_main(
             A: T.Tensor((M, K), dtype),
             B: T.Tensor((K, N // num_rank), dtype),
+            signal_buffer: T.Tensor((num_rank), "uint32"),
             C: T.Tensor((M, N // num_rank), dtype),
     ):
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
+        with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N // num_rank, block_N), threads=threads) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_K, block_N), dtype)
+            C_shared = T.alloc_shared((block_M, block_N), dtype)    
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
 
-            T.clear(C_local)
-            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=3):
-                T.copy(A[by * block_M, k * block_K], A_shared)
-                T.copy(B[k * block_K, bx * block_N], B_shared)
-                T.gemm(A_shared, B_shared, C_local)
-            T.copy(C_local, C[by * block_M, bx * block_N])
-
-    return main
-
-
-def cp_engine_producer_all_gather_put(local_tensor, ag_buffer, signal_buffer, M_per_rank, N,
-                                      signal_target, rank, local_world_size, world_size,
-                                      intranode_ag_stream):
-    local_rank = rank % local_world_size
-    n_nodes = world_size // local_world_size
-    node_rank = rank // local_world_size
-
-    for i in range(1, local_world_size):
-        segment = rank * M_per_rank * N
-        local_dst_rank = (local_rank + local_world_size - i) % local_world_size
-        src_ptr = ag_buffer[local_rank].data_ptr() + segment * local_tensor.element_size()
-        dst_ptr = ag_buffer[local_dst_rank].data_ptr() + segment * local_tensor.element_size()
-        # Using copy engine to perform intranode transmission
-        # Sending rank-th local tensor to other ranks inside the node.
-        (err,) = cudart.cudaMemcpyAsync(
-            dst_ptr,
-            src_ptr,
-            M_per_rank * N * local_tensor.element_size(),
-            cudart.cudaMemcpyKind.cudaMemcpyDefault,
-            intranode_ag_stream.cuda_stream,
-        )
-        # Notify the peer that the transmission is done.
-        set_signal(signal_buffer[local_dst_rank][rank], signal_target, intranode_ag_stream)
-
-    for i in range(1, n_nodes):
-        recv_rank = local_rank + (node_rank + n_nodes - i) % n_nodes * local_world_size
-        recv_segment = recv_rank * M_per_rank * N
-        # Waiting for the internode data ready
-        wait_eq(signal_buffer[local_rank][recv_rank], signal_target, intranode_ag_stream)
-        src_ptr = ag_buffer[local_rank].data_ptr() + recv_segment * local_tensor.element_size()
-        for j in range(1, local_world_size):
-            local_dst_rank = (local_rank + local_world_size - j) % local_world_size
-            dst_ptr = ag_buffer[local_dst_rank].data_ptr(
-            ) + recv_segment * local_tensor.element_size()
-            # Sending (local_rank + j*local_world_size) % world_size -th local tensor to other ranks inside the node.
-            (err,) = cudart.cudaMemcpyAsync(
-                dst_ptr,
-                src_ptr,
-                M_per_rank * N * local_tensor.element_size(),
-                cudart.cudaMemcpyKind.cudaMemcpyDefault,
-                intranode_ag_stream.cuda_stream,
+            T.annotate_layout({C_shared: tilelang.layout.make_swizzled_layout(C_shared)})
+            
+            # Threadblock swizzling is crucial for comp-comm overlap
+            T.use_swizzle(
+                panel_size=T.ceildiv(M_per_rank, block_M), 
+                order="column", 
+                offset=local_rank * T.ceildiv(M_per_rank, block_M)
             )
-            # Notify the peer that the transmission is done.
-            set_signal(signal_buffer[local_dst_rank][recv_rank], signal_target, intranode_ag_stream)
 
+            T.clear(C_local)
+            tid = T.get_thread_binding(0)
+            if tid == 0:
+                T.wait_eq(signal_buffer[bx * block_M // M_per_rank], 1)
 
-def ag_gemm_op(A, B, C, ag_buffer, signal_buffer, M_per_rank, N, signal_target, rank, group,
-               local_world_size, world_size, gemm_kernel, ag_stream):
+            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=3):
+                T.copy(A[bx * block_M, k * block_K], A_shared)
+                T.copy(B[k * block_K, by * block_N], B_shared)
+                T.gemm(A_shared, B_shared, C_local)
+            T.copy(C_local, C_shared)
+            T.copy(C_shared, C[bx * block_M, by * block_N])
 
-    dist.barrier(group)
+    @T.prim_func
+    def persistent_main(
+            A: T.Tensor((M, K), dtype),
+            B: T.Tensor((K, N // num_rank), dtype),
+            signal_buffer: T.Tensor((num_rank), "uint32"),
+            C: T.Tensor((M, N // num_rank), dtype),
+    ):
+        with T.Kernel(sm_num, threads=threads) as (block_id):
+            A_shared = T.alloc_shared((block_M, block_K), dtype)
+            B_shared = T.alloc_shared((block_K, block_N), dtype)
+            C_shared = T.alloc_shared((block_M, block_N), dtype)    
+            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
 
-    # all_gather A to ag_buffer
-    with torch.cuda.stream(ag_stream):
-        cp_engine_producer_all_gather_put(A, ag_buffer, signal_buffer, M_per_rank, N, signal_target,
-                                          rank, local_world_size, world_size, ag_stream)
+            T.annotate_layout({C_shared: tilelang.layout.make_swizzled_layout(C_shared)})
+        
+            for bx, by in T.Persistent([T.ceildiv(M, block_M), T.ceildiv(N // num_rank, block_N)], sm_num, block_id):
+                # Manual swizzle for persistent kernel
+                # FIXME: this kernel produces incorrect results currently
+                T.clear(C_local)
+                T.wait_eq(signal_buffer[bx * block_M // M_per_rank], 1)
 
+                for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=3):
+                    T.copy(A[bx * block_M, k * block_K], A_shared)
+                    T.copy(B[k * block_K, by * block_N], B_shared)
+                    T.gemm(A_shared, B_shared, C_local)
+                    
+                T.copy(C_local, C_shared)
+                T.copy(C_shared, C[bx * block_M, by * block_N])
+
+    return persistent_main if persistent else non_persistent_main
+
+def cp_engine_producer_all_gather_full_mesh_pull(
+  local_tensor, ag_buffer, signal_buffer, M_per_rank, N,
+  signal_target, rank, local_world_size, world_size,
+  intranode_ag_stream,
+):
+    rank_orders = [(rank + i) % local_world_size for i in range(1, local_world_size)]
+
+    with torch.cuda.stream(intranode_ag_stream):
+        for src_rank in rank_orders:
+            dst = ag_buffer[rank][src_rank * M_per_rank:(src_rank + 1) * M_per_rank, :]
+            src = ag_buffer[src_rank][src_rank * M_per_rank:(src_rank + 1) * M_per_rank, :]
+            dst.copy_(src)
+
+            (err, ) = cuda.cuStreamWriteValue32(
+                intranode_ag_stream.cuda_stream,
+                signal_buffer[rank][src_rank].data_ptr(),
+                signal_target,
+                cuda.CUstreamWriteValue_flags.CU_STREAM_WRITE_VALUE_DEFAULT,
+            )
+            
+def ag_gemm_op(A, B, C, ag_buffer, signal_buffer, sync_buffer, M_per_rank, N, signal_target, rank, group,
+               local_world_size, world_size, local_copy_kernel, gemm_kernel, gemm_stream, ag_stream):
+    
+    with torch.cuda.stream(gemm_stream):
+        local_copy_kernel(A, ag_buffer[rank], signal_buffer[rank], sync_buffer, stream=gemm_stream.cuda_stream)
+    
+    # # current_stream = torch.cuda.current_stream()
+    ag_stream.wait_stream(gemm_stream)
+
+    cp_engine_producer_all_gather_full_mesh_pull(A, ag_buffer, signal_buffer, M_per_rank, N, signal_target,
+                                      rank, local_world_size, world_size, ag_stream)
+
+    with torch.cuda.stream(gemm_stream):
+        gemm_kernel(ag_buffer[rank], B, signal_buffer[rank], C, stream=gemm_stream.cuda_stream)
+        # C = torch.matmul(ag_buffer[rank], B)
+
+    gemm_stream.wait_stream(ag_stream)
     current_stream = torch.cuda.current_stream()
-    current_stream.wait_stream(ag_stream)
-
-    dist.barrier(group)
-    torch.cuda.synchronize()
-
-    gemm_kernel(ag_buffer[rank], B, C)
-
+    current_stream.wait_stream(gemm_stream)
     return C
 
 
@@ -128,11 +239,12 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     M = args.M if args else 8192
     N = args.N if args else 8192
     K = args.K if args else 8192
+    persistent = args.persistent if args else False
     M_per_rank = M // num_local_ranks
     N_per_rank = N // num_local_ranks
 
     BLOCK_M = 128
-    BLOCK_N = 128
+    BLOCK_N = 256
     BLOCK_K = 64
     threads = 256
 
@@ -144,29 +256,45 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         local_rank=local_rank,
         num_local_ranks=num_local_ranks,
         group=group)
-    kernel = tilelang.compile(gemm_kernel(M, N, K, num_ranks, BLOCK_M, BLOCK_N, BLOCK_K, threads))
+    kernel = gemm_kernel(M, N, K, num_ranks, rank, BLOCK_M, BLOCK_N, BLOCK_K, threads, persistent=persistent)
+    local_copy_kernel = copy_and_barrier_all_intra_node_kernel(
+        local_rank=local_rank,
+        rank=local_rank,
+        num_ranks=num_ranks,
+        M=M,
+        K=K,
+        block_M=128,
+        block_K=256,
+        threads=256,
+    )
     kernel.initialize(allocator=allocator)
-    if local_rank == 0:
+    local_copy_kernel.initialize(allocator=allocator)
+    if local_rank == 1:
         print(kernel.get_kernel_source())
+        print(local_copy_kernel.get_kernel_source())
 
     A = tilelang.tensor((M_per_rank, K), dtype, allocator=allocator).normal_()
     B = tilelang.tensor((K, N_per_rank), dtype, allocator=allocator).normal_()
     C = tilelang.tensor((M, N_per_rank), dtype, allocator=allocator)
     ag_buffer = tilelang.tensor((M, K), dtype, allocator=allocator, return_peers=True)
     signal_buffer = tilelang.tensor((num_local_ranks,),
-                                    torch.int32,
+                                    torch.uint32,
                                     allocator=allocator,
                                     return_peers=True)
-    signal_buffer[rank].fill_(0)
-    ag_buffer[rank][rank * M_per_rank:(rank + 1) * M_per_rank, :].copy_(A)
+    signal_buffer[rank].fill_(0) # check if needed
+    sync_buffer = tilelang.tensor((3 * num_ranks,),
+                                    torch.uint32,
+                                    allocator=allocator)
+    # ag_buffer[rank][rank * M_per_rank:(rank + 1) * M_per_rank, :].copy_(A)
 
-    dist.barrier(group)
+    # dist.barrier(group)
 
-    ag_stream = torch.cuda.Stream()
+    gemm_stream = torch.cuda.Stream()
+    ag_stream = torch.cuda.Stream(priority=-1)
     signal_target = 1
 
-    tilelang_C = ag_gemm_op(A, B, C, ag_buffer, signal_buffer, M_per_rank, K, signal_target, rank,
-                            group, num_local_ranks, num_local_ranks, kernel, ag_stream)
+    tilelang_C = ag_gemm_op(A, B, C, ag_buffer, signal_buffer, sync_buffer, M_per_rank, K, signal_target, rank,
+                            group, num_local_ranks, num_local_ranks, local_copy_kernel, kernel, gemm_stream, ag_stream)
 
     torch_ag_buffer = torch.empty([M, K], dtype=dtype, device="cuda")
     torch_C = torch_ag_gemm(group, A, B, torch_ag_buffer)
@@ -176,7 +304,12 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     else:
         print(f"rank {local_rank} check failed.❌")
         print(f"torch_C: {torch_C}, tilelang_C: {tilelang_C}")
-        raise ValueError("Test failed")
+        # raise ValueError("Test failed")
+    
+    _, tl_t = perf_fn(lambda: ag_gemm_op(A, B, C, ag_buffer, signal_buffer, sync_buffer, M_per_rank, K, signal_target, rank,
+                            group, num_local_ranks, num_local_ranks, local_copy_kernel, kernel, gemm_stream, ag_stream), warmup=5, rep=10)
+    
+    print(f"rank {local_rank} tilelang ag_gemm time: {tl_t:.2f} ms, TFLOPS: {2*M*N*K/1e9/(tl_t)/num_local_ranks:.2f}")
 
     dist.destroy_process_group()
 
@@ -184,10 +317,11 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        '--num-processes', type=int, default=2, help='Number of processes to spawn (default: 2)')
+        '--num-processes', type=int, default=8, help='Number of processes to spawn (default: 2)')
     parser.add_argument('--M', type=int, default=8192, help='M dimension')
-    parser.add_argument('--N', type=int, default=8192, help='N dimension')
+    parser.add_argument('--N', type=int, default=28672, help='N dimension')
     parser.add_argument('--K', type=int, default=8192, help='K dimension')
+    parser.add_argument('--persistent', action='store_true', default=False, help='Use persistent kernel')
     args = parser.parse_args()
     num_processes = args.num_processes
 

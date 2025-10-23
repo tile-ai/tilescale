@@ -220,7 +220,7 @@ def perf_fn(fn, rep, warmup):
     for n in range(rep + warmup):
         if n == warmup:
             start_event.record()
-        output = fn(n)
+        output = fn()
     stop_event.record()
     start_event.wait()
     stop_event.wait()
