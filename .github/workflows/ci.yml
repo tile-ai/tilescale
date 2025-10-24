@@ -62,7 +62,7 @@ jobs:
         commit_message: "lint"
 
   build-test-nvidia:
-    runs-on: [self-hosted, nvidia]
+    runs-on: [self-hosted, nvidia, hopper]
     needs: format-check
     permissions:
       contents: read
@@ -116,7 +116,7 @@ jobs:
         if [ "${#DIST_TESTS[@]}" -gt 0 ]; then
           echo "Running distributed examples with TILELANG_USE_DISTRIBUTED=1:"
           printf '%s\n' "${DIST_TESTS[@]}"
-          TILELANG_USE_DISTRIBUTED=1 python -m pytest -n 4 "${DIST_TESTS[@]}" -v -r fE
+          TILELANG_USE_DISTRIBUTED=1 python -m pytest -n 1 "${DIST_TESTS[@]}" -v -r fE
         else
           echo "No distributed examples found."
         fi
@@ -142,7 +142,7 @@ jobs:
         if [ "${#DIST_TESTS[@]}" -gt 0 ]; then
           echo "Running distributed tests with TILELANG_USE_DISTRIBUTED=1:"
           printf '%s\n' "${DIST_TESTS[@]}"
-          TILELANG_USE_DISTRIBUTED=1 python -m pytest -n 4 "${DIST_TESTS[@]}" -v -r fE
+          TILELANG_USE_DISTRIBUTED=1 python -m pytest -n 1 "${DIST_TESTS[@]}" -v -r fE
         else
           echo "No distributed tests found under testing/python."
         fi
