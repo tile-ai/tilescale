@@ -99,7 +99,7 @@ void sync_ipc_handles(
   CUDA_CHECK(cudaDeviceSynchronize());
 }
 
-PYBIND11_MODULE(ipc_ext, m) {
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def(
       "_create_tensor",
       [](const std::vector<int64_t> &shape, const py::object &dtype) {

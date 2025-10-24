@@ -93,7 +93,7 @@ torch::Tensor tensor_from_ptr(uint64_t ptr_val, std::vector<int64_t> shape,
   return result;
 }
 
-PYBIND11_MODULE(alloc_cuda, m) {
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.doc() = "Utility to wrap a CUDA device pointer (uintptr_t) into a "
             "torch.Tensor (zero-copy)";
   m.def("tensor_from_ptr", &tensor_from_ptr, py::arg("ptr"), py::arg("shape"),

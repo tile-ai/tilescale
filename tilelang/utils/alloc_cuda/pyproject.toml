@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=65", "wheel", "torch", "packaging"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alloc_cuda"
+version = "0.1.0"
+description = "TileLang CUDA memory allocator (PyTorch C++/CUDA extension)."
+requires-python = ">=3.8"
+authors = [{name = "Yu Cheng"}]
+license = "MIT"
+
+[tool.setuptools]
+packages = ["alloc_cuda"]

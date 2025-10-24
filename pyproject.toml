@@ -31,6 +31,8 @@ dependencies = [
     "torch>=2.7; platform_system == 'Darwin'",
     "tqdm>=4.62.3",
     "typing-extensions>=4.10.0",
+    "alloc_cuda @ file:./tilelang/utils/alloc_cuda",
+    "ipc_ext @ file:./tilelang/distributed/common",
 ]
 
 [project.optional-dependencies]
@@ -43,6 +45,7 @@ requires = [
     "cython>=3.0.0",
     "scikit-build-core",
     "setuptools>=63",
+    "torch",
 ]
 build-backend = "scikit_build_core.build"
 
