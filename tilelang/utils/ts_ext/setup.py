@@ -19,7 +19,7 @@ else:
     cuda_lib = None
 
 extra_compile_args = {
-    "cxx":  ["-O3", "-std=c++17", "-fPIC"],
+    "cxx": ["-O3", "-std=c++17", "-fPIC"],
     "nvcc": ["-O3", "-std=c++17", "-Xcompiler", "-fPIC"],
 }
 

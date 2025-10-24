@@ -8,6 +8,7 @@ import argparse
 
 tilelang.disable_cache()
 
+
 @tilelang.jit(
     out_idx=[6], pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
