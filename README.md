@@ -234,5 +234,8 @@ def flash_mla(
             # Or, you can write copy output_global to peers and reduce by hand
 ```
 
+## Installation
+For detailed instructions, please refer to the [Installation Guide](docs/get_started/Installation.md).
+
 ## Call for Contribution!!
 TileScale is in its early experimental stage and driven by the open-source community. We're looking for passionate contributors to help shape the future of distributed programming together! If you're excited about designing and developing the next-generation programming paradigm, please contact us: tile-ai@outlook.com. For more information, please check out our [roadmap](https://github.com/tile-ai/tilescale/issues/4).
