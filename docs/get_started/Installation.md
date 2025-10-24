@@ -26,7 +26,7 @@ pip install -e . --no-build-isolation
 
 3. **Verify Installation**:
 
-Once inside the container, verify that **TileScale** is working correctly:
+Verify that **TileScale** is working correctly:
 
 ```bash
 python -c "import tilelang; print(tilelang.__version__)"
@@ -36,7 +36,7 @@ You can now run TileScale examples and develop your applications.
 
 **Example Usage:**
 
-After accessing the container, you can run TileScale examples:
+You can run TileScale examples:
 
 ```bash
 cd /home/tilelang
