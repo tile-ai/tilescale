@@ -31,8 +31,7 @@ dependencies = [
     "torch>=2.7; platform_system == 'Darwin'",
     "tqdm>=4.62.3",
     "typing-extensions>=4.10.0",
-    "alloc_cuda @ file:./tilelang/utils/alloc_cuda",
-    "ipc_ext @ file:./tilelang/distributed/common",
+    "tilescale_ext @ file:./tilelang/utils/ts_ext",
 ]
 
 [project.optional-dependencies]
