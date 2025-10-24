@@ -14,7 +14,7 @@ tilelang.disable_cache()
 #TODO: Bench on 4/8 H100
 #TODO: split N?
 '''init_nvshmem_by_torch_process_group(_TP_GROUP)
-Note: Minor numerical differences exist between Triton/TileLang and Torch (~1e-2) 
+Note: Minor numerical differences exist between Triton/TileLang and Torch (~1e-2)
 due to the order reductions are handled in different implementations.
 (No error when #PE = 2)
 '''

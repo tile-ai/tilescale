@@ -12,14 +12,14 @@ tilelang.disable_cache()
 def torch_sequence_all_to_all_reference(data_src, group):
     """
     PyTorch Distributed All-to-All Golden Reference
-    
+
     Input:  [BATCH_SIZE, NUM_HEADS, SEQ_PER_PE, HEAD_DIM] - full heads, partial sequence per PE
     Output: [BATCH_SIZE, HEADS_PER_PE, SEQ_LEN, HEAD_DIM] - partial heads, full sequence per PE
-    
+
     Args:
         data_src: Input tensor on each PE
         group: Distributed process group
-    
+
     Returns:
         Output tensor after all-to-all communication
     """

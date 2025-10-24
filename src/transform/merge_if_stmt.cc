@@ -39,7 +39,7 @@ private:
       if (const IfThenElseNode *if_node = new_stmt.as<IfThenElseNode>()) {
         if (!if_node->else_case.defined()) {
           if (current_condition.defined() &&
-              StructuralEqual()(current_condition, if_node->condition)) {
+              ExprDeepEqual()(current_condition, if_node->condition)) {
             current_if_bodies.push_back(if_node->then_case);
             continue;
           } else {
@@ -92,7 +92,7 @@ private:
 
 using namespace tir::transform;
 tvm::transform::Pass MergeIfStmt() {
-  auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     return MergeIfStmtRewriter::Substitute(f);
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.MergeIfStmt", {});

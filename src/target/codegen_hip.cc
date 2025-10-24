@@ -41,10 +41,18 @@ static std::string GetFP8Type(DataType type) {
     stream << "fp8_e4" << vec << "_t";
   } else if (type.code() == DataType::kFloat8_e4m3fnuz) {
     stream << "fp8_e4" << vec << "_t";
+  } else if (type.code() == DataType::kFloat8_e4m3) {
+    stream << "fp8_e4" << vec << "_t";
+  } else if (type.code() == DataType::kFloat8_e4m3b11fnuz) {
+    stream << "fp8_e4" << vec << "_t";
   } else if (type.code() == DataType::kFloat8_e5m2) {
     stream << "fp8_e5" << vec << "_t";
+  } else if (type.code() == DataType::kFloat8_e5m2fnuz) {
+    stream << "fp8_e5" << vec << "_t";
+  } else if (type.code() == DataType::kFloat8_e8m0fnu) {
+    stream << "fp8_e8" << vec << "_t";
   } else {
-    LOG(FATAL) << "Unsupported FP8 type in HIP codegen";
+    LOG(FATAL) << "Unsupported FP8 type in HIP codegen: " << type;
   }
   return stream.str();
 }
@@ -480,7 +488,7 @@ void CodeGenTileLangHIP::PrintVecElemLoad(const std::string &vec, DataType t,
     os << "((half2*)(&(" << vec << "." << access[i / 2] << ")))->"
        << access[i % 2];
   } else if (t.is_bfloat16()) {
-    os << "((nv_bfloat162*)(&(" << vec << "." << access[i / 2] << ")))->"
+    os << "((bfloat16x2*)(&(" << vec << "." << access[i / 2] << ")))->"
        << access[i % 2];
   } else if (t.lanes() > 4 && t.lanes() <= 8) {
     std::string type_name;
@@ -880,7 +888,7 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
       os << "]" << ((i < 3) ? ", " : ")");
     }
   } else if (op->op.same_as(tl::tvm_mfma())) {
-    // arg 0: prefix: {otype}_16x16x16{itype}
+    // arg 0: prefix: {otype}_{intrM}x{intrN}x{intrK}_{itype}
     // arg 1: A layout: row/col
     // arg 2: B layout: row/col
     // arg 3: A precision: float16, float32, ...
@@ -914,6 +922,7 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
         {"int8", "char"},
         {"int32", "int"},
         {"int8x4", "int32_t"},
+        {"int8x8", "int64_t"},
         {"int32x4", "int32x4"},
         {"float16", "half"},
         {"float32", "float"},
@@ -925,17 +934,17 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
         {"float8_e4m3fnuzx8", "long"},
         {"float32x16", "float32x16"}};
     std::string call_mfma_code = R"({
-    *((({C_dytpe}*){c_ref}) + {c_bias}) = {mfma_buildin}(*((({A_dytpe}*){a_ref}) + {a_bias}),
-                  *((({B_dytpe}*){b_ref}) + {b_bias}),
-                  *((({C_dytpe}*){c_ref}) + {c_bias}), 0, 0, 0);
-  })";
+      *((({C_dtype}*){c_ref}) + {c_bias}) = {mfma_buildin}(*((({A_dtype}*){a_ref}) + {a_bias}),
+                    *((({B_dtype}*){b_ref}) + {b_bias}),
+                    *((({C_dtype}*){c_ref}) + {c_bias}), 0, 0, 0);
+    })";
     std::string mfma_buildin = "__builtin_amdgcn_mfma_" + prefix;
     Replacer replacer;
 
     replacer.register_rule("{mfma_buildin}", mfma_buildin);
-    replacer.register_rule("{A_dytpe}", dtype_map[A_dtype]);
-    replacer.register_rule("{B_dytpe}", dtype_map[B_dtype]);
-    replacer.register_rule("{C_dytpe}", dtype_map[C_dtype]);
+    replacer.register_rule("{A_dtype}", dtype_map[A_dtype]);
+    replacer.register_rule("{B_dtype}", dtype_map[B_dtype]);
+    replacer.register_rule("{C_dtype}", dtype_map[C_dtype]);
     replacer.register_rule("{a_ref}", a_ref);
     replacer.register_rule("{a_bias}", a_bias);
     replacer.register_rule("{b_ref}", b_ref);
@@ -954,6 +963,13 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
                           op->args, true, os);
   } else if (op->op.same_as(tl::tl_gemm_sp())) {
     LOG(FATAL) << "tl_gemm_sp is not supported on HIP";
+  } else if (op->op.same_as(tl::loop_break())) {
+    this->PrintIndent();
+    this->stream << "break;\n";
+  } else if (op->op.same_as(tl::no_set_max_nreg())) {
+    // HIP doesn't need explicit register management like CUDA
+    // This is a no-op for HIP
+    return;
   } else {
     CodeGenC::VisitExpr_(op, os);
   }
@@ -1159,7 +1175,8 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
     os << "bfloat16_t";
     os << '(' << std::scientific << op->value << 'f' << ')';
     return;
-  } else if (op->dtype.is_float8_e4m3fnuz()) {
+  } else if (op->dtype.is_float8_e4m3fnuz() || op->dtype.is_float8_e4m3() ||
+             op->dtype.is_float8_e4m3fn()) {
     os << "fp8_e4_t";
     os << '(' << std::scientific << op->value << 'f' << ')';
     return;

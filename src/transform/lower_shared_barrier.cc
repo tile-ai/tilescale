@@ -13,6 +13,8 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+#include <utility>
+
 namespace tvm {
 namespace tl {
 
@@ -22,7 +24,7 @@ class SharedBarrierRewriter : public StmtExprMutator {
 public:
   static Stmt Rewrite(Stmt body, bool disable_shuffle_elect = false) {
     SharedBarrierRewriter rewriter(disable_shuffle_elect);
-    return rewriter(body);
+    return rewriter(std::move(body));
   }
 
 private:
@@ -43,7 +45,7 @@ private:
 
     Array<Buffer> barrier_buffers;
 
-    for (auto [data, buffer] : buffer_map_) {
+    for (const auto &[data, buffer] : buffer_map_) {
       const auto *ptr_type =
           buffer->data->type_annotation.as<PointerTypeNode>();
       auto storage_scope = ptr_type->storage_scope;
@@ -53,7 +55,7 @@ private:
       }
     }
 
-    if (barrier_buffers.size() == 0) {
+    if (barrier_buffers.empty()) {
       return StmtExprMutator::VisitStmt_(op);
     }
 
@@ -117,6 +119,8 @@ private:
                {BufferLoad(new_buffer, {0}), PrimExpr(count)});
       init_mbarrier_calls_.push_back(Evaluate(call));
     }
+    if (init_mbarrier_calls_.empty())
+      return block;
 
     Array<Stmt> new_body;
     PrimExpr condition;
@@ -125,8 +129,11 @@ private:
     } else {
       condition = EQ(thread_var_->var, 0);
     }
-    new_body.push_back(
-        IfThenElse(condition, SeqStmt(init_mbarrier_calls_), Stmt()));
+    new_body.push_back(IfThenElse(condition,
+                                  init_mbarrier_calls_.size() == 1
+                                      ? init_mbarrier_calls_.back()
+                                      : SeqStmt(init_mbarrier_calls_),
+                                  Stmt()));
     new_body.push_back(
         Evaluate(Call(DataType::Handle(), builtin::tvm_storage_sync(),
                       {StringImm("shared")})));
@@ -189,7 +196,7 @@ namespace transform {
 using namespace tir::transform;
 
 tvm::transform::Pass LowerSharedBarrier() {
-  auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, PassContext ctx) {
     bool disable_shuffle_elect =
         ctx->GetConfig<Bool>(kDisableShuffleElect, Bool(false)).value();
     return tl::LowerSharedBarrier(std::move(f), disable_shuffle_elect);

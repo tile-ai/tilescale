@@ -1,13 +1,13 @@
+from __future__ import annotations
 from tvm import tir, IRModule
 from tvm.target import Target
 import tilelang
 from tilelang.transform import PassContext
-from tilelang.contrib.nvcc import have_tma
-from typing import Optional
+from tilelang.contrib.nvcc import have_tma, is_hopper
 
 
-def allow_warp_specialized(pass_ctx: Optional[PassContext] = None,
-                           target: Optional[Target] = None) -> bool:
+def allow_warp_specialized(pass_ctx: PassContext | None = None,
+                           target: Target | None = None) -> bool:
     # avoid circular import
     from tilelang.jit.adapter.utils import is_cuda_target
 
@@ -19,8 +19,8 @@ def allow_warp_specialized(pass_ctx: Optional[PassContext] = None,
     return not disable_warp_specialized
 
 
-def allow_tma_and_warp_specialized(pass_ctx: Optional[PassContext] = None,
-                                   target: Optional[Target] = None) -> bool:
+def allow_tma_and_warp_specialized(pass_ctx: PassContext | None = None,
+                                   target: Target | None = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
     if not have_tma(target):
@@ -29,26 +29,26 @@ def allow_tma_and_warp_specialized(pass_ctx: Optional[PassContext] = None,
     return not disable_tma_lower and allow_warp_specialized(pass_ctx=pass_ctx, target=target)
 
 
-def allow_fence_proxy(target: Optional[Target] = None) -> bool:
+def allow_fence_proxy(target: Target | None = None) -> bool:
     return have_tma(target)
 
 
-def allow_vectorize(pass_ctx: Optional[PassContext] = None) -> bool:
+def allow_vectorize(pass_ctx: PassContext | None = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
     disable_vectorize = pass_ctx.config.get("tir.disable_vectorize", False)
     return not disable_vectorize
 
 
-def allow_global_thread_synchronization(pass_ctx: Optional[PassContext] = None) -> bool:
+def allow_global_thread_synchronization(pass_ctx: PassContext | None = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
     enable_global_thread_sync = pass_ctx.config.get("tir.detect_global_barrier", False)
     return enable_global_thread_sync
 
 
-def should_enable_aggressive_merge(pass_ctx: Optional[PassContext] = None,
-                                   target: Optional[Target] = None) -> bool:
+def should_enable_aggressive_merge(pass_ctx: PassContext | None = None,
+                                   target: Target | None = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
     enable_aggressive_merge = bool(
@@ -61,14 +61,47 @@ def should_enable_aggressive_merge(pass_ctx: Optional[PassContext] = None,
     return enable_aggressive_merge
 
 
+def should_force_let_inline(pass_ctx: PassContext | None = None) -> bool:
+    if pass_ctx is None:
+        pass_ctx = tilelang.transform.get_pass_context()
+    return bool(pass_ctx and pass_ctx.config.get(tilelang.PassConfigKey.TL_FORCE_LET_INLINE, False))
+
+
 def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Bind the target device information to the module
+    """
+    Bind target information and progressively legalize and lower frontend Tile IR into a form suitable for downstream optimization and codegen.
+
+    This pass pipeline:
+    - Binds the provided target to the module.
+    - Legalizes frontend Tile IR into TVM-compatible constructs.
+    - Simplifies expressions.
+    - Configures reducer layouts and performs layout inference for fragments and shared memory.
+    - Lowers high-level tile operations and L2 persistent maps.
+    - Legalizes vectorized loops and inserts safety checks for memory accesses.
+    - Re-simplifies to remove redundancies introduced by safety checks.
+    - Attempts loop vectorization for dynamic-shaped loops.
+
+    Parameters:
+        mod (IRModule): The input IR module containing frontend Tile IR.
+        target (Target): Target device information to bind into the module.
+
+    Returns:
+        IRModule: The transformed module, ready for target-specific optimization passes.
+    """
     mod = tir.transform.BindTarget(target)(mod)
 
-    # Legalize the frontend IR to make it compatible with TVM
-    mod = tilelang.transform.FrontendLegalize()(mod)
+    if should_force_let_inline():
+        # Force-let inline whenever the pass config requests it.
+        mod = tilelang.transform.LetInline()(mod)
+    # Add wrapper for single buf store
+    mod = tilelang.transform.AddWrapperForSingleBufStore()(mod)
+    # Inject assumes to speedup tvm prover
+    mod = tilelang.transform.InjectAssumes()(mod)
     # Simplify the IR expressions
-    mod = tir.transform.Simplify()(mod)
+    mod = tilelang.transform.Simplify()(mod)
+    # Set layouts for reducers
+    mod = tilelang.transform.LayoutReducer()(mod)
     # Infer memory layouts for fragments and shared memory
     mod = tilelang.transform.LayoutInference()(mod)
     # Lower high-level tile operations to low-level operations
@@ -94,7 +127,8 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     pass_ctx = tilelang.transform.get_pass_context()
     # Lower the barrier.arrive into specific initialization slot
     mod = tilelang.transform.LowerSharedBarrier()(mod)
-
+    # Lower the shared.tmem into specific initialization slot
+    mod = tilelang.transform.LowerSharedTmem()(mod)
     # which may be introduced by the LegalizeSafeMemoryAccess
     if allow_tma_and_warp_specialized(pass_ctx=pass_ctx, target=target):
         mod = tilelang.transform.IfStmtBinding()(mod)
@@ -110,7 +144,8 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         # so we need to lower the opaque block first
         mod = tilelang.transform.LowerOpaqueBlock()(mod)
         mod = tilelang.transform.MergeIfStmt()(mod)
-        mod = tilelang.transform.RewriteWgmmaSync()(mod)
+        if is_hopper(target):
+            mod = tilelang.transform.RewriteWgmmaSync()(mod)
         mod = tilelang.transform.InjectFenceProxy()(mod)
     else:
         mod = tilelang.transform.IfStmtBinding()(mod)
@@ -122,6 +157,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
             # in hopper device, wgmma is an async proxy
             # so we need to inject a fence proxy before it
             mod = tilelang.transform.InjectFenceProxy()(mod)
+
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
     mod = tir.transform.NarrowDataType(32)(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
@@ -158,7 +194,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     if allow_global_thread_synchronization():
         mod = tilelang.transform.ThreadSync("global")(mod)
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
-    mod = tir.transform.SplitHostDevice()(mod)
+    mod = tilelang.transform.SplitHostDevice()(mod)
     # MergeSharedMemoryAllocations must be applied after SplitHostDevice
     # because the merged allocation site is at the beginning of each device function
     enable_aggressive_merge = should_enable_aggressive_merge(pass_ctx=pass_ctx, target=target)
@@ -170,6 +206,8 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # Inject PTX async copy must behind the thread sync pass
     # as ptx async copy won't be recognized as a valid buffer load
     mod = tilelang.transform.InjectPTXAsyncCopy()(mod)
+    if allow_tma_and_warp_specialized(pass_ctx=pass_ctx, target=target):
+        mod = tilelang.transform.AnnotateWarpGroupRegAlloc()(mod)
     mod = tilelang.transform.MakePackedAPI()(mod)
     mod = tilelang.transform.LowerDeviceKernelLaunch()(mod)
 

@@ -43,17 +43,12 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
     return main
 
 
-def main():
-    M = 16384
-    N = 16384
-    K = 16384
+def main(M=16384, N=16384, K=16384):
     block_M = 128
     block_N = 128
     block_K = 64
 
     jit_kernel = matmul(M, N, K, block_M, block_N, block_K)
-
-    tilelang.disable_cache()
 
     # 3. Test the kernel in Python with PyTorch data
     import torch

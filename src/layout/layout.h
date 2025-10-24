@@ -7,6 +7,8 @@
 #define TVM_TL_LAYOUT_LAYOUT_H_
 
 #include <tvm/arith/analyzer.h>
+#include <tvm/arith/iter_affine_map.h>
+#include <utility>
 
 namespace tvm {
 namespace tl {
@@ -36,6 +38,7 @@ public:
   virtual Array<PrimExpr> Forward(const Array<PrimExpr> &vars) const;
 
   virtual Layout Inverse() const;
+  virtual std::pair<Layout, arith::IterMapLevel> InverseWithLevel() const;
 
   virtual std::string DebugOutput() const;
 
@@ -76,6 +79,7 @@ public:
   Array<PrimExpr> GetForwardVars() const final;
 
   Layout Inverse() const final;
+  std::pair<Layout, arith::IterMapLevel> InverseWithLevel() const final;
 
   PrimExpr ThreadExtent() const;
 
@@ -100,6 +104,8 @@ public:
   Range ThreadRange() const { return thread_range_; }
 
   bool IsEqual(const FragmentNode *other, bool skip_index = false) const;
+
+  bool IsCompletedReplicated() const;
 
   static void RegisterReflection();
 
@@ -131,12 +137,16 @@ public:
 
 Var InputPlaceholder(size_t idx);
 Var ReplicationPlaceholder();
+IterVar make_itervar(std::string name, PrimExpr dom);
 
 Fragment makeGemmFragment8x8();
 Fragment makeGemmFragment8x8Transposed();
 Fragment makeGemmFragmentC(const int block_m, const int block_n,
                            const int warp_m, const int warp_n,
                            const int element_size);
+Fragment makeGemmSparseFragmentC(const int block_m, const int block_n,
+                                 const int warp_m, const int warp_n,
+                                 const int element_size);
 Fragment makeGemmFragmentCCDNA(const int block_m, const int block_n,
                                const int warp_m, const int warp_n,
                                const int element_size);
@@ -154,17 +164,20 @@ Fragment makeGemmFragmentB(const int block_m, const int block_n,
 Fragment makeGemmFragmentACDNA(const int block_m, const int block_n,
                                const int block_k, const int warp_m,
                                const int warp_n, const int element_size,
-                               bool transposed = false);
+                               const int k_pack, bool transposed = false);
 
 // Default Memory Layout
 Layout makeGemmLayoutLinear(int stride, int continuous);
 Layout makeGemmABLayoutPadded(int stride, int continuous, int element_size);
 Layout makeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
-                        int element_size, int kfactor);
+                        int element_size, bool k_inner = true);
 Layout makeGemmABLayoutHopper(int mat_stride, int mat_continuous,
-                              int continuity, int element_size, int kfactor);
+                              int continuity, int element_size,
+                              bool k_inner = true);
+Layout makeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
+                             int element_size, bool k_inner = true);
 Layout makeGemmABLayoutCDNA(int stride, int continuous, int element_size,
-                            int kfactor);
+                            int kPack);
 
 Fragment makeGemmVoltaFragmentC(const int block_m, const int block_n,
                                 const int warp_m, const int warp_n,
@@ -173,7 +186,12 @@ Fragment makeGemmVoltaFragmentA(const int block_m, const int block_n,
                                 const int block_k, const int warp_m,
                                 const int warp_n);
 Layout makeGemmVoltaABLayout(int stride, int continuous, bool is_a,
-                             int kfactor);
+                             bool k_inner = true);
+
+Layout makeTensorOpMultiplicand(int mat_stride, int mat_continuous,
+                                int elementsize, int crosswise);
+Layout makeGemmSparseAmpereABLayout(int mat_stride, int mat_continuous,
+                                    int elementsize);
 
 Layout makeFullBankSwizzleLayout(int stride, int continuous, int element_size);
 Layout makeHalfBankSwizzleLayout(int stride, int continuous, int element_size);

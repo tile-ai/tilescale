@@ -11,8 +11,6 @@ import math
 
 from heuristic import num_splits_heuristic
 
-tilelang.disable_cache()
-
 
 def flashattn(batch, heads, heads_kv, dim, dim_v):
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
@@ -20,7 +18,10 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
     accum_dtype = "float"
     kv_group_num = heads // heads_kv
 
-    @tilelang.jit(out_idx=[-1])
+    @tilelang.jit(
+        out_idx=[-1], pass_configs={
+            tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+        })
     def kernel_func(block_N, block_H, page_block_size, num_split, num_stages, threads, num_pages,
                     max_num_blocks_per_seq, max_selected_blocks):
         shape_q = [batch, heads, dim]
@@ -220,12 +221,12 @@ class SparseFlashAttn(torch.nn.Module):
             block_N=block_N,
             block_H=self.block_H,
             page_block_size=page_block_size,
-            num_split=T.symbolic("num_split"),
+            num_split=T.dynamic("num_split"),
             num_stages=2,
             threads=128,
             num_pages=num_pages,
-            max_num_blocks_per_seq=T.symbolic("max_num_blocks_per_seq"),
-            max_selected_blocks=T.symbolic("max_selected_blocks"),
+            max_num_blocks_per_seq=T.dynamic("max_num_blocks_per_seq"),
+            max_selected_blocks=T.dynamic("max_selected_blocks"),
         )
 
         props = torch.cuda.get_device_properties(torch.device("cuda:0"))

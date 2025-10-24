@@ -1,7 +1,8 @@
+from __future__ import annotations
 import tvm.script.ir_builder.tir.ir as _ir
 from tvm.script.ir_builder.tir import frame
 from tvm.tir import PrimExpr
-from typing import Any, Dict
+from typing import Any
 import tilelang.language.tir.op as _tir_op
 import functools
 
@@ -9,7 +10,7 @@ import functools
 def serial(start: PrimExpr,
            stop: PrimExpr = None,
            *,
-           annotations: Dict[str, Any] = None) -> frame.ForFrame:
+           annotations: dict[str, Any] = None) -> frame.ForFrame:
     """The serial For statement.
 
     Parameters
@@ -34,7 +35,7 @@ def serial(start: PrimExpr,
 def parallel(start: PrimExpr,
              stop: PrimExpr = None,
              *,
-             annotations: Dict[str, Any] = None) -> frame.ForFrame:
+             annotations: dict[str, Any] = None) -> frame.ForFrame:
     """The parallel For statement.
 
     Parameters
@@ -59,7 +60,7 @@ def parallel(start: PrimExpr,
 def vectorized(start: PrimExpr,
                stop: PrimExpr = None,
                *,
-               annotations: Dict[str, Any] = None) -> frame.ForFrame:
+               annotations: dict[str, Any] = None) -> frame.ForFrame:
     """The vectorized For statement.
 
     Parameters
@@ -84,7 +85,7 @@ def vectorized(start: PrimExpr,
 def unroll(start: PrimExpr,
            stop: PrimExpr = None,
            *,
-           annotations: Dict[str, Any] = None) -> frame.ForFrame:
+           annotations: dict[str, Any] = None) -> frame.ForFrame:
     """The unrolled For statement.
 
     Parameters
@@ -111,7 +112,7 @@ def thread_binding(
     stop: PrimExpr = None,
     thread: str = None,
     *,
-    annotations: Dict[str, Any] = None,
+    annotations: dict[str, Any] = None,
 ) -> frame.ForFrame:
     """The thread-binding For statement.
 
@@ -291,6 +292,8 @@ call_llvm_pure_intrin = _dtype_forward(_tir_op.call_llvm_pure_intrin)
 call_pure_extern = _dtype_forward(_tir_op.call_pure_extern)
 ptx_mma = _dtype_forward(_tir_op.ptx_mma)
 ptx_mma_sp = _dtype_forward(_tir_op.ptx_mma_sp)
+ptx_wgmma_ss = _dtype_forward(_tir_op.ptx_wgmma_ss)
+ptx_wgmma_rs = _dtype_forward(_tir_op.ptx_wgmma_rs)
 ptx_ldmatrix = _dtype_forward(_tir_op.ptx_ldmatrix)
 ptx_cp_async = _dtype_forward(_tir_op.ptx_cp_async)
 ptx_cp_async_bulk = _dtype_forward(_tir_op.ptx_cp_async_bulk)

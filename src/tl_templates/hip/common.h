@@ -67,7 +67,7 @@ using half_t = float16_t;
 using bfloat16_t = hip_bfloat16;
 
 struct bfloat16x2 {
-  bfloat16_t data[2];
+  bfloat16_t x, y;
 };
 
 struct bfloat16x4 {
@@ -108,4 +108,14 @@ TL_DEVICE unsigned __pack_bfloat162(const bfloat16_t x, const bfloat16_t y) {
 template <typename T1, typename T2>
 TL_DEVICE void AtomicAdd(T1 *address, T2 val) {
   atomicAdd(reinterpret_cast<T1 *>(address), static_cast<T1>(val));
+}
+
+// Overload for when the first argument is a value instead of a pointer
+template <typename T1, typename T2>
+TL_DEVICE void AtomicAdd(T1 address, T2 val) {
+  atomicAdd(reinterpret_cast<T1 *>(&address), static_cast<T1>(val));
+}
+
+template <typename T1, typename T2> TL_DEVICE T1 AtomicAddRet(T1 &ref, T2 val) {
+  return atomicAdd(&ref, static_cast<T1>(val));
 }

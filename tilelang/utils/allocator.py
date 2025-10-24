@@ -1,11 +1,10 @@
-# allocator_ctypes.py
+from __future__ import annotations
+
 import ctypes
 import ctypes.util
-from typing import Optional, Tuple, Union
 import torch
 import torch.distributed as dist
-from tilelang.distributed import _create_ipc_handle, _sync_ipc_handles
-from alloc_cuda import tensor_from_ptr
+from tilescale_ext import tensor_from_ptr, _create_ipc_handle, _sync_ipc_handles
 from tilelang.utils.target import parse_device
 import contextlib
 
@@ -26,7 +25,7 @@ def _element_size_bytes(dtype: torch.dtype) -> int:
     return torch.empty((), dtype=dtype).element_size()
 
 
-def _prod_shape(shape: Union[Tuple[int, ...], int]) -> int:
+def _prod_shape(shape: tuple[int, ...] | int) -> int:
     if isinstance(shape, int):
         return shape
     p = 1
@@ -69,15 +68,15 @@ if hasattr(_libcudart, "cudaSetDevice"):
 
 
 class BaseAllocator:
-    func: Optional[callable] = None
+    func: callable | None = None
 
     def __init__(self,
                  size: int,
-                 device: Optional[Union[str, torch.device, int]] = None,
+                 device: str | torch.device | int | None = None,
                  is_distributed: bool = False,
-                 local_rank: Optional[int] = None,
-                 num_local_ranks: Optional[int] = None,
-                 group: Optional[dist.ProcessGroup] = None,
+                 local_rank: int | None = None,
+                 num_local_ranks: int | None = None,
+                 group: dist.ProcessGroup | None = None,
                  align: int = 256) -> None:
         if size <= 0:
             raise ValueError("size must be > 0")
@@ -164,7 +163,7 @@ class BaseAllocator:
         return self._initialized
 
     def _allocate_tensor(self,
-                         shape: Tuple[int, ...],
+                         shape: tuple[int, ...],
                          dtype: torch.dtype,
                          return_peers=False,
                          take_ownership: bool = False) -> torch.Tensor:
@@ -239,7 +238,7 @@ def get_allocator(size: int = 2**30,
                   is_distributed: bool = True,
                   local_rank: int = 0,
                   num_local_ranks: int = 1,
-                  group: Optional[dist.ProcessGroup] = None) -> BaseAllocator:
+                  group: dist.ProcessGroup | None = None) -> BaseAllocator:
     return BaseAllocator(
         size,
         device=device,

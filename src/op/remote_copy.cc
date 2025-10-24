@@ -10,6 +10,8 @@
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
 
+#include <sstream>
+
 #include "../target/cuda.h"
 #include "../target/utils.h"
 #include "builtin.h"
@@ -21,7 +23,7 @@ namespace tl {
 
 using namespace tir;
 
-PrimExpr PutOp::get_offset(const BufferLoadNode *load) {
+PrimExpr PutOpNode::get_offset(const BufferLoadNode *load) const {
   PrimExpr offset = 0;
   PrimExpr stride = 1;
   auto buffer_shape = load->buffer->shape;
@@ -32,33 +34,57 @@ PrimExpr PutOp::get_offset(const BufferLoadNode *load) {
   return div(offset * load->dtype.bits(), 8);
 }
 
-PutOp::PutOp(Array<PrimExpr> args, BufferMap vmap) {
-  src_addr = args[0];
-  dst_addr = args[1];
-  ICHECK(src_addr.as<CallNode>()) << "src_addr must be a call node";
-  ICHECK(src_addr.as<CallNode>()->op.same_as(builtin::address_of()))
-      << "src_addr must be address_of op";
-  ICHECK(dst_addr.as<CallNode>()) << "dst_addr must be a call node";
-  ICHECK(dst_addr.as<CallNode>()->op.same_as(builtin::address_of()))
-      << "dst_addr must be address_of op";
-
-  src_offset =
-      this->get_offset(src_addr.as<CallNode>()->args[0].as<BufferLoadNode>());
-  dst_offset =
-      this->get_offset(dst_addr.as<CallNode>()->args[0].as<BufferLoadNode>());
-  src_buffer = src_addr.as<CallNode>()->args[0].as<BufferLoadNode>()->buffer;
-  dst_buffer = dst_addr.as<CallNode>()->args[0].as<BufferLoadNode>()->buffer;
-
-  copy_size = args[2];
-  dst_pe = args[3];
-  unroll_factor = args[4].as<IntImm>().value()->value;
-  scope = args[5].as<StringImm>().value()->value;
-  if (dst_pe.defined()) {
-    is_symmetric = true;
-  }
+PrimExpr PutOpNode::MakeAddress(const Buffer &buffer,
+                                const Array<PrimExpr> &indices) const {
+  return Call(DataType::Handle(), builtin::address_of(),
+              {BufferLoad(buffer, indices)});
 }
 
-Stmt PutOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+PrimExpr PutOpNode::MakeRemappedAddress(const LowerArgs &T,
+                                        const Buffer &buffer,
+                                        const Array<PrimExpr> &indices) const {
+  Buffer remapped = buffer;
+  if (T.buffer_remap.count(buffer)) {
+    remapped = T.buffer_remap[buffer];
+  }
+  return MakeAddress(remapped, indices);
+}
+
+PutOp::PutOp(Array<PrimExpr> args, BufferMap vmap) {
+  ObjectPtr<PutOpNode> node = make_object<PutOpNode>();
+  node->src_addr = args[0];
+  node->dst_addr = args[1];
+  ICHECK(node->src_addr.as<CallNode>()) << "src_addr must be a call node";
+  ICHECK(node->src_addr.as<CallNode>()->op.same_as(builtin::address_of()))
+      << "src_addr must be address_of op";
+  ICHECK(node->dst_addr.as<CallNode>()) << "dst_addr must be a call node";
+  ICHECK(node->dst_addr.as<CallNode>()->op.same_as(builtin::address_of()))
+      << "dst_addr must be address_of op";
+
+  const auto *src_load =
+      node->src_addr.as<CallNode>()->args[0].as<BufferLoadNode>();
+  const auto *dst_load =
+      node->dst_addr.as<CallNode>()->args[0].as<BufferLoadNode>();
+  ICHECK(src_load && dst_load) << "address_of must wrap BufferLoad nodes";
+
+  node->src_offset = node->get_offset(src_load);
+  node->dst_offset = node->get_offset(dst_load);
+  node->src_buffer = src_load->buffer;
+  node->dst_buffer = dst_load->buffer;
+  node->src_indices = src_load->indices;
+  node->dst_indices = dst_load->indices;
+
+  node->copy_size = args[2];
+  node->dst_pe = args[3];
+  node->unroll_factor = args[4].as<IntImm>().value()->value;
+  node->scope = args[5].as<StringImm>().value()->value;
+  node->is_symmetric = node->dst_pe.defined();
+  data_ = std::move(node);
+  (void)vmap;
+}
+
+Stmt PutOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+  (void)analyzer;
   Array<PrimExpr> new_args;
   std::stringstream ss;
   if (scope == "warp") {
@@ -71,24 +97,37 @@ Stmt PutOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   new_args.push_back(StringImm(ss.str()));
   if (is_symmetric) {
+    PrimExpr dst_addr_expr = MakeRemappedAddress(T, dst_buffer, dst_indices);
     PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
     PrimExpr local_base_ptr =
         Call(DataType::Handle(), tl::get_remote_base_ptr(), {local_rank});
     PrimExpr offset_to_base =
-        Sub(Call(DataType::Handle(), tl::get_uintptr_t(), {dst_addr}),
+        Sub(Call(DataType::Handle(), tl::get_uintptr_t(), {dst_addr_expr}),
             local_base_ptr);
     new_args.push_back(
         Call(DataType::Handle(), tl::get_remote_base_ptr(), {dst_pe}) +
         offset_to_base);
   } else {
-    new_args.push_back(dst_addr);
+    new_args.push_back(MakeRemappedAddress(T, dst_buffer, dst_indices));
   }
-  new_args.push_back(src_addr);
+  new_args.push_back(MakeRemappedAddress(T, src_buffer, src_indices));
   auto put = Call(DataType::Handle(), builtin::call_extern(), new_args);
   return Evaluate(put);
 }
 
-PrimExpr GetOp::get_offset(const BufferLoadNode *load) {
+LayoutMap PutOpNode::InferLayout(const LayoutInferArgs &T,
+                                 InferLevel level) const {
+  (void)T;
+  (void)level;
+  return {};
+}
+
+TileOperator PutOpNode::Clone() const {
+  auto node = make_object<PutOpNode>(*this);
+  return PutOp(node);
+}
+
+PrimExpr GetOpNode::get_offset(const BufferLoadNode *load) const {
   PrimExpr offset = 0;
   PrimExpr stride = 1;
   auto buffer_shape = load->buffer->shape;
@@ -99,33 +138,57 @@ PrimExpr GetOp::get_offset(const BufferLoadNode *load) {
   return div(offset * load->dtype.bits(), 8);
 }
 
-GetOp::GetOp(Array<PrimExpr> args, BufferMap vmap) {
-  src_addr = args[0];
-  dst_addr = args[1];
-  ICHECK(src_addr.as<CallNode>()) << "src_addr must be a call node";
-  ICHECK(src_addr.as<CallNode>()->op.same_as(builtin::address_of()))
-      << "src_addr must be address_of op";
-  ICHECK(dst_addr.as<CallNode>()) << "dst_addr must be a call node";
-  ICHECK(dst_addr.as<CallNode>()->op.same_as(builtin::address_of()))
-      << "dst_addr must be address_of op";
-
-  src_offset =
-      this->get_offset(src_addr.as<CallNode>()->args[0].as<BufferLoadNode>());
-  dst_offset =
-      this->get_offset(dst_addr.as<CallNode>()->args[0].as<BufferLoadNode>());
-  src_buffer = src_addr.as<CallNode>()->args[0].as<BufferLoadNode>()->buffer;
-  dst_buffer = dst_addr.as<CallNode>()->args[0].as<BufferLoadNode>()->buffer;
-
-  copy_size = args[2];
-  src_pe = args[3];
-  unroll_factor = args[4].as<IntImm>().value()->value;
-  scope = args[5].as<StringImm>().value()->value;
-  if (src_pe.defined()) {
-    is_symmetric = true;
-  }
+PrimExpr GetOpNode::MakeAddress(const Buffer &buffer,
+                                const Array<PrimExpr> &indices) const {
+  return Call(DataType::Handle(), builtin::address_of(),
+              {BufferLoad(buffer, indices)});
 }
 
-Stmt GetOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+PrimExpr GetOpNode::MakeRemappedAddress(const LowerArgs &T,
+                                        const Buffer &buffer,
+                                        const Array<PrimExpr> &indices) const {
+  Buffer remapped = buffer;
+  if (T.buffer_remap.count(buffer)) {
+    remapped = T.buffer_remap[buffer];
+  }
+  return MakeAddress(remapped, indices);
+}
+
+GetOp::GetOp(Array<PrimExpr> args, BufferMap vmap) {
+  ObjectPtr<GetOpNode> node = make_object<GetOpNode>();
+  node->src_addr = args[0];
+  node->dst_addr = args[1];
+  ICHECK(node->src_addr.as<CallNode>()) << "src_addr must be a call node";
+  ICHECK(node->src_addr.as<CallNode>()->op.same_as(builtin::address_of()))
+      << "src_addr must be address_of op";
+  ICHECK(node->dst_addr.as<CallNode>()) << "dst_addr must be a call node";
+  ICHECK(node->dst_addr.as<CallNode>()->op.same_as(builtin::address_of()))
+      << "dst_addr must be address_of op";
+
+  const auto *src_load =
+      node->src_addr.as<CallNode>()->args[0].as<BufferLoadNode>();
+  const auto *dst_load =
+      node->dst_addr.as<CallNode>()->args[0].as<BufferLoadNode>();
+  ICHECK(src_load && dst_load) << "address_of must wrap BufferLoad nodes";
+
+  node->src_offset = node->get_offset(src_load);
+  node->dst_offset = node->get_offset(dst_load);
+  node->src_buffer = src_load->buffer;
+  node->dst_buffer = dst_load->buffer;
+  node->src_indices = src_load->indices;
+  node->dst_indices = dst_load->indices;
+
+  node->copy_size = args[2];
+  node->src_pe = args[3];
+  node->unroll_factor = args[4].as<IntImm>().value()->value;
+  node->scope = args[5].as<StringImm>().value()->value;
+  node->is_symmetric = node->src_pe.defined();
+  data_ = std::move(node);
+  (void)vmap;
+}
+
+Stmt GetOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+  (void)analyzer;
   Array<PrimExpr> new_args;
   std::stringstream ss;
   if (scope == "warp") {
@@ -137,23 +200,37 @@ Stmt GetOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   }
 
   new_args.push_back(StringImm(ss.str()));
-  new_args.push_back(dst_addr); // Always dst first in tl_templates
+  PrimExpr dst_addr_expr = MakeRemappedAddress(T, dst_buffer, dst_indices);
+  new_args.push_back(dst_addr_expr); // Always dst first in tl_templates
   if (is_symmetric) {
+    PrimExpr src_addr_expr = MakeRemappedAddress(T, src_buffer, src_indices);
     PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
     PrimExpr local_base_ptr =
         Call(DataType::Handle(), tl::get_remote_base_ptr(), {local_rank});
     PrimExpr offset_to_base =
-        Sub(Call(DataType::Handle(), tl::get_uintptr_t(), {src_addr}),
+        Sub(Call(DataType::Handle(), tl::get_uintptr_t(), {src_addr_expr}),
             local_base_ptr);
     new_args.push_back(
         Call(DataType::Handle(), tl::get_remote_base_ptr(), {src_pe}) +
         offset_to_base);
   } else {
-    new_args.push_back(src_addr);
+    new_args.push_back(MakeRemappedAddress(T, src_buffer, src_indices));
   }
 
   auto get = Call(DataType::Handle(), builtin::call_extern(), new_args);
   return Evaluate(get);
+}
+
+LayoutMap GetOpNode::InferLayout(const LayoutInferArgs &T,
+                                 InferLevel level) const {
+  (void)T;
+  (void)level;
+  return {};
+}
+
+TileOperator GetOpNode::Clone() const {
+  auto node = make_object<GetOpNode>(*this);
+  return GetOp(node);
 }
 
 TIR_REGISTER_TL_OP(PutOp, put)
@@ -165,6 +242,9 @@ TIR_REGISTER_TL_OP(GetOp, get)
     .set_num_inputs(6)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
+
+TVM_FFI_STATIC_INIT_BLOCK({ PutOpNode::RegisterReflection(); });
+TVM_FFI_STATIC_INIT_BLOCK({ GetOpNode::RegisterReflection(); });
 
 } // namespace tl
 } // namespace tvm

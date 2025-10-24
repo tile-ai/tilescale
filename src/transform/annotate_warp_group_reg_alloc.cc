@@ -2,15 +2,10 @@
  * \file annotate_warp_group_reg_alloc.cc
  * \brief Annotate warp group reg alloc for warp specialization
  */
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
 
+#include "warp_specialized_rewriter.h"
 #include <unordered_set>
 #include <vector>
-
-#include "../op/builtin.h"
-#include "tir/transforms/ir_utils.h"
 
 namespace tvm {
 namespace tl {
@@ -22,6 +17,9 @@ public:
   static Array<IntImm> Collect(const PrimFunc &f) {
     SetMaxNRegCollector collector;
     collector(f->body);
+    if (collector.warp_specialized_) {
+      return Array<IntImm>({});
+    }
     return collector.has_no_set_max_nreg_
                ? Array<IntImm>({IntImm(DataType::Int(32), -1),
                                 IntImm(DataType::Int(32), -1)})
@@ -32,8 +30,8 @@ private:
   void VisitStmt_(const EvaluateNode *op) final {
     if (const CallNode *call = op->value.as<CallNode>()) {
       if (call->op.same_as(set_max_nreg())) {
-        int reg_hint = call->args[0].as<IntImmNode>()->value;
-        int is_inc = call->args[1].as<IntImmNode>()->value;
+        auto reg_hint = call->args[0].as<IntImmNode>()->value;
+        auto is_inc = call->args[1].as<IntImmNode>()->value;
         ICHECK(reg_hint <= 240 && reg_hint >= 24)
             << "Invalid reg hint: " << reg_hint;
         ICHECK(is_inc == 0 || is_inc == 1) << "Invalid is_inc: " << is_inc;
@@ -48,9 +46,38 @@ private:
     StmtExprVisitor::VisitStmt_(op);
   }
 
+  void VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == attr::kCustomWarpSpecialization) {
+      warp_specialized_ = true;
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
   Array<IntImm> nreg_{IntImm(DataType::Int(32), 0),
                       IntImm(DataType::Int(32), 0)};
   bool has_no_set_max_nreg_ = false;
+  bool warp_specialized_ = false;
+};
+
+class SimtCopyDetector : public StmtExprVisitor {
+public:
+  static bool Detect(const Stmt &stmt) {
+    SimtCopyDetector detector;
+    detector.VisitStmt(stmt);
+    return detector.has_simt_copy_;
+  }
+
+private:
+  void VisitStmt_(const BufferStoreNode *op) final {
+    auto scope =
+        runtime::StorageScope::Create(GetPtrStorageScope(op->buffer->data));
+    if (scope.to_string() != "global") {
+      has_simt_copy_ = true;
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  bool has_simt_copy_{false};
 };
 
 class SetMaxNRegInjector : public StmtExprMutator {
@@ -58,6 +85,9 @@ public:
   static PrimFunc Inject(PrimFunc f) {
     auto T = SetMaxNRegInjector();
     T.nreg_ = SetMaxNRegCollector::Collect(f);
+    if (T.nreg_.empty()) {
+      return f;
+    }
     f.CopyOnWrite()->body = T(f->body);
     return f;
   }
@@ -65,8 +95,7 @@ public:
 private:
   Stmt VisitStmt_(const EvaluateNode *op) final {
     if (const CallNode *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(set_max_nreg()) ||
-          call->op.same_as(no_set_max_nreg())) {
+      if (call->op.same_as(no_set_max_nreg())) {
         // Remove the original set_max_nreg calls as they will be re-inserted
         // at appropriate locations
         return Evaluate(0);
@@ -97,22 +126,22 @@ private:
       Optional<Stmt> consumer_body = if_then_else->else_case;
       ICHECK(consumer_body.defined()) << "Consumer body is undefined";
 
-      int dec_reg = nreg_[0].as<IntImmNode>()->value;
-      int inc_reg = nreg_[1].as<IntImmNode>()->value;
+      auto dec_reg = nreg_[0].as<IntImmNode>()->value;
+      auto inc_reg = nreg_[1].as<IntImmNode>()->value;
 
       auto inc_reg_stmt = Evaluate(0);
       auto dec_reg_stmt = Evaluate(0);
 
       // Only inject if we have valid register hints and no SIMT copy
-      // For now, we assume no SIMT copy detection is available here
-      // TODO: Add SIMT copy detection if needed
-      bool has_simt_copy = false; // Placeholder
+      bool has_simt_copy = SimtCopyDetector::Detect(producer_body);
 
-      if (dec_reg >= 0 && inc_reg >= 0 && !has_simt_copy) {
-        inc_reg_stmt = Evaluate(Call(DataType::Handle(), set_max_nreg(),
-                                     {inc_reg == 0 ? 240 : inc_reg, 1}));
-        dec_reg_stmt = Evaluate(Call(DataType::Handle(), set_max_nreg(),
-                                     {dec_reg == 0 ? 24 : dec_reg, 0}));
+      if (dec_reg == 0 && inc_reg == 0 && !has_simt_copy) {
+        auto inc_reg_num = IntImm(DataType::Int(32), 240);
+        auto dec_reg_num = IntImm(DataType::Int(32), 24);
+        inc_reg_stmt = Evaluate(
+            Call(DataType::Handle(), set_max_nreg(), {inc_reg_num, 1}));
+        dec_reg_stmt = Evaluate(
+            Call(DataType::Handle(), set_max_nreg(), {dec_reg_num, 0}));
       }
 
       // Inject register setting statements
@@ -145,8 +174,9 @@ private:
 using namespace tir::transform;
 
 tvm::transform::Pass AnnotateWarpGroupRegAlloc() {
-  auto pass_func = [](PrimFunc f, IRModule m, PassContext ctx) -> PrimFunc {
-    return SetMaxNRegInjector::Inject(f);
+  auto pass_func = [](PrimFunc f, const IRModule &m,
+                      const PassContext &ctx) -> PrimFunc {
+    return SetMaxNRegInjector::Inject(std::move(f));
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.AnnotateWarpGroupRegAlloc", {});
 }

@@ -1,9 +1,10 @@
+from __future__ import annotations
+
 import os
 import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional, Tuple
 
 import setuptools
 from torch.utils.cpp_extension import BuildExtension
@@ -13,11 +14,11 @@ root_path: Path = Path(__file__).resolve().parent
 PACKAGE_NAME = "pynvshmem"
 
 
-def cuda_version() -> Tuple[int, ...]:
+def cuda_version() -> tuple[int, ...]:
     """CUDA Toolkit version as a (major, minor) by nvcc --version"""
 
     # Try finding NVCC
-    nvcc_bin: Optional[Path] = None
+    nvcc_bin: Path | None = None
     if nvcc_bin is None and os.getenv("CUDA_HOME"):
         # Check in CUDA_HOME
         cuda_home = Path(os.getenv("CUDA_HOME"))
@@ -39,7 +40,7 @@ def cuda_version() -> Tuple[int, ...]:
         [nvcc_bin, "-V"],
         capture_output=True,
         check=True,
-        universal_newlines=True,
+        text=True,
     )
     match = re.search(r"release\s*([\d.]+)", output.stdout)
     version = match.group(1).split(".")

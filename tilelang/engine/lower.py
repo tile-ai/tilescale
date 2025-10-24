@@ -1,8 +1,9 @@
 """The compiler for TL programs."""
+from __future__ import annotations
 
 import os
 import os.path as osp
-from typing import Union, Optional, Callable, List
+from typing import Callable
 import tilelang.transform
 from tilelang import tvm as tvm
 from tvm import tir
@@ -132,7 +133,7 @@ def tilelang_callback_hip_compile(code, target):
     return hsaco
 
 
-def extrac_params(func: tir.PrimFunc) -> List[KernelParam]:
+def extrac_params(func: tir.PrimFunc) -> list[KernelParam]:
     tensor_types = []
     for var in func.params:
         if var in func.buffer_map:
@@ -142,7 +143,7 @@ def extrac_params(func: tir.PrimFunc) -> List[KernelParam]:
     return tensor_types
 
 
-def canon_target_host(target: Union[str, Target], target_host: Optional[Union[str, Target]]):
+def canon_target_host(target: str | Target, target_host: str | Target | None):
 
     if not target_host:
         target_host = "llvm" if tvm.runtime.enabled("llvm") else "c"
@@ -156,7 +157,7 @@ def host_codegen(host_mod: tvm.IRModule, target_host: Target) -> tvm.IRModule:
     host_mod = tir.transform.BF16StorageLegalize()(host_mod)
     host_mod = tir.transform.LowerTVMBuiltin()(host_mod)
     host_mod = tir.transform.LowerCustomDatatypes()(host_mod)
-    host_mod = tir.transform.LowerIntrin()(host_mod)
+    host_mod = tilelang.transform.LowerIntrin()(host_mod)
     host_mod = tilelang.transform.LowerDeviceStorageAccessInfo()(host_mod)
     host_mod = tir.transform.CombineContextCall()(host_mod)
     if target_host.kind.name == "llvm":
@@ -170,7 +171,7 @@ def host_codegen(host_mod: tvm.IRModule, target_host: Target) -> tvm.IRModule:
 
 def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
     device_mod = tilelang.transform.LowerDeviceStorageAccessInfo()(device_mod)
-    device_mod = tir.transform.LowerIntrin()(device_mod)
+    device_mod = tilelang.transform.LowerIntrin()(device_mod)
     device_mod = tir.transform.Simplify()(device_mod)
 
     if target.kind.name == "cuda":
@@ -185,7 +186,7 @@ def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
 
 def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
     device_mod = tilelang.transform.LowerDeviceStorageAccessInfo()(device_mod)
-    device_mod = tir.transform.LowerIntrin()(device_mod)
+    device_mod = tilelang.transform.LowerIntrin()(device_mod)
     device_mod = tir.transform.Simplify()(device_mod)
     if target.kind.name == "cuda":
         device_mod = tvm.ffi.get_global_func("target.build.tilelang_cuda_without_compile")(
@@ -199,6 +200,8 @@ def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> 
         device_mod = tvm.ffi.get_global_func("target.build.llvm")(device_mod, target)
     elif target.kind.name == "webgpu":
         device_mod = tvm.ffi.get_global_func("target.build.tilelang_webgpu")(device_mod, target)
+    elif target.kind.name == "metal":
+        device_mod = tvm.ffi.get_global_func("target.build.metal")(device_mod, target)
     else:
         raise ValueError(f"Target {target.kind.name} is not supported")
 
@@ -206,9 +209,9 @@ def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> 
 
 
 def lower(
-    func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
-    target: Union[str, Target] = "auto",
-    target_host: Optional[Union[str, Target]] = None,
+    func_or_mod: tir.PrimFunc | tvm.IRModule,
+    target: str | Target = "auto",
+    target_host: str | Target | None = None,
     runtime_only=False,
     enable_host_codegen=False,
     enable_device_compile=False,

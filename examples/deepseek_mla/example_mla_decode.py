@@ -6,8 +6,13 @@ import tilelang.language as T
 from einops import rearrange, einsum
 import argparse
 
+tilelang.disable_cache()
 
-@tilelang.jit(out_idx=[6])
+
+@tilelang.jit(
+    out_idx=[6], pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    })
 def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H, num_split,
               softmax_scale):
     scale = float(softmax_scale * 1.44269504)  # log2(e)

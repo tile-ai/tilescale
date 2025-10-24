@@ -77,7 +77,7 @@ private:
     // record workgroup size
     if (op->attr_key == tir::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
-      if (iv->thread_tag.length() != 0) {
+      if (!iv->thread_tag.empty()) {
         runtime::ThreadScope ts = runtime::ThreadScope::Create(iv->thread_tag);
         if (ts.rank == 1) {
           ICHECK_GE(ts.dim_index, 0)
@@ -218,7 +218,7 @@ CodeGenTileLangWebGPU::AddFunction(const PrimFunc &f, bool skip_readonly_decl) {
   this->decl_stream << "\nstruct " << type_pod_args << " {\n";
 
   for (size_t i = 0; i < pod_args.size(); ++i) {
-    Var v = pod_args[i];
+    const Var &v = pod_args[i];
     ICHECK(!v.dtype().is_handle());
     std::string vid = AllocVarID(v.get());
 
@@ -724,7 +724,7 @@ public:
       return stream.str();
     } else {
       std::ostringstream os;
-      for (auto kv : smap_) {
+      for (const auto &kv : smap_) {
         os << kv.second;
       }
       return os.str();

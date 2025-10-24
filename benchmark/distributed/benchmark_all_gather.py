@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import torch
 import torch.distributed as dist
@@ -5,7 +7,6 @@ import pynvshmem
 import tilelang
 import tilelang.language as T
 from tilelang.distributed import init_distributed, dtype_map, perf_fn
-from typing import List
 
 tilelang.disable_cache()
 
@@ -16,9 +17,9 @@ def cp_engine_producer_all_gather_full_mesh_pull(
     rank,
     num_ranks,
     local_tensor: torch.Tensor,
-    remote_tensor_buffers: List[torch.Tensor],
+    remote_tensor_buffers: list[torch.Tensor],
     ag_stream: torch.cuda.Stream,
-    barrier_buffers: List[torch.Tensor],
+    barrier_buffers: list[torch.Tensor],
 ):
     M_per_rank, _ = local_tensor.shape
 

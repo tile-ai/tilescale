@@ -6,10 +6,8 @@ from tvm.runtime import ndarray
 from tvm import tir
 from torch.utils.dlpack import to_dlpack
 import numpy as np
-from typing import Optional, Tuple
 from tilelang.utils.allocator import BaseAllocator
 from tilelang.utils.target import parse_device
-from typing import Union
 
 
 class TensorSupplyType(Enum):
@@ -42,11 +40,11 @@ def map_torch_type(intype: str) -> torch.dtype:
         return getattr(torch, intype)
 
 
-def tensor(shape: Tuple[int, ...],
+def tensor(shape: tuple[int, ...],
            dtype: torch.dtype,
-           device: Optional[Union[str, torch.device, int]] = None,
-           allocator: Optional[BaseAllocator] = None,
-           return_peers: Optional[bool] = None) -> Union[torch.Tensor, list[torch.Tensor]]:
+           device: str | torch.device | int | None = None,
+           allocator: BaseAllocator | None = None,
+           return_peers: bool | None = None) -> torch.Tensor | list[torch.Tensor]:
     if allocator is not None:
         assert allocator.initialized(), "Allocator is not initialized"
         if device is not None:
@@ -78,10 +76,11 @@ def adapt_torch2tvm(arg):
 def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):
 
     from tilelang.engine.param import KernelParam
+    from .device import get_current_device
 
     def get_tensor(param: KernelParam) -> torch.Tensor:
         dtype: torch.dtype = param.dtype
-        device: torch.device = torch.cuda.current_device()
+        device = get_current_device()
 
         if hasattr(param, "shape") and not param.shape:
             raise ValueError(
@@ -133,9 +132,11 @@ def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):
             else:
                 return torch.randint(low=-2, high=3, size=shape, device=device, dtype=dtype)
         elif supply_type == TensorSupplyType.Uniform:
-            return torch.empty(*shape, device=device, dtype=dtype).uniform_(-1.0, 1.0)
+            return torch.empty(
+                *shape, device=device, dtype=torch.float32).uniform_(-1.0, 1.0).to(dtype)
         elif supply_type == TensorSupplyType.Normal:
-            return torch.empty(*shape, device=device, dtype=dtype).normal_(-1.0, 1.0)
+            return torch.empty(
+                *shape, device=device, dtype=torch.float32).normal_(-1.0, 1.0).to(dtype)
         elif supply_type == TensorSupplyType.Randn:
             return torch.randn(*shape, device=device).to(dtype)
         elif supply_type == TensorSupplyType.Zero:
@@ -204,7 +205,7 @@ def _equalize_attributes(actual: torch.Tensor,
         actual (Tensor): Actual tensor.
         expected (Tensor): Expected tensor.
     Returns:
-        (Tuple[Tensor, Tensor]): Equalized tensors.
+        (tuple[Tensor, Tensor]): Equalized tensors.
     """
     # The comparison logic uses operators currently not supported by the MPS backends.
     #  See https://github.com/pytorch/pytorch/issues/77144 for details.

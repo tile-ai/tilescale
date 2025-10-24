@@ -2,6 +2,7 @@
 # modified from apache tvm python/tvm/contrib/nvcc.py
 """Utility to invoke nvcc compiler in the system"""
 from __future__ import absolute_import as _abs
+from __future__ import annotations
 
 import os
 import subprocess
@@ -126,7 +127,7 @@ def compile_cuda(code,
 
 def find_cuda_path():
     """Utility function to find cuda path
-    
+
     Returns
     -------
     path : str
@@ -446,6 +447,14 @@ def have_tma(target):
     conditions = [False]
     conditions.append(major >= 9)
     return any(conditions)
+
+
+def is_hopper(target):
+    if target.kind.name != "cuda":
+        return False
+    compute_version = get_target_compute_version(target)
+    major, minor = parse_compute_version(compute_version)
+    return major == 9 and minor == 0
 
 
 def get_nvcc_compiler() -> str:

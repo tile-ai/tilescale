@@ -1,7 +1,6 @@
 /*!
  * \file tl/op/gemm.cc
- *
- * Define gemm operator.
+ * \brief Implementation of General Matrix Multiplication (GEMM) operators
  */
 
 #include "gemm.h"
@@ -19,55 +18,177 @@ namespace tl {
 
 using namespace tir;
 
-static std::vector<int> toPrimeFactors(int x) {
-  int i = 2;
-  std::vector<int> result;
-  while (x > 1) {
-    if (x % i == 0) {
-      x /= i;
-      result.push_back(i);
+struct TCGEN5MMAMeta {
+  int atom_m, atom_n, atom_k;
+};
+
+// Return {is_success, meta}
+static inline std::pair<bool, TCGEN5MMAMeta>
+GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
+// TODO (lei) Currently not all shapes / dtypes are supported for TCGEN5MMA.
+#define FAIL                                                                   \
+  return { false, TCGEN5MMAMeta{0, 0, 0} }
+#define SUCCESS(atom_m, atom_n, atom_k)                                        \
+  return {                                                                     \
+    true, TCGEN5MMAMeta { atom_m, atom_n, atom_k }                             \
+  }
+  std::vector<int> ws_valid_atom_ns = {256, 128, 64};
+  if ((ab_dtype.is_bfloat16() || ab_dtype.is_float16()) &&
+      (c_dtype.is_float() && c_dtype.bits() == 32)) {
+    if (K % 16 != 0)
+      FAIL;
+    if (M % 128 == 0) {
+      for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
+        if (N % atom_n == 0)
+          SUCCESS(128, atom_n, 16);
+      FAIL;
+    } else if (M % 64 == 0) {
+      for (int atom_n : ws_valid_atom_ns)
+        if (N % atom_n == 0)
+          SUCCESS(64, atom_n, 16);
+      FAIL;
+    } else if (M % 32 == 0) {
+      for (int atom_n : ws_valid_atom_ns)
+        if (N % atom_n == 0)
+          SUCCESS(32, atom_n, 16);
+      FAIL;
     } else {
-      i++;
+      FAIL;
+    }
+  } else if ((ab_dtype.is_float8_e4m3fn() || ab_dtype.is_float8_e5m2()) &&
+             (c_dtype.is_float() && c_dtype.bits() == 32)) {
+    if (K % 32 != 0)
+      FAIL;
+    if (M % 128 == 0) {
+      for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
+        if (N % atom_n == 0)
+          SUCCESS(128, atom_n, 32);
+      FAIL;
+    } else if (M % 64 == 0) {
+      for (int atom_n : ws_valid_atom_ns)
+        if (N % atom_n == 0)
+          SUCCESS(64, atom_n, 32);
+      FAIL;
+    } else if (M % 32 == 0) {
+      for (int atom_n : ws_valid_atom_ns)
+        if (N % atom_n == 0)
+          SUCCESS(32, atom_n, 32);
+      FAIL;
+    } else {
+      FAIL;
     }
   }
-  return result;
+  FAIL;
+#undef FAIL
+#undef SUCCESS
 }
 
+/**
+ * @brief Construct a Gemm operator from serialized TL arguments and a buffer
+ * map.
+ *
+ * This constructor deserializes operator parameters from `args` and resolves
+ * buffer references via `vmap`, populating an internal GemmNode with:
+ * - device pointers for A, B, C and their corresponding Buffer objects,
+ * - transpose flags for A and B,
+ * - matrix dimensions M, N, K,
+ * - warp allocation policy and clear_accum flag,
+ * - strides and memory offsets for A and B,
+ * - optional kPack (must be 1 or 2) and optional wg_wait.
+ *
+ * The populated GemmNode is stored into the wrapper's internal `data_`.
+ *
+ * @param args Positional serialized arguments produced by the TL frontend:
+ *   expected layout is:
+ *     [Aptr, Bptr, Cptr, trans_A (Bool), trans_B (Bool),
+ *      M (Int), N (Int), K (Int), policy (Int), clear_accum (Bool),
+ *      stride_A (Int), stride_B (Int), offset_A (Int), offset_B (Int),
+ *      (optional) kPack (Int), (optional) wg_wait (Int)]
+ * @param vmap Mapping from access pointer vars to Buffer objects used to
+ *   resolve the Buffer corresponding to each pointer argument.
+ *
+ * @note If `kPack` is provided it must be 1; otherwise the constructor
+ *       fails with an ICHECK (runtime assertion). No other validation is
+ *       performed here.
+ */
 Gemm::Gemm(Array<PrimExpr> args, BufferMap vmap) {
-  Aptr = args[0];
-  Bptr = args[1];
-  Cptr = args[2];
-  A = vmap[GetVarFromAccessPtr(Aptr)];
-  B = vmap[GetVarFromAccessPtr(Bptr)];
-  C = vmap[GetVarFromAccessPtr(Cptr)];
-  trans_A = args[3].as<Bool>().value();
-  trans_B = args[4].as<Bool>().value();
-  M = args[5].as<IntImm>().value()->value;
-  N = args[6].as<IntImm>().value()->value;
-  K = args[7].as<IntImm>().value()->value;
-  policy = static_cast<GemmWarpPolicy>(args[8].as<IntImm>().value()->value);
-  clear_accum = args[9].as<Bool>().value();
-  stride_A = args[10].as<IntImm>().value()->value;
-  stride_B = args[11].as<IntImm>().value()->value;
-  offset_A = args[12].as<IntImm>().value()->value;
-  offset_B = args[13].as<IntImm>().value()->value;
+  ObjectPtr<GemmNode> node = make_object<GemmNode>();
+
+  node->Aptr = args[0];
+  node->Bptr = args[1];
+  node->Cptr = args[2];
+  node->A = vmap[GetVarFromAccessPtr(node->Aptr)];
+  node->B = vmap[GetVarFromAccessPtr(node->Bptr)];
+  node->C = vmap[GetVarFromAccessPtr(node->Cptr)];
+  node->trans_A = args[3].as<Bool>().value();
+  node->trans_B = args[4].as<Bool>().value();
+  node->M = args[5].as<IntImm>().value()->value;
+  node->N = args[6].as<IntImm>().value()->value;
+  node->K = args[7].as<IntImm>().value()->value;
+  node->policy = GemmWarpPolicy(args[8].as<IntImm>().value()->value);
+  node->clear_accum = args[9].as<PrimExpr>().value();
+  node->stride_A = args[10].as<IntImm>().value()->value;
+  node->stride_B = args[11].as<IntImm>().value()->value;
+  node->offset_A = args[12].as<IntImm>().value()->value;
+  node->offset_B = args[13].as<IntImm>().value()->value;
   if (args.size() > 14) {
-    kPack = args[14].as<IntImm>().value()->value;
-    if (kPack != 1 && kPack != 2) {
+    node->kPack = args[14].as<IntImm>().value()->value;
+    if (node->kPack != 1 && node->kPack != 2) {
       ICHECK(false) << "kPack must be 1 or 2";
     }
   }
   if (args.size() > 15) {
-    wg_wait = args[15].as<IntImm>().value()->value;
+    node->wg_wait = args[15].as<IntImm>().value()->value;
   }
+  node->mbarptr = args[16];
+  if (node->mbarptr.as<CallNode>()) {
+    node->mbar = vmap[GetVarFromAccessPtr(node->mbarptr)];
+  } else {
+    node->mbar = std::nullopt;
+  }
+  node->C_coords = Array<PrimExpr>(
+      {args[17].as<PrimExpr>().value(), args[18].as<PrimExpr>().value()});
+  data_ = std::move(node);
 }
 
-Gemm::GemmInst Gemm::GetGemmInst(int block_size, Target target) const {
+/**
+ * @brief Create a copy of this GemmNode as a TileOperator.
+ *
+ * Constructs a new GemmNode by copying the current node state and returns it
+ * wrapped in a Gemm TileOperator.
+ *
+ * @return TileOperator A Gemm operator that owns a copy of this node.
+ */
+TileOperator GemmNode::Clone() const {
+  auto op = make_object<GemmNode>(*this);
+  return Gemm(op);
+}
+
+bool GemmNode::AllowTCGEN5MMA(Target target) const {
+  return TargetIsSm100(target) &&
+         ((A.scope() == "shared.dyn" || A.scope() == "shared" ||
+           A.scope() == "shared.tmem") &&
+          (B.scope() == "shared.dyn" || B.scope() == "shared") &&
+          C.scope() == "shared.tmem") &&
+         GetTCGEN5MMAMeta(M, N, K, A->dtype, C->dtype).first;
+}
+
+bool GemmNode::AllowWGMMA(int block_size, Target target) const {
+  tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
+
   int warp_size = TargetGetWarpSize(target);
   int num_warps = block_size / warp_size;
-  bool allow_wgmma = TargetIsHopper(target) && (this->M >= 64) &&
-                     (num_warps % 4 == 0) && CheckWGMMA();
-  if (allow_wgmma) {
+  return !ctxt->GetConfig(kDisableWGMMA, Optional<Bool>()).value_or(false) &&
+         TargetIsHopper(target) && (this->M >= 64) && (num_warps % 4 == 0) &&
+         CheckWGMMA();
+}
+
+GemmInst GemmNode::GetGemmInst(int block_size, Target target) const {
+  bool allow_tcgen5mma = AllowTCGEN5MMA(target);
+  bool allow_wgmma = AllowWGMMA(block_size, target);
+  if (allow_tcgen5mma) {
+    return GemmInst::kTCGEN5MMA;
+  } else if (allow_wgmma) {
     return GemmInst::kWGMMA;
   } else if (TargetIsCDNA(target)) {
     return GemmInst::kMFMA;
@@ -78,62 +199,21 @@ Gemm::GemmInst Gemm::GetGemmInst(int block_size, Target target) const {
   }
 }
 
-/**
- * @brief Compute how warps are partitioned between the M and N GEMM dimensions.
- *
- * Determines the number of warps assigned to the M (rows) and N (columns)
- * dimensions for a block given the selected GEMM implementation and target.
- * The function enforces constraints required by the implementations (e.g.,
- * per-warp tile sizes) and adapts the partition according to the configured
- * GemmWarpPolicy (FullRow, FullCol, Square).
- *
- * @param block_size Total number of threads in the block (used to derive
- * num_warps).
- * @param gemm_inst The chosen GEMM implementation (e.g., kWGMMA, kMFMA, kMMA).
- * @param target Target device information (used for warp size and
- * target-specific rules).
- * @return std::pair<int, int> {m_warp, n_warp} where m_warp * n_warp ==
- * num_warps.
- *
- * Constraints and behavior:
- * - Each warp is assumed to cover 16 rows (M) and 8 columns (N). The function
- *   checks that M % 16 == 0 and N % 8 == 0.
- * - num_warps is computed as block_size / warp_size(target).
- * - For WGMMA (kWGMMA):
- *   - num_warps must be a multiple of 4 (warp-groups of 4).
- *   - m_warp is always a multiple of 4.
- *   - The warp partition respects the GemmWarpPolicy:
- *     - FullRow: maximize warps on M (in multiples of 4) while keeping
- * divisibility.
- *     - FullCol: maximize warps on N, but if N is not evenly divisible, move
- *       whole warp-groups to M to achieve feasibility.
- *     - Square: choose a multiple-of-4 m_warp that best balances per-warp work
- *       between M and N.
- * - For non-WGMMA implementations:
- *   - FullRow: favor allocating warps to M first; if M cannot use all warps,
- *     remaining warps are placed on N.
- *   - FullCol: favor allocating warps to N first; if N cannot use all warps,
- *     remaining warps are placed on M.
- *   - Square: search for the m/n split that best balances per-warp work given
- *     integer warp counts and the per-warp tile sizes.
- *
- * Error handling:
- * - The function performs internal checks (ICHECK) and will fail if required
- *   divisibility or policy conditions are not met (e.g., M/N tile divisibility,
- *   invalid policy, or WGMMA-specific warp-group requirements).
- */
-std::pair<int, int> Gemm::ComputeWarpPartition(int block_size,
-                                               GemmInst gemm_inst,
-                                               Target target) const {
+std::pair<int, int> GemmWarpPolicyNode::ComputeWarpPartition(
+    int M, int N, int block_size, Target target, GemmInst gemm_inst) const {
   int num_warps = block_size / TargetGetWarpSize(target);
+  if (gemm_inst == GemmInst::kTCGEN5MMA) {
+    return {1, num_warps}; // TCGEN5MMA doesn't care about warp partitioning
+  }
+
   int m_warp = 1, n_warp = 1;
   constexpr int kMPerWarp = 16; // Rows processed by a single warp
   constexpr int kNPerWarp = 8;  // Columns processed by a single warp
+  ICHECK(M % kMPerWarp == 0)
+      << "M must be divisible by " << kMPerWarp << ", but got " << M;
+  ICHECK(N % kNPerWarp == 0)
+      << "N must be divisible by " << kNPerWarp << ", but got " << N;
 
-  ICHECK(this->M % kMPerWarp == 0)
-      << "M must be divisible by " << kMPerWarp << ", but got " << this->M;
-  ICHECK(this->N % kNPerWarp == 0)
-      << "N must be divisible by " << kNPerWarp << ", but got " << this->N;
   if (gemm_inst == GemmInst::kWGMMA) {
     ICHECK(num_warps % 4 == 0) << "Warp-Group MMA requires 128×k threads.";
 
@@ -142,22 +222,22 @@ std::pair<int, int> Gemm::ComputeWarpPartition(int block_size,
     m_warp = kGroup; // Initially, only one warp-group on M dimension
     n_warp = num_warps / m_warp; // Rest all on N dimension
 
-    if (this->policy == GemmWarpPolicy::kFullRow) {
+    if (this->isFullRow()) {
       // Try to put as many warp-groups as possible on M dimension
       // (decreasing multiples of 4, ensuring divisibility by M)
       for (int cand = num_warps; cand >= kGroup; cand -= kGroup) {
-        if (this->M % (cand * kMPerWarp) == 0) {
+        if (M % (cand * kMPerWarp) == 0) {
           m_warp = cand;
           n_warp = num_warps / m_warp;
           break;
         }
       }
-    } else if (this->policy == GemmWarpPolicy::kFullCol) {
+    } else if (this->isFullCol()) {
       // Try to use warps on N dimension; if N is not divisible, split excess
       // groups to M
-      int cand_n = n_warp;                       // Initially assume all on N
-      if (this->N % (cand_n * kNPerWarp) != 0) { // N direction division fails
-        int max_n = this->N / kNPerWarp;
+      int cand_n = n_warp;                 // Initially assume all on N
+      if (N % (cand_n * kNPerWarp) != 0) { // N direction division fails
+        int max_n = N / kNPerWarp;
         // Find a feasible n_warp from max possible downwards, ensuring
         // num_warps/n_warp is multiple of 4
         for (int n = std::min(cand_n, max_n); n >= 1; --n) {
@@ -168,12 +248,12 @@ std::pair<int, int> Gemm::ComputeWarpPartition(int block_size,
           }
         }
       }
-    } else if (this->policy == GemmWarpPolicy::kSquare) {
+    } else if (this->isSquare()) {
       // Exhaustive search, but m must be multiple of 4
-      int max_m = this->M / kMPerWarp;
-      int max_n = this->N / kNPerWarp;
+      int max_m = M / kMPerWarp;
+      int max_n = N / kNPerWarp;
 
-      float ideal = this->N > 0 ? static_cast<float>(this->M) / this->N : 1.f;
+      float ideal = N > 0 ? static_cast<float>(M) / N : 1.f;
 
       float best_score = std::numeric_limits<float>::max();
       int best_m = kGroup, best_n = n_warp;
@@ -185,8 +265,8 @@ std::pair<int, int> Gemm::ComputeWarpPartition(int block_size,
         if (n > max_n)
           continue;
 
-        float m_per_warp = static_cast<float>(this->M) / (m * kMPerWarp);
-        float n_per_warp = static_cast<float>(this->N) / (n * kNPerWarp);
+        float m_per_warp = static_cast<float>(M) / (m * kMPerWarp);
+        float n_per_warp = static_cast<float>(N) / (n * kNPerWarp);
         float score = std::abs(m_per_warp / n_per_warp - ideal);
 
         if (score < best_score) {
@@ -202,71 +282,77 @@ std::pair<int, int> Gemm::ComputeWarpPartition(int block_size,
     }
 
     ICHECK(m_warp * n_warp == num_warps)
-        << "m_warp * n_warp must equal num_warps";
+        << "m_warp * n_warp must equal num_warps, m_warp: " << m_warp
+        << ", n_warp: " << n_warp << ", num_warps: " << num_warps;
+
+    // Store the computed values in the object's member variables
+    this->m_warp = m_warp;
+    this->n_warp = n_warp;
+
     return {m_warp, n_warp};
   }
 
-  if (this->policy == GemmWarpPolicy::kFullRow) {
+  if (this->isFullRow()) {
     // Try to partition M first
     m_warp = num_warps;
     n_warp = 1;
 
     // If M cannot be evenly divided by m_warp*16, try to split remaining warps
     // to N
-    if (this->M % (m_warp * kMPerWarp) != 0) {
+    if (M % (m_warp * kMPerWarp) != 0) {
       // Calculate how many warps we can use for M
-      int max_m_warps = this->M / kMPerWarp;
+      int max_m_warps = M / kMPerWarp;
       m_warp = max_m_warps;
       // Use remaining warps for N
       n_warp = num_warps / m_warp;
       if (n_warp == 0)
         n_warp = 1;
     }
-  } else if (this->policy == GemmWarpPolicy::kFullCol) {
+  } else if (this->isFullCol()) {
     // Try to partition N first
     m_warp = 1;
     n_warp = num_warps;
 
     // If N cannot be evenly divided by n_warp*8, try to split remaining warps
     // to M
-    if (this->N % (n_warp * kNPerWarp) != 0) {
+    if (N % (n_warp * kNPerWarp) != 0) {
       // Calculate how many warps we can use for N
-      int max_n_warps = this->N / kNPerWarp;
+      int max_n_warps = N / kNPerWarp;
       n_warp = max_n_warps;
       // Use remaining warps for M
       m_warp = num_warps / n_warp;
       if (m_warp == 0)
         m_warp = 1;
     }
-  } else if (this->policy == GemmWarpPolicy::kSquare) {
+  } else if (this->isSquare()) {
     // First calculate the maximum possible warps for each dimension
     int max_m_warps =
-        this->M / kMPerWarp; // Each warp needs at least 16 elements in M
-    int max_n_warps =
-        this->N / kNPerWarp; // Each warp needs at least 8 elements in N
+        M / kMPerWarp; // Each warp needs at least 16 elements in M
 
     // Calculate the ideal ratio of M/N warps based on the matrix dimensions
     float ideal_ratio = 1.0f;
-    if (this->N > 0) {
-      ideal_ratio = static_cast<float>(this->M) / this->N;
+    if (N > 0) {
+      ideal_ratio = static_cast<float>(M) / N;
     }
-
-    // Start with a balanced initial guess
-    m_warp = 1;
-    n_warp = 1;
 
     // Try to find the best balanced partition
     int best_m = 1;
     int best_n = 1;
     float best_balance = std::numeric_limits<float>::max();
-
     // Try all possible combinations that satisfy the constraints
     for (int m = 1; m <= max_m_warps && m <= num_warps; m++) {
       int n = num_warps / m;
 
       // Calculate how balanced this partition is
-      float m_per_warp = static_cast<float>(this->M) / (m * kMPerWarp);
-      float n_per_warp = static_cast<float>(this->N) / (n * kNPerWarp);
+      float m_per_warp = static_cast<float>(M) / (m * kMPerWarp);
+      float n_per_warp = static_cast<float>(N) / (n * kNPerWarp);
+      // m_per_warp and n_per_warp must be greater than 1
+      if (m_per_warp < 1 || n_per_warp < 1)
+        continue;
+      // m * n must equal num_warps
+      if (m * n != num_warps)
+        continue;
+
       float balance = std::abs(m_per_warp / n_per_warp - ideal_ratio);
 
       if (balance < best_balance) {
@@ -281,6 +367,14 @@ std::pair<int, int> Gemm::ComputeWarpPartition(int block_size,
   } else {
     ICHECK(0) << "Unknown GemmWarpPolicy";
   }
+  ICHECK(m_warp * n_warp == num_warps)
+      << "m_warp * n_warp must equal num_warps, m_warp: " << m_warp
+      << ", n_warp: " << n_warp << ", num_warps: " << num_warps;
+
+  // Store the computed values in the object's member variables
+  this->m_warp = m_warp;
+  this->n_warp = n_warp;
+
   return {m_warp, n_warp};
 }
 
@@ -314,7 +408,7 @@ std::pair<int, int> Gemm::ComputeWarpPartition(int block_size,
  * @return true if WGMMA is supported for the current buffers, dtypes, and
  *         transpose/shape constraints; false otherwise.
  */
-bool Gemm::CheckWGMMA() const {
+bool GemmNode::CheckWGMMA() const {
   if (B.scope() != "shared.dyn" && B.scope() != "shared") {
     return false;
   }
@@ -366,36 +460,139 @@ bool Gemm::CheckWGMMA() const {
   }
 }
 
+/**
+ * @brief Parse and return the numeric GPU architecture from a Target's "arch"
+ * attribute.
+ *
+ * Examines the target's "arch" string and, if it matches the pattern
+ * "sm_<num>", returns <num> as an int. If the attribute is present but does not
+ * match that pattern, returns 0.
+ *
+ * Preconditions: the target must have an "arch" attribute (this is checked via
+ * ICHECK).
+ *
+ * @return int The parsed architecture number (e.g., 80 for "sm_80"), or 0 if
+ * the arch string does not match "sm_<num>".
+ */
 static int GetArchInt(Target target) {
   int arch_int = 0;
   auto s = target->GetAttr<String>("arch");
   ICHECK(s.defined());
-  const char *arch_str = s.value().c_str();
-  if (arch_str[0] == 's' && arch_str[1] == 'm' && arch_str[2] == '_') {
-    arch_int = atoi(&arch_str[3]);
+  std::string arch = s.value();
+  if (arch.rfind("sm_", 0) == 0) {
+    arch_int = std::stoi(arch.substr(3));
   } else {
     arch_int = 0;
   }
   return arch_int;
 }
 
-Stmt Gemm::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+/**
+ * @brief Lower the GEMM operator to a TL TIR call expression.
+ *
+ * Constructs a tl::gemm call string parameterized by M, N, K, warp partition,
+ * transpose flags, accumulation clearing, target-specific stride/offset/kPack
+ * and optional workgroup wait value, then returns an Evaluate(call) node
+ * invoking tl::tl_gemm with the composed string and the A/B/C buffer handles.
+ *
+ * @param T Contains lowering context including thread bounds and target.
+ * @param analyzer Optional arithmetic analyzer used by lowering (may be
+ * nullptr).
+ * @return Stmt A TIR statement representing the evaluated TL GEMM call.
+ */
+Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   auto block_size = *as_const_int(T.thread_bounds->extent);
   GemmInst gemm_inst = GetGemmInst(block_size, T.target);
-  auto [warp_m, warp_n] = ComputeWarpPartition(block_size, gemm_inst, T.target);
+  auto [warp_m, warp_n] =
+      policy->ComputeWarpPartition(M, N, block_size, T.target, gemm_inst);
 
   std::stringstream ss;
-  std::string op_name = "tl::gemm_ss";
+  std::string op_name;
+
+  if (gemm_inst == GemmInst::kTCGEN5MMA) {
+    auto [can_use_tcgen5mma, meta] =
+        GetTCGEN5MMAMeta(M, N, K, A->dtype, C->dtype);
+    ICHECK(can_use_tcgen5mma);
+    ICHECK(B.scope() == "shared.dyn" || B.scope() == "shared");
+    ICHECK(C.scope() == "shared.tmem");
+    ICHECK(mbar.has_value()) << "mbar must be provided for TCGEN5MMA";
+    if (A.scope() == "shared.tmem") {
+      op_name = "tl::tcgen5mma_gemm_ts";
+    } else if (A.scope() == "shared.dyn" || A.scope() == "shared") {
+      op_name = "tl::tcgen5mma_gemm_ss";
+    } else {
+      ICHECK(0)
+          << "Unsupported A scope for TCGEN5MMA: "
+          << A.scope(); // If this is triggered, it means Tilelang has bugs.
+    }
+    ICHECK(wg_wait == -1)
+        << "Currently only wg_wait == -1 is supported for TCGEN5MMA. Please "
+           "use "
+           "wg_wait = -1 and manually synchronize with mbarrier.";
+
+    std::string accum_dtype = "";
+    if (C->dtype.is_float()) {
+      if (C->dtype.bits() == 32) {
+        accum_dtype = "float";
+      }
+    }
+    ICHECK(!accum_dtype.empty())
+        << "Unsupported C dtype for TCGEN5MMA: " << C->dtype;
+    ss << op_name << "<" << M << ", " << N << ", " << K << ", ";
+    ss << meta.atom_m << ", " << meta.atom_n << ", " << meta.atom_k << ", ";
+    ss << trans_A << ", " << trans_B << ", ";
+    ss << accum_dtype;
+    ss << ">";
+
+    auto C_buffer = T.buffer_remap.count(C) ? T.buffer_remap[C] : C;
+    Array<PrimExpr> new_args;
+    new_args.push_back(StringImm(ss.str()));
+    new_args.push_back(Aptr);
+    new_args.push_back(Bptr);
+    new_args.push_back(BufferLoad(C_buffer, C_coords));
+    new_args.push_back(mbarptr);
+    new_args.push_back(clear_accum);
+    auto new_call = Call(DataType::Handle(), builtin::call_extern(), new_args);
+
+    // Since TCGEN5MMA atoms provided by CUTLASS always have an internal
+    // `elect_one_sync()`, we check if we are calling it using full warps
+    constexpr int warp_size = 32;
+    ICHECK(
+        analyzer->CanProveEqual(FloorMod(T.thread_bounds->min, warp_size), 0) &&
+        analyzer->CanProveEqual(FloorMod(T.thread_bounds->extent, warp_size),
+                                0))
+        << "TCGEN5MMA requires thread bounds to be multiples of warp size (32) "
+           "and aligned to warps.";
+    if (analyzer->CanProveEqual(T.thread_bounds->extent, warp_size)) {
+      // If the thread bounds is exactly one warp, we can use the original call
+      return Evaluate(new_call);
+    } else {
+      // Add an if-else clause
+      auto tcgen5mma_call =
+          IfThenElse(EQ(FloorDiv(T.thread_var, warp_size),
+                        FloorDiv(T.thread_bounds->min, warp_size)),
+                     Evaluate(new_call));
+      return tcgen5mma_call;
+    }
+  }
+
   if (A.scope() == "local.fragment") {
     ICHECK(B.scope() != "local.fragment");
     op_name = "tl::gemm_rs";
   } else if (B.scope() == "local.fragment") {
     op_name = "tl::gemm_sr";
+  } else {
+    op_name = "tl::gemm_ss";
   }
+  ICHECK(C.scope() == "local.fragment");
+
   ss << op_name << "<" << M << ", " << N << ", " << K << ", ";
   ss << warp_m << ", " << warp_n << ", ";
   ss << trans_A << ", " << trans_B;
-  ss << ", " << clear_accum;
+  auto clear_accum_bool = clear_accum.as<Bool>();
+  ICHECK(clear_accum_bool.has_value())
+      << "clear_accum must be a constant Bool type, got " << clear_accum;
+  ss << ", " << bool(clear_accum_bool.value());
   if (TargetIsCuda(T.target) && (GetArchInt(T.target) >= 75)) {
     ss << ", " << stride_A << ", " << stride_B;
     ss << ", " << offset_A << ", " << offset_B;
@@ -406,8 +603,21 @@ Stmt Gemm::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   } else if (TargetIsHopper(T.target)) {
     ss << ", " << (gemm_inst == GemmInst::kWGMMA ? "true" : "false");
   }
-  if (wg_wait != 0) {
-    ss << ", " << wg_wait;
+
+  // Emit wg_wait if necessary
+  if (TargetIsHopper(T.target)) {
+    if (wg_wait != 0) {
+      ss << ", " << wg_wait;
+    }
+  } else if (TargetIsSm100(T.target)) {
+    // NOTE On sm100, only the leading thread issues the TCGEN5MMA instruction
+    // but all threads need to wait, so we emit another statement for cases
+    // where wg_wait == 0.
+    ICHECK(wg_wait == 0 || wg_wait == -1)
+        << "wg_wait must be 0 or -1 for Sm100";
+  } else {
+    ICHECK(wg_wait == 0)
+        << "wg_wait must be 0 for non-Hopper and non-Sm100 targets";
   }
   ss << ">";
 
@@ -417,40 +627,38 @@ Stmt Gemm::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 }
 
 /**
- * @brief Infer memory/layout mappings for A, B, and C buffers for this GEMM op.
+ * @brief Infer and bind target-specific memory/layout mappings for A, B, and C.
  *
- * Generates and returns a LayoutMap that binds buffer A, B, and C to
- * target- and architecture-specific fragment or shared-memory layouts based
- * on the current target, thread bounds, warp partitioning, data types, and
- * transpose flags. This performs target dispatch (Volta, Ampere/Turing/SM120,
- * Hopper, CDNA), selects the appropriate fragment or shared layout creators,
- * and binds fragment layouts to the thread range when buffers are local
- * fragments.
+ * Infers per-buffer layouts (fragment or shared-memory layouts) for this GEMM
+ * operator according to the target architecture, thread bounds, warp
+ * partitioning, data types, and transpose flags, then binds fragment layouts
+ * to the thread range when required.
  *
  * Preconditions:
- * - C.scope() must be "local.fragment".
+ * - C.scope() == "local.fragment"
  *
- * Postconditions / side effects:
- * - Marks the operator's layout inference as completed (sets completed_ =
- * true).
+ * Side effects:
+ * - Marks layout inference as completed (sets completed_ = true).
  * - May abort via ICHECK on unsupported targets, invalid buffer scopes, or
  *   incompatible shape constraints.
  *
- * @param T Layout inference inputs (thread bounds and target).
- * @param level Inference level (unused for side effects but retained for API).
- * @return LayoutMap mapping each of A, B, and C to their inferred layouts.
+ * @param T Input layout-inference context (provides thread bounds and target).
+ * @return LayoutMap mapping A, B, and C to their inferred layouts.
  */
-LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
+LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
+                                InferLevel level) const {
   if (completed_)
     return {};
   LayoutMap results;
-  ICHECK(C.scope() == "local.fragment");
   auto thread_range = T.thread_bounds;
   auto block_size = *as_const_int(thread_range->extent);
   GemmInst gemm_inst = GetGemmInst(block_size, T.target);
-  auto [warp_m, warp_n] = ComputeWarpPartition(block_size, gemm_inst, T.target);
-
+  auto [warp_m, warp_n] =
+      policy->ComputeWarpPartition(M, N, block_size, T.target, gemm_inst);
   if (TargetIsVolta(T.target)) {
+    ICHECK(C.scope() == "local.fragment")
+        << "Volta gemm only supports C in local.fragment scope, got "
+        << C.scope();
     auto fragment =
         makeGemmVoltaFragmentC(M, N, M / warp_m, N / warp_n, C->dtype.bits());
     results.Set(C, fragment->BindThreadRange(thread_range));
@@ -458,7 +666,7 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       int dim_A = A->shape.size();
       results.Set(A, makeGemmVoltaABLayout(*as_const_int(A->shape[dim_A - 2]),
                                            *as_const_int(A->shape[dim_A - 1]),
-                                           true, trans_A ? 1 : 2));
+                                           true, !trans_A));
     } else if (A.scope() == "local.fragment") {
       ICHECK(trans_A == false);
       auto fragment = makeGemmVoltaFragmentA(M, N, K, M / warp_m, N / warp_n);
@@ -471,9 +679,13 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
     int dim_B = B->shape.size();
     results.Set(B, makeGemmVoltaABLayout(*as_const_int(B->shape[dim_B - 2]),
                                          *as_const_int(B->shape[dim_B - 1]),
-                                         false, trans_B ? 2 : 1));
+                                         false, trans_B));
   } else if (TargetIsAmpere(T.target) || TargetIsTuring(T.target) ||
-             TargetIsSM120(T.target)) {
+             TargetIsSM120(T.target) ||
+             (TargetIsSm100(T.target) && gemm_inst == GemmInst::kMMA)) {
+    ICHECK(C.scope() == "local.fragment")
+        << "MMA only supports C in local.fragment scope, got " << C.scope();
+
     auto fragment =
         makeGemmFragmentC(M, N, M / warp_m, N / warp_n, C->dtype.bits());
     results.Set(C, fragment->BindThreadRange(thread_range));
@@ -484,7 +696,7 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       const int64_t mat_continuous = *as_const_int(A->shape[dim_A - 1]);
       results.Set(A,
                   makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                   A->dtype.bits(), trans_A ? 1 : 2));
+                                   A->dtype.bits(), !trans_A));
     } else if (A.scope() == "local.fragment") {
       auto fragment = makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n,
                                         A->dtype.bits(), trans_A);
@@ -498,7 +710,7 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       const int64_t mat_continuous = *as_const_int(B->shape[dim_B - 1]);
       results.Set(B,
                   makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                   B->dtype.bits(), trans_B ? 2 : 1));
+                                   B->dtype.bits(), trans_B));
     } else if (B.scope() == "local.fragment") {
       auto fragment =
           makeGemmFragmentB(M, N, K, M / warp_m, N / warp_n, trans_B);
@@ -507,6 +719,9 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       ICHECK(0);
     }
   } else if (TargetIsHopper(T.target)) {
+    ICHECK(C.scope() == "local.fragment")
+        << (gemm_inst == GemmInst::kWGMMA ? "WGMMA " : "MMA ")
+        << "only supports C in local.fragment scope, got " << C.scope();
     auto fragment =
         gemm_inst == GemmInst::kWGMMA
             ? makeGemmFragmentCHopper(M, N, M / warp_m, N / warp_n,
@@ -522,9 +737,9 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       auto ABLayout =
           gemm_inst == GemmInst::kWGMMA
               ? makeGemmABLayoutHopper(mat_stride, mat_continuous, continuity,
-                                       A->dtype.bits(), trans_A ? 1 : 2)
+                                       A->dtype.bits(), !trans_A)
               : makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                 A->dtype.bits(), trans_A ? 1 : 2);
+                                 A->dtype.bits(), !trans_A);
       results.Set(A, ABLayout);
     } else {
       auto fragment = makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n,
@@ -537,19 +752,82 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       const int64_t mat_continuous = *as_const_int(B->shape[dim_B - 1]);
       const int64_t continuity =
           trans_B ? mat_continuous : mat_continuous / warp_n;
+
       auto ABLayout =
           gemm_inst == GemmInst::kWGMMA
               ? makeGemmABLayoutHopper(mat_stride, mat_continuous, continuity,
-                                       B->dtype.bits(), trans_B ? 2 : 1)
+                                       B->dtype.bits(), trans_B)
               : makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                 B->dtype.bits(), trans_B ? 2 : 1);
+                                 B->dtype.bits(), trans_B);
       results.Set(B, ABLayout);
     } else {
       auto fragment =
           makeGemmFragmentB(M, N, K, M / warp_m, N / warp_n, trans_B);
       results.Set(B, fragment->BindThreadRange(thread_range));
     }
+  } else if (gemm_inst == GemmInst::kTCGEN5MMA) {
+    ICHECK(C.scope() == "shared.tmem")
+        << "TCGEN5MMA only supports C in shared.tmem scope, got " << C.scope();
+    ICHECK(A.scope() == "shared.dyn" || A.scope() == "shared")
+        << "Current TCGEN5MMA only supports A in shared.dyn scope";
+    auto [can_use_tcgen5mma, meta] =
+        GetTCGEN5MMAMeta(M, N, K, A->dtype, C->dtype);
+    ICHECK(can_use_tcgen5mma);
+    {
+      int dim_A = A->shape.size();
+      const int64_t mat_stride = *as_const_int(A->shape[dim_A - 2]);
+      const int64_t mat_continuous = *as_const_int(A->shape[dim_A - 1]);
+      results.Set(A, makeGemmABLayoutSm100(mat_stride, mat_continuous,
+                                           mat_continuous, A->dtype.bits(),
+                                           trans_A ? 1 : 2));
+    }
+    {
+      int dim_B = B->shape.size();
+      const int64_t mat_stride = *as_const_int(B->shape[dim_B - 2]);
+      const int64_t mat_continuous = *as_const_int(B->shape[dim_B - 1]);
+      const int64_t continuity = mat_continuous;
+      results.Set(B,
+                  makeGemmABLayoutSm100(mat_stride, mat_continuous, continuity,
+                                        B->dtype.bits(), trans_B ? 2 : 1));
+    }
+    {
+      Layout res;
+      IterVar i = make_itervar("i", M);
+      IterVar j = make_itervar("j", N);
+      ICHECK(M % meta.atom_m == 0);
+      PrimExpr atom_idx = FloorDiv(i, meta.atom_m) +
+                          FloorDiv(j, meta.atom_n) * (M / meta.atom_m);
+      PrimExpr ai = FloorMod(i, meta.atom_m); // "ai" means "atom_i"
+      PrimExpr aj = FloorMod(j, meta.atom_n);
+      if (meta.atom_m == 128) {
+        // Layout D
+        // (https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-data-path-layout-d)
+        res = Layout(Array{i, j}, {ai, aj + atom_idx * meta.atom_n});
+      } else if (meta.atom_m == 64) {
+        // Layout E
+        // (https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-data-path-layout-e)
+        // since .ws variant is used About why we use .ws variant here, please
+        // refer to gemm_sm100.h
+        res = Layout(Array{i, j}, {FloorDiv(ai, 32) * 32 + FloorMod(ai, 32) +
+                                       FloorDiv(aj, meta.atom_n / 2) * 64,
+                                   FloorMod(aj, meta.atom_n / 2) +
+                                       atom_idx * (meta.atom_n / 2)});
+      } else if (meta.atom_m == 32) {
+        // Layout G
+        // (https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-data-path-layout-g)
+        res = Layout(
+            Array{i, j},
+            {FloorMod(ai, 32) + FloorDiv(aj, meta.atom_n / 4) * 32,
+             FloorMod(aj, meta.atom_n / 4) + atom_idx * (meta.atom_n / 4)});
+      } else {
+        ICHECK(0);
+      }
+      results.Set(C, res);
+    }
   } else if (TargetIsCDNA(T.target)) {
+    ICHECK(C.scope() == "local.fragment")
+        << "CDNA gemm (FMMA) only supports C in local.fragment scope, got "
+        << C.scope();
     auto fragment =
         makeGemmFragmentCCDNA(M, N, M / warp_m, N / warp_n, C->dtype.bits());
     results.Set(C, fragment->BindThreadRange(thread_range));
@@ -562,7 +840,7 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       results.Set(A, shared_layout);
     } else if (A.scope() == "local.fragment") {
       auto fragment = makeGemmFragmentACDNA(M, N, K, M / warp_m, N / warp_n,
-                                            A->dtype.bits(), trans_A);
+                                            A->dtype.bits(), kPack, trans_A);
       results.Set(A, fragment->BindThreadRange(thread_range));
     } else {
       ICHECK(0);
@@ -592,6 +870,22 @@ TIR_REGISTER_TL_OP(Gemm, gemm)
     .set_num_inputs(5)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
+
+TVM_REGISTER_OP("tl.GemmWarpPolicy")
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", "GemmWarpPolicy");
+
+TVM_FFI_STATIC_INIT_BLOCK({
+  GemmNode::RegisterReflection();
+  GemmWarpPolicyNode::RegisterReflection();
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.GemmWarpPolicyComputeWarpPartition",
+                        [](GemmWarpPolicy policy, int M, int N, int block_size,
+                           Target target, GemmInst gemm_inst) {
+                          policy->ComputeWarpPartition(M, N, block_size, target,
+                                                       gemm_inst);
+                          return;
+                        });
+});
 
 } // namespace tl
 } // namespace tvm

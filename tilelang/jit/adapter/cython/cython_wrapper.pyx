@@ -110,9 +110,19 @@ cdef class CythonKernelWrapper:
             if not isinstance(tensor, torch.Tensor):
                 # otherwise, maybe torch.data_ptr() for T.ptr inputs
                 continue
+
+            # Check ndim
+            if tensor.dim() != len(shape_list):
+                raise ValueError(
+                    f"Static shape mismatch for parameter {param}: "
+                    f"expected {len(shape_list)} dimensions, "
+                    f"got {tensor.dim()}"
+                )
+                
+            # Check each dimension
             for shape_idx, expected_shape in shape_list:
                 actual_shape = tensor.shape[shape_idx]
-                if actual_shape != expected_shape:
+                if expected_shape != -1 and actual_shape != expected_shape:
                     raise ValueError(
                         f"Static shape mismatch for parameter {param}: "
                         f"expected {expected_shape} at index {shape_idx}, "
@@ -148,6 +158,12 @@ cdef class CythonKernelWrapper:
             if not tensor.is_contiguous():
                 raise ValueError(f"Expected parameter {param} to be a contiguous tensor")
 
+    cdef object _infer_output_device(self, list inputs):
+        for tensor in inputs:
+            if isinstance(tensor, torch.Tensor):
+                return tensor.device
+        return torch.cuda.current_device()
+
     cpdef forward(self, list inputs, int64_t stream = -1, bint skip_tensor_validation = False):
         # Validate input dimensions and prepare for kernel execution
         cdef int total_params = len(self.params)
@@ -173,6 +189,7 @@ cdef class CythonKernelWrapper:
 
         cdef int ins_idx = 0
         cdef list tensor_list = []
+        device = None
 
         # Prepare input and output tensors
         for i in range(len(self.params)):
@@ -188,7 +205,10 @@ cdef class CythonKernelWrapper:
                                 shape.append(tensor_list[ref_tensor_idx].shape[ref_shape_idx])
                     else:  # Already converted to Python int during initialization
                         shape.append(s)
-                device = inputs[0].device if len(inputs) > 0 else torch.cuda.current_device()
+
+                if device is None:
+                    device = self._infer_output_device(inputs)
+
                 if len(shape) == 0:
                     param_name = self.params[i].name if hasattr(self.params[i], 'name') else f'parameter_{i}'
                     raise ValueError(
@@ -203,12 +223,14 @@ cdef class CythonKernelWrapper:
                 tensor = inputs[ins_idx]
                 ins_idx += 1
             # TODO(chenggang): remove this check or rewrite by ourselves?
+            '''
             if isinstance(tensor, torch.Tensor) and tensor._base is not None and not tensor.is_contiguous():
                 base_tensor = tensor._base.as_strided(tensor._base.shape, tensor.stride())
                 if torch._debug_has_internal_overlap(base_tensor):
                     raise ValueError(f"Cannot use an overlapping tensor"
                                      f"(shape={tensor.shape}, strides={tensor.stride()}, "
                                      f"overlap={torch._debug_has_internal_overlap(base_tensor)}) as the kernel input")
+            '''
             tensor_list.append(tensor)
 
         # Convert tensor pointers to C void pointers for kernel call

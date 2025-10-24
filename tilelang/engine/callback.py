@@ -1,11 +1,12 @@
-from typing import Callable, Union
+from __future__ import annotations
+from typing import Callable
 from tvm import register_func
 from tvm.target import Target
 
 
 def register_cuda_postproc(func: Callable[[str, Target], str], override: bool = True):
     """Register a post-processing function for CUDA code generation.
-    
+
     Args:
         func: A callable that takes generated code (str) and target (Target) as input,
              and returns the processed code (str).
@@ -16,7 +17,7 @@ def register_cuda_postproc(func: Callable[[str, Target], str], override: bool = 
 
 def register_hip_postproc(func: Callable[[str, Target], str], override: bool = True):
     """Register a post-processing function for HIP code generation.
-    
+
     Args:
         func: A callable that takes generated code (str) and target (Target) as input,
              and returns the processed code (str).
@@ -25,19 +26,19 @@ def register_hip_postproc(func: Callable[[str, Target], str], override: bool = T
     register_func("tilelang_callback_hip_postproc", f=func, override=override)
 
 
-def register_cuda_postproc_callback(func: Union[Callable, bool] = None, override: bool = True):
+def register_cuda_postproc_callback(func: Callable | bool = None, override: bool = True):
     """Decorator for registering CUDA post-processing callback function.
-    
+
     Can be used with or without parentheses:
         @register_cuda_postproc_callback
         def func(code, target): ...
-        
+
         @register_cuda_postproc_callback()
         def func(code, target): ...
-        
+
         @register_cuda_postproc_callback(override=False)
         def func(code, target): ...
-    
+
     Args:
         func: The function to be decorated or a boolean override flag
         override: Whether to override existing registered function. Defaults to True.
@@ -58,19 +59,19 @@ def register_cuda_postproc_callback(func: Union[Callable, bool] = None, override
     raise TypeError("Invalid decorator usage")
 
 
-def register_hip_postproc_callback(func: Union[Callable, bool] = None, override: bool = True):
+def register_hip_postproc_callback(func: Callable | bool = None, override: bool = True):
     """Decorator for registering HIP post-processing callback function.
-    
+
     Can be used with or without parentheses:
         @register_hip_postproc_callback
         def func(code, target): ...
-        
+
         @register_hip_postproc_callback()
         def func(code, target): ...
-        
+
         @register_hip_postproc_callback(override=False)
         def func(code, target): ...
-    
+
     Args:
         func: The function to be decorated or a boolean override flag
         override: Whether to override existing registered function. Defaults to True.

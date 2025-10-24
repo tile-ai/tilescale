@@ -25,10 +25,15 @@
 #include "tir/transforms/ir_utils.h"
 #include <tvm/arith/iter_affine_map.h>
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/attrs.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/data_type_rewriter.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
+
+#include <utility>
+
+#include "../op/builtin.h"
 
 namespace tvm {
 namespace tl {
@@ -44,6 +49,10 @@ public:
   static PrimFunc Flatten(PrimFunc func) {
     arith::Analyzer ana;
     auto pass = BufferFlattener(&ana);
+    if (auto init_map =
+            func->attrs.GetAttr<Map<Var, PrimExpr>>(tl::attr::kLocalVarInit)) {
+      pass.local_var_init_map_ = init_map.value();
+    }
     auto writer = func.CopyOnWrite();
     pass.MarkBufferMapShapes(func);
     writer->body = pass.VisitStmt(func->body);
@@ -73,21 +82,23 @@ private:
 
     Array<Buffer> alloc_buffers = op->alloc_buffers;
     alloc_buffers.MutateByApply(
-        [this](Buffer buf) { return GetFlattenedBuffer(buf); });
+        [this](const Buffer &buf) { return GetFlattenedBuffer(buf); });
     if (!alloc_buffers.same_as(op->alloc_buffers)) {
       block.CopyOnWrite()->alloc_buffers = alloc_buffers;
     }
 
     Array<BufferRegion> reads = op->reads;
-    reads.MutateByApply(
-        [this](BufferRegion region) { return MutateBufferRegion(region); });
+    reads.MutateByApply([this](BufferRegion region) {
+      return MutateBufferRegion(std::move(region));
+    });
     if (!reads.same_as(op->reads)) {
       block.CopyOnWrite()->reads = reads;
     }
 
     Array<BufferRegion> writes = op->writes;
-    writes.MutateByApply(
-        [this](BufferRegion region) { return MutateBufferRegion(region); });
+    writes.MutateByApply([this](BufferRegion region) {
+      return MutateBufferRegion(std::move(region));
+    });
     if (!writes.same_as(op->writes)) {
       block.CopyOnWrite()->writes = writes;
     }
@@ -157,6 +168,13 @@ private:
     if (!new_extents.same_as(alloc->extents)) {
       alloc.CopyOnWrite()->extents = new_extents;
     }
+    if (!local_var_init_map_.empty()) {
+      auto init_it = local_var_init_map_.find(alloc->buffer_var);
+      if (init_it != local_var_init_map_.end()) {
+        const PrimExpr &init = (*init_it).second;
+        alloc.CopyOnWrite()->annotations.Set(tl::attr::kLocalVarInit, init);
+      }
+    }
 
     return std::move(alloc);
   }
@@ -169,7 +187,7 @@ private:
     return VisitStmt(op->body);
   }
 
-  Buffer GetFlattenedBuffer(Buffer buf) {
+  Buffer GetFlattenedBuffer(const Buffer &buf) {
     auto it = buffer_remap_.find(buf);
     if (it != buffer_remap_.end()) {
       return it->second;
@@ -291,15 +309,18 @@ private:
 
   /*! \brief The updated external buffer map. */
   Map<Var, Buffer> updated_extern_buffer_map_;
+
+  /*! \brief Local var initializers preserved from block annotations. */
+  Map<Var, PrimExpr> local_var_init_map_;
 };
 
 PrimFunc FlattenBufferRewriter(PrimFunc f) {
-  return BufferFlattener::Flatten(f);
+  return BufferFlattener::Flatten(std::move(f));
 }
 
 using namespace tir::transform;
 tvm::transform::Pass FlattenBuffer() {
-  auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     return FlattenBufferRewriter(std::move(f));
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.FlattenBuffer", {});

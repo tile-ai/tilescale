@@ -1,4 +1,6 @@
-from typing import List, Sequence
+from __future__ import annotations
+
+from typing import Sequence
 import numpy as np
 import torch
 
@@ -92,5 +94,5 @@ def nvshmem_create_tensor(shape: Sequence[int], dtype: torch.dtype) -> torch.Ten
 
 
 def nvshmem_create_tensor_list_intra_node(shape: Sequence[int],
-                                          dtype: torch.dtype) -> List[torch.Tensor]:
+                                          dtype: torch.dtype) -> list[torch.Tensor]:
     ...

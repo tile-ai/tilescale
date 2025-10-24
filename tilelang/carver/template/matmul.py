@@ -1,9 +1,9 @@
+from __future__ import annotations
 from dataclasses import dataclass
 from .base import BaseTemplate
 from tvm import te
 from ..arch import TileDevice
 from ..roller import Hint
-from typing import List
 from ..utils import get_roller_hints_from_func
 
 
@@ -38,7 +38,7 @@ class MatmulTemplate(BaseTemplate):
     accum_dtype: str = "float16"  # Data type for accumulation
     with_bias: bool = False  # Whether to add a bias term
 
-    def get_hardware_aware_configs(self, arch: TileDevice = None, topk: int = 10) -> List[Hint]:
+    def get_hardware_aware_configs(self, arch: TileDevice = None, topk: int = 10) -> list[Hint]:
         """
         Retrieves optimized hardware-aware configurations.
 
@@ -56,8 +56,8 @@ class MatmulTemplate(BaseTemplate):
         """
         Defines and initializes the matrix multiplication computation.
 
-        This method sets up placeholders for input matrices, computes 
-        the matrix multiplication using TVM's compute API, 
+        This method sets up placeholders for input matrices, computes
+        the matrix multiplication using TVM's compute API,
         and optionally applies bias and type casting.
 
         Raises:

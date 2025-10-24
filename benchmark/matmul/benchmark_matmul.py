@@ -2,6 +2,7 @@ import argparse
 import itertools
 import logging
 
+import tilelang
 import tilelang.language as T
 from tilelang.autotuner import autotune
 from tilelang import jit
@@ -32,7 +33,7 @@ def ref_program(A, B):
 def get_configs(args, kwargs):
     """
     Generate a list of configuration dictionaries that will be used for tuning.
-    
+
     Parameters
     ----------
     with_roller : bool
@@ -187,6 +188,8 @@ def matmul(
 
             # Enable (or disable) swizzling optimization
             T.use_swizzle(panel_size=10, enable=enable_rasteration)
+            # to utilize swizzle tma layout
+            T.annotate_layout({C_shared: tilelang.layout.make_swizzled_layout(C_shared)})
 
             # Clear out the accumulation buffer
             T.clear(C_local)
@@ -243,4 +246,5 @@ if __name__ == "__main__":
     print(f"Best TFlops: {total_flops / best_latency * 1e-9:.3f}")
     print(f"Best config: {best_config}")
 
-    print(f"Reference TFlops: {total_flops / ref_latency * 1e-9:.3f}")
+    if ref_latency is not None:
+        print(f"Reference TFlops: {total_flops / ref_latency * 1e-9:.3f}")

@@ -1,12 +1,30 @@
 """The language interface for tl programs."""
+from __future__ import annotations
 
 from tilelang import tvm as tvm
 from tilelang.language import ptx_arrive_barrier, evaluate, address_of
 from tilelang.language.kernel import get_thread_bindings, get_block_extents
+from tilelang.utils.target import check_hip_availability
 from tvm import tir
-from typing import Union, Any
-from tvm.tir import PrimExpr, Var, Call
+from typing import Any
 import tilelang.language as T
+from tvm.tir import PrimExpr, Var, Call, Buffer, BufferLoad
+
+_IS_HIP_AVAILABLE = check_hip_availability()
+
+
+def _normalize_index_arg(value: int | PrimExpr | None) -> PrimExpr | None:
+    """
+    Normalize warp sizing arguments so both Python ints and PrimExpr values
+    are accepted uniformly.
+    """
+    if value is None:
+        return None
+    if isinstance(value, PrimExpr):
+        return value
+    if isinstance(value, int):
+        return tir.IntImm("int32", value)
+    raise TypeError(f"Expect warp sizing argument to be int or PrimExpr, but got {type(value)}.")
 
 
 def create_list_of_mbarrier(*args: Any) -> Call:
@@ -27,7 +45,7 @@ def create_list_of_mbarrier(*args: Any) -> Call:
     ------
     TypeError
         If the input is not a list or variadic arguments.
-    
+
     Examples
     --------
     >>> create_list_of_mbarrier([128, 128])
@@ -167,7 +185,7 @@ def disable_warp_group_reg_alloc():
     return no_set_max_nreg()
 
 
-def mbarrier_wait_parity(mbarrier: Union[int, PrimExpr, tir.Call], parity: Union[int, Var]):
+def mbarrier_wait_parity(mbarrier: int | PrimExpr | tir.Call, parity: int | Var):
     """Wait for memory barrier parity condition.
 
     Args:
@@ -217,7 +235,7 @@ def mbarrier_wait_parity(mbarrier: Union[int, PrimExpr, tir.Call], parity: Union
     return tir.call_intrin("handle", tir.op.Op.get("tl.mbarrier_wait_parity"), mbarrier, parity)
 
 
-def mbarrier_arrive(mbarrier: Union[int, PrimExpr, tir.Call]):
+def mbarrier_arrive(mbarrier: int | PrimExpr | tir.Call):
     """Arrive at memory barrier.
 
     Args:
@@ -247,6 +265,171 @@ def mbarrier_expect_tx(*args):
     return tir.call_intrin("handle", tir.op.Op.get("tl.mbarrier_expect_tx"), *args)
 
 
+def warpgroup_arrive():
+    """Signal warpgroup readiness for subsequent WGMMA operations.
+
+    Returns:
+        tir.Call: A handle to the warpgroup arrive operation.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.warpgroup_arrive"))
+
+
+def warpgroup_commit_batch():
+    """Commit the current warpgroup batch for WGMMA operations.
+
+    Returns:
+        tir.Call: A handle to the warpgroup commit batch operation.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.warpgroup_commit_batch"))
+
+
+def warpgroup_wait(num_mma: int):
+    """Wait for completion of the specified warpgroup batch.
+
+    Args:
+        num_mma: int
+            Identifier of the warpgroup MMA batch to wait on.
+
+    Returns:
+        tir.Call: A handle to the warpgroup wait operation.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.warpgroup_wait"), num_mma)
+
+
+def get_lane_idx(warp_size: int | PrimExpr | None = None,) -> PrimExpr:
+    """Return the logical lane index of the calling thread within a warp.
+
+    Parameters
+    ----------
+    warp_size : Optional[int, PrimExpr]
+        Logical warp (or wavefront) size. Defaults to 32 on NVIDIA and 64 on AMD.
+
+    Example
+    -------
+    >>> lane = T.get_lane_idx()
+    >>> custom_lane = T.get_lane_idx(64)  # override warp size explicitly
+
+    Implementation Notes
+    --------------------
+    Lowers to the CUDA helper `tl::get_lane_idx(warp_size)` defined in
+    `src/tl_templates/cuda/intrin.h`, which computes the lane index from the
+    linear thread id using the provided `warp_size`.
+    """
+    warp_size_expr = _normalize_index_arg(warp_size)
+    if warp_size_expr is None:
+        return tir.call_intrin("int32", tir.op.Op.get("tl.get_lane_idx"))
+    return tir.call_intrin("int32", tir.op.Op.get("tl.get_lane_idx"), warp_size_expr)
+
+
+def get_warp_idx_sync(warp_size: int | PrimExpr | None = None,) -> PrimExpr:
+    """Return the canonical warp index, assuming the warp's threads are converged.
+
+    Parameters
+    ----------
+    warp_size : Optional[int, PrimExpr]
+        Logical warp size used for the index calculation.
+
+    Example
+    -------
+    >>> warp = T.get_warp_idx_sync()
+    >>> custom_warp = T.get_warp_idx_sync(64)
+
+    Implementation Notes
+    --------------------
+    Emits `tl::get_warp_idx_sync(warp_size)` which divides the block-linear
+    thread id by `warp_size`, matching the semantics of CUTLASS' canonical helpers.
+    """
+    warp_size_expr = _normalize_index_arg(warp_size)
+    if warp_size_expr is None:
+        return tir.call_intrin("int32", tir.op.Op.get("tl.get_warp_idx_sync"))
+    return tir.call_intrin("int32", tir.op.Op.get("tl.get_warp_idx_sync"), warp_size_expr)
+
+
+def get_warp_idx(warp_size: int | PrimExpr | None = None,) -> PrimExpr:
+    """Return the canonical warp index without synchronizing the warp.
+
+    Parameters
+    ----------
+    warp_size : Optional[int, PrimExpr]
+        Logical warp size used for the index calculation.
+
+    Example
+    -------
+    >>> warp = T.get_warp_idx()
+    >>> custom_warp = T.get_warp_idx(64)
+
+    Implementation Notes
+    --------------------
+    Lowers to `tl::get_warp_idx(warp_size)` which divides the block-linear
+    thread id by the provided `warp_size` without requiring warp convergence.
+    """
+    warp_size_expr = _normalize_index_arg(warp_size)
+    if warp_size_expr is None:
+        return tir.call_intrin("int32", tir.op.Op.get("tl.get_warp_idx"))
+    return tir.call_intrin("int32", tir.op.Op.get("tl.get_warp_idx"), warp_size_expr)
+
+
+def get_warp_group_idx(
+    warp_size: int | PrimExpr | None = None,
+    warps_per_group: int | PrimExpr | None = None,
+) -> PrimExpr:
+    """Return the canonical warp group index for the calling thread.
+
+    Parameters
+    ----------
+    warp_size : Optional[int, PrimExpr]
+        Logical warp size to use (defaults to 32 on NVIDIA / 64 on AMD).
+    warps_per_group : Optional[int, PrimExpr]
+        Number of warps per warp-group. Defaults to 4 on NVIDIA architectures.
+
+    Example
+    -------
+    >>> group = T.get_warp_group_idx()
+    >>> custom_group = T.get_warp_group_idx(32, 6)  # treat 6 warps as a group
+
+    Implementation Notes
+    --------------------
+    Generates `tl::get_warp_group_idx(warp_size, warps_per_group)` which
+    divides the block-linear thread id by `warp_size * warps_per_group`,
+    matching the canonical ordering while allowing architecture-specific overrides.
+    """
+    warp_size_expr = _normalize_index_arg(warp_size)
+    warps_per_group_expr = _normalize_index_arg(warps_per_group)
+    args = []
+    if warp_size_expr is not None:
+        args.append(warp_size_expr)
+    if warps_per_group_expr is not None:
+        if warp_size_expr is None:
+            raise ValueError("get_warp_group_idx expects `warp_size` when specifying "
+                             "`warps_per_group`.")
+        args.append(warps_per_group_expr)
+    return tir.call_intrin("int32", tir.op.Op.get("tl.get_warp_group_idx"), *args)
+
+
+def shuffle_elect(thread_extent: int) -> PrimExpr:
+    """Elect exactly one lane within a logical thread group.
+
+    Parameters
+    ----------
+    thread_extent : int
+        Size (in threads) of the group in which a single lane should be elected.
+        Passing 0 elects a single lane in the entire thread block.
+
+    Example
+    -------
+    >>> is_leader = T.shuffle_elect(64)
+    >>> T.if_then_else(is_leader, do_leader_work(), T.evaluate(0))
+
+    Implementation Notes
+    --------------------
+    Lowered to the CUDA helper `tl::tl_shuffle_elect<thread_extent>()` defined in
+    `src/tl_templates/cuda/intrin.h`, which relies on
+    `cutlass::canonical_warp_idx_sync()` and `cute::elect_one_sync()` (or
+    `__shfl_sync`) to pick one lane per group.
+    """
+    return tir.call_intrin("bool", tir.op.Op.get("tl.tl_shuffle_elect"), thread_extent)
+
+
 def wait_wgmma(id: int):
     """Wait for WGMMA (Warp Group Matrix Multiply-Accumulate) operations to complete.
 
@@ -260,7 +443,7 @@ def wait_wgmma(id: int):
     return tir.call_intrin("handle", tir.op.Op.get("tl.wait_wgmma"), id)
 
 
-def barrier_wait(barrier_id: Union[int, PrimExpr, tir.Call], parity: Union[int, Var, None] = None):
+def barrier_wait(barrier_id: int | PrimExpr | tir.Call, parity: int | Var | None = None):
     """Wait for a memory barrier to complete.
 
     Args:
@@ -275,7 +458,7 @@ def barrier_wait(barrier_id: Union[int, PrimExpr, tir.Call], parity: Union[int, 
     return mbarrier_wait_parity(barrier_id, parity)
 
 
-def barrier_arrive(barrier_id: Union[int, PrimExpr, tir.Call]):
+def barrier_arrive(barrier_id: int | PrimExpr | tir.Call):
     """Arrive at a memory barrier.
 
     Args:
@@ -285,7 +468,7 @@ def barrier_arrive(barrier_id: Union[int, PrimExpr, tir.Call]):
     return mbarrier_arrive(barrier_id)
 
 
-def shfl_xor(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr, tir.Call]):
+def shfl_xor(value: int | PrimExpr | tir.Call, offset: int | PrimExpr | tir.Call):
     """Perform a shuffle operation with XOR offset.
 
     Args:
@@ -296,37 +479,51 @@ def shfl_xor(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr,
     Returns:
         tir.Call: A handle to the shuffle operation
     """
-    return tir.call_extern(value.dtype, "__shfl_xor_sync", 0xffffffff, value, offset)
+    if _IS_HIP_AVAILABLE:
+        return tir.call_extern(value.dtype, "__shfl_xor", value, offset)
+    else:
+        return tir.call_extern(value.dtype, "__shfl_xor_sync", 0xffffffff, value, offset)
 
 
-def shfl_down(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr, tir.Call]):
+def shfl_down(value: int | PrimExpr | tir.Call, offset: int | PrimExpr | tir.Call):
     """Perform a shuffle operation with down offset.
 
     Args:
         value: Optional[int, PrimExpr]
             The value to shuffle
     """
-    return tir.call_extern(value.dtype, "__shfl_down_sync", 0xffffffff, value, offset)
+    if _IS_HIP_AVAILABLE:
+        return tir.call_extern(value.dtype, "__shfl_down", value, offset)
+    else:
+        return tir.call_extern(value.dtype, "__shfl_down_sync", 0xffffffff, value, offset)
 
 
-def shfl_up(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr, tir.Call]):
+def shfl_up(value: int | PrimExpr | tir.Call, offset: int | PrimExpr | tir.Call):
     """Perform a shuffle operation with up offset.
 
     Args:
         value: Optional[int, PrimExpr]
             The value to shuffle
     """
-    return tir.call_extern(value.dtype, "__shfl_up_sync", 0xffffffff, value, offset)
+    if _IS_HIP_AVAILABLE:
+        return tir.call_extern(value.dtype, "__shfl_up", value, offset)
+    else:
+        return tir.call_extern(value.dtype, "__shfl_up_sync", 0xffffffff, value, offset)
 
 
-def sync_threads():
-    """Synchronize all threads in a warp.
+def sync_threads(barrier_id: int = None, arrive_count: int = None):
+    """Synchronize all threads in a block.
     """
-    return tir.op.tvm_storage_sync("shared")
+    args = []
+    if barrier_id is not None:
+        args.append(barrier_id)
+    if arrive_count is not None:
+        args.append(arrive_count)
+    return tir.call_intrin("int32", "tir.tvm_storage_sync", "shared", *args)
 
 
 def sync_global():
-    """Synchronize all threads in a block.
+    """Synchronize all threads in the entire grid.
     """
     tx, ty, tz = get_thread_bindings()
     ex, ey, ez = get_block_extents()
@@ -370,7 +567,7 @@ def alloc_barrier_gpu():
 
 def init_barrier_gpu(barrier: PrimExpr, expected: int):
     """Initialize a barrier for GPU-level synchronization.
-    
+
     Args:
         barrier: The barrier to initialize
         expected (int): The number of threads that need to arrive at the barrier.
@@ -457,3 +654,74 @@ def get_clock():
         tir.Call: A handle to the clock cycle count operation
     """
     return tir.call_intrin("int64", tir.op.Op.get("tl.get_clock"))
+
+
+def initialize_descriptor(descriptor: Buffer,
+                          start_address: PrimExpr,
+                          layout_type_: int = 0,
+                          leading_byte_offset: int = 0,
+                          stride_byte_offset: int = 0) -> PrimExpr:
+    """
+    Initialize a memory descriptor with the given parameters.
+
+    Parameters:
+        descriptor (Buffer): The memory descriptor to initialize.
+        start_address (PrimExpr): The starting address of the memory region.
+        layout_type_ (int, optional): Layout type identifier. Defaults to 0.
+        leading_byte_offset (int, optional): Leading byte offset. Defaults to 0.
+        stride_byte_offset (int, optional): Stride byte offset. Defaults to 0.
+
+    Returns:
+        PrimExpr: A handle representing the initialized descriptor.
+    """
+
+    if not isinstance(descriptor, (BufferLoad, Buffer)):
+        raise TypeError("Descriptor must be a tvm.tir.Buffer or tvm.tir.BufferLoad.")
+
+    if isinstance(descriptor, Buffer) and len(descriptor.shape) != 1 or descriptor.shape[0] != 1:
+        raise ValueError("Descriptor must be a 1D buffer of size 1.")
+
+    descriptor = descriptor if isinstance(descriptor, BufferLoad) else tir.BufferLoad(
+        descriptor, [0])
+
+    return evaluate(
+        tir.call_intrin("handle", tir.op.Op.get("tl.initialize_descriptor"), descriptor,
+                        start_address, layout_type_, int(leading_byte_offset),
+                        int(stride_byte_offset)))
+
+
+def increase_descriptor_offset(descriptor: PrimExpr, offset: PrimExpr) -> PrimExpr:
+    """
+    Increase the offset of a memory descriptor.
+
+    Parameters:
+        descriptor (PrimExpr): The memory descriptor to modify.
+        offset (PrimExpr): The offset value to increase.
+
+    Returns:
+        PrimExpr: A handle representing the modified descriptor.
+    """
+    if not isinstance(descriptor, (BufferLoad, Buffer)):
+        raise TypeError("Descriptor must be a tvm.tir.Buffer or tvm.tir.BufferLoad.")
+
+    if isinstance(descriptor, Buffer) and len(descriptor.shape) != 1 or descriptor.shape[0] != 1:
+        raise ValueError("Descriptor must be a 1D buffer of size 1.")
+
+    descriptor = descriptor if isinstance(descriptor, BufferLoad) else tir.BufferLoad(
+        descriptor, [0])
+
+    return evaluate(
+        tir.call_intrin("handle", tir.op.Op.get("tl.increase_descriptor_offset"), descriptor,
+                        offset))
+
+
+def loop_break():
+    """Break out of the innermost loop.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.loop_break"))
+
+
+def cp_async_barrier_noinc(barrier_id: int | PrimExpr | tir.Call):
+    """Perform a ptx async copy barrier using cp.async.mbarrier.arrive.noinc.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.ptx_cp_async_barrier_noinc"), barrier_id)

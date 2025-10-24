@@ -17,7 +17,8 @@ namespace tl {
 
 using namespace tir;
 
-PrimExpr BarrierAllBlocksSysOp::get_offset(const BufferLoadNode *load) {
+PrimExpr
+BarrierAllBlocksSysOpNode::get_offset(const BufferLoadNode *load) const {
   PrimExpr offset = 0;
   PrimExpr stride = 1;
   auto buffer_shape = load->buffer->shape;
@@ -64,30 +65,38 @@ TIR_DEFINE_TL_BUILTIN(sync_grid).set_num_inputs(1).set_attr<TCallEffectKind>(
 
 BarrierAllBlocksSysOp::BarrierAllBlocksSysOp(Array<PrimExpr> args,
                                              BufferMap vmap) {
-  local_bar_addr = args[0];
-  ICHECK(local_bar_addr.as<CallNode>()) << "local_bar_addr must be a call node";
-  ICHECK(local_bar_addr.as<CallNode>()->op.same_as(builtin::address_of()))
+  ObjectPtr<BarrierAllBlocksSysOpNode> node =
+      make_object<BarrierAllBlocksSysOpNode>();
+  node->local_bar_addr = args[0];
+  const auto *call = node->local_bar_addr.as<CallNode>();
+  ICHECK(call) << "local_bar_addr must be a call node";
+  ICHECK(call->op.same_as(builtin::address_of()))
       << "local_bar_addr must be address_of op";
 
-  offset = this->get_offset(
-      local_bar_addr.as<CallNode>()->args[0].as<BufferLoadNode>());
-  local_bar =
-      local_bar_addr.as<CallNode>()->args[0].as<BufferLoadNode>()->buffer;
+  const auto *load = call->args[0].as<BufferLoadNode>();
+  ICHECK(load) << "address_of argument must be a BufferLoad";
+  node->offset = node->get_offset(load);
+  node->local_bar = load->buffer;
+  node->local_indices = load->indices;
+  data_ = std::move(node);
+  (void)vmap;
 }
 
-Stmt BarrierAllBlocksSysOp::Lower(const LowerArgs &T,
-                                  arith::Analyzer *analyzer) const {
+Stmt BarrierAllBlocksSysOpNode::Lower(const LowerArgs &T,
+                                      arith::Analyzer *analyzer) const {
+  (void)analyzer;
   Array<PrimExpr> new_args;
   std::stringstream ss;
   ss << "tl::barrier_all_blocks_sys";
   new_args.push_back(StringImm(ss.str()));
 
+  PrimExpr bar_addr = MakeLocalBarAddr(T);
   PrimExpr rank = Call(DataType::Int(64), tl::get_rank(), {});
   PrimExpr num_ranks = Call(DataType::Int(64), tl::get_num_ranks(), {});
   PrimExpr local_base_ptr =
       Call(DataType::Handle(), tl::get_remote_base_ptr(), {rank});
   PrimExpr offset_to_base =
-      Sub(Call(DataType::Handle(), tl::get_uintptr_t(), {local_bar_addr}),
+      Sub(Call(DataType::Handle(), tl::get_uintptr_t(), {bar_addr}),
           local_base_ptr);
 
   new_args.push_back(offset_to_base);
@@ -97,6 +106,32 @@ Stmt BarrierAllBlocksSysOp::Lower(const LowerArgs &T,
   auto barrier_all_blocks_sys =
       Call(DataType::Handle(), builtin::call_extern(), new_args);
   return Evaluate(barrier_all_blocks_sys);
+}
+
+LayoutMap BarrierAllBlocksSysOpNode::InferLayout(const LayoutInferArgs &T,
+                                                 InferLevel level) const {
+  (void)T;
+  (void)level;
+  return {};
+}
+
+TileOperator BarrierAllBlocksSysOpNode::Clone() const {
+  auto node = make_object<BarrierAllBlocksSysOpNode>(*this);
+  return BarrierAllBlocksSysOp(node);
+}
+
+PrimExpr BarrierAllBlocksSysOpNode::MakeLocalBarAddr(const LowerArgs &T) const {
+  const auto *call = local_bar_addr.as<CallNode>();
+  ICHECK(call && call->op.same_as(builtin::address_of()))
+      << "local_bar_addr must remain an address_of call";
+  const auto *load = call->args[0].as<BufferLoadNode>();
+  ICHECK(load) << "address_of must wrap a BufferLoad";
+  Buffer buffer = load->buffer;
+  if (T.buffer_remap.count(buffer)) {
+    buffer = T.buffer_remap[buffer];
+  }
+  return Call(DataType::Handle(), builtin::address_of(),
+              {BufferLoad(buffer, local_indices)});
 }
 
 TIR_REGISTER_TL_OP(BarrierAllBlocksSysOp, barrier_all_blocks_sys)
@@ -112,6 +147,8 @@ TIR_DEFINE_TL_BUILTIN(fence_gpu).set_num_inputs(0).set_attr<TCallEffectKind>(
 
 TIR_DEFINE_TL_BUILTIN(fence_sys).set_num_inputs(0).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kOpaque));
+
+TVM_FFI_STATIC_INIT_BLOCK({ BarrierAllBlocksSysOpNode::RegisterReflection(); });
 
 } // namespace tl
 } // namespace tvm
