@@ -21,6 +21,8 @@ cd tilescale
 2. **Install Project**:
 
 ```bash
+pip install cuda-python==12.9 # should align with your nvcc version
+pip install scikit-build-core CMake torch ninja Cython
 pip install -e . --no-build-isolation
 ```
 
