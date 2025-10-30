@@ -62,13 +62,14 @@ def init_dist(local_rank: int, num_local_ranks: int):
         list(range(num_local_ranks * num_nodes)))
 
 
-def init_distributed(return_tp_group=False, init_nvshmem=True):
+def init_distributed(return_tp_group=False, init_nvshmem=True, return_lc_group=False):
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
     RANK = int(os.environ.get("RANK", 0))
     LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
 
     torch.distributed.init_process_group(
         backend="nccl",
+        device_id=torch.device(f'cuda:{LOCAL_RANK}'),
         world_size=WORLD_SIZE,
         rank=RANK,
         timeout=datetime.timedelta(seconds=1800),
@@ -82,7 +83,14 @@ def init_distributed(return_tp_group=False, init_nvshmem=True):
         import pynvshmem
         pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
 
-    if return_tp_group:
+    if return_lc_group:
+        local_world_size = int(os.environ.get('LOCAL_WORLD_SIZE', 1))
+        base = (RANK // local_world_size) * local_world_size
+        LC_GROUP = torch.distributed.new_group(
+            list(range(base, base + local_world_size)), backend="nccl")
+
+        return WORLD_SIZE, RANK, LOCAL_RANK, TP_GROUP, LC_GROUP
+    elif return_tp_group:
         return WORLD_SIZE, RANK, LOCAL_RANK, TP_GROUP
     else:
         return WORLD_SIZE, RANK, LOCAL_RANK
