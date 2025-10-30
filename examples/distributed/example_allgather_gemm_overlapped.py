@@ -6,6 +6,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing
 from tilelang.distributed import init_dist
+from tilelang.distributed.utils import CUDA_CHECK
 from tilelang.carver.arch import driver
 import importlib.metadata
 
@@ -171,6 +172,7 @@ def cp_engine_producer_all_gather_full_mesh_pull(
                 signal_target,
                 cuda.CUstreamWriteValue_flags.CU_STREAM_WRITE_VALUE_DEFAULT,
             )
+            CUDA_CHECK(err)
 
 
 def ag_gemm_op(A, B, C, ag_buffer, signal_buffer, M_per_rank, N, signal_target, local_rank,

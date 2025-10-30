@@ -537,6 +537,22 @@ TVM_DLL const Op &increase_descriptor_offset();
  */
 TVM_DLL const Op &atomicadd_elem_op();
 
+/*!
+ * \brief tilelang intrinsic for atomic add that returns the original value.
+ *
+ *  This op is used to represent an atomic add operation that returns the
+ * original value before addition in tilelang.
+ */
+TVM_DLL const Op &atom_add();
+
+/*!
+ * \brief tilelang intrinsic for atomic store with semantic.
+ *
+ *  This op is used to represent an atomic store operation with semantic in
+ * tilelang.
+ */
+TVM_DLL const Op &st();
+
 } // namespace tl
 } // namespace tvm
 

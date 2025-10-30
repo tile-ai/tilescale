@@ -186,4 +186,32 @@ template <typename T> TL_DEVICE void wait_eq(void *barrier, T val = 1) {
   }
 }
 
+TL_DEVICE void st_release_gpu(uint32_t *ptr, uint32_t value) {
+  asm volatile("st.release.gpu.global.b32 [%0], %1;"
+                     :
+                     : "l"(ptr), "r"(value)
+                     : "memory");
+}
+
+TL_DEVICE void st_relaxed_gpu(uint32_t *ptr, uint32_t value) {
+  asm volatile("st.relaxed.gpu.global.b32 [%0], %1;"
+                     :
+                     : "l"(ptr), "r"(value)
+                     : "memory");
+}
+
+TL_DEVICE void st_release_sys(uint32_t *ptr, uint32_t value) {
+  asm volatile("st.release.sys.global.b32 [%0], %1;"
+                     :
+                     : "l"(ptr), "r"(value)
+                     : "memory");
+}
+
+TL_DEVICE void st_relaxed_sys(uint32_t *ptr, uint32_t value) {
+  asm volatile("st.relaxed.sys.global.b32 [%0], %1;"
+                     :
+                     : "l"(ptr), "r"(value)
+                     : "memory");
+}
+
 } // namespace tl

@@ -725,3 +725,28 @@ def cp_async_barrier_noinc(barrier_id: int | PrimExpr | tir.Call):
     """Perform a ptx async copy barrier using cp.async.mbarrier.arrive.noinc.
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.ptx_cp_async_barrier_noinc"), barrier_id)
+
+
+def atom_add(barrier: PrimExpr, value: PrimExpr, scope: str = "gpu", sem: str = "relaxed"):
+    """Perform a ptx async copy barrier using cp.async.mbarrier.arrive.noinc.
+    """
+    assert scope in ["gpu", "sys"], "Scope must be one of 'gpu', or 'sys'."
+    assert sem in ["relaxed", "acquire", "release", "acq_rel"], "Semantic must be one of 'relaxed', 'acquire', 'release', or 'acq_rel'."
+    return tir.call_intrin("uint32", tir.op.Op.get("tl.atom_add"), address_of(barrier), value, sem, scope)
+
+
+def st(barrier: PrimExpr, value: PrimExpr, scope: str = "gpu", sem: str = "relaxed"):
+    """Store a value to a given address with specified scope and semantic.
+
+    Args:
+        address: The address to store the value to
+        value: The value to store
+        scope: The memory scope (default is "gpu")
+        semantic: The memory semantic (default is "relaxed")
+
+    Returns:
+        tir.Call: A handle to the store operation
+    """
+    assert scope in ["gpu", "sys"], "Scope must be one of 'gpu', or 'sys'."
+    assert sem in ["relaxed", "release"], "Semantic must be one of 'relaxed', or 'release'."
+    return tir.call_intrin("handle", tir.op.Op.get("tl.st"), address_of(barrier), value, sem, scope)
