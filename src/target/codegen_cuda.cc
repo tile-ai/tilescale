@@ -1517,8 +1517,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << "tl::wait_eq(" << this->PrintExpr(op->args[0]) << ", "
                  << this->PrintExpr(op->args[1]) << ");\n";
   } else if (op->op.same_as(tl::atom_add())) {
-    std::string func_name = "tl::ptx_atom_add_" + op->args[2].as<StringImmNode>()->value +
-                            "_" + op->args[3].as<StringImmNode>()->value;
+    std::string func_name = "tl::ptx_atom_add_" +
+                            op->args[2].as<StringImmNode>()->value + "_" +
+                            op->args[3].as<StringImmNode>()->value;
     os << func_name << "(" << this->PrintExpr(op->args[0]) << ", "
        << this->PrintExpr(op->args[1]) << ")";
   } else if (op->op.same_as(tl::st())) {

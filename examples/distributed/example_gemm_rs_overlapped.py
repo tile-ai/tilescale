@@ -7,15 +7,6 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing
 from tilelang.distributed import init_dist
-from tilelang.carver.arch import driver
-import importlib.metadata
-
-cuda_python_version = importlib.metadata.version("cuda-python")
-from packaging import version
-if version.parse(cuda_python_version) >= version.parse("12.8.0"):
-    from cuda.bindings import driver as cuda
-else:
-    from cuda import cuda
 from tilelang.distributed import perf_fn
 from reduce_scatter import reduce_scatter_2d_op, create_reduce_scater_2d_ctx
 
@@ -47,9 +38,7 @@ def gemm_kernel(M,
             counter_signal_buf: T.Tensor((num_local_rank), "uint32"),
             C: T.Tensor((M, N), dtype),
     ):
-        with T.Kernel(
-                T.ceildiv(M, block_M) * T.ceildiv(N, block_N),
-                threads=threads) as (bid):
+        with T.Kernel(T.ceildiv(M, block_M) * T.ceildiv(N, block_N), threads=threads) as (bid):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_K, block_N), dtype)
             C_shared = T.alloc_shared((block_M, block_N), dtype)
@@ -80,7 +69,7 @@ def gemm_kernel(M,
                 T.gemm(A_shared, B_shared, C_local)
             T.copy(C_local, C_shared)
             T.copy(C_shared, C[pid_m * block_M, pid_n * block_N])
-            
+
             # inc barrier
             segment_start = pid_m * block_M // M_per_rank
             segment_end = (T.min((pid_m + 1) * block_M, M) - 1) // M_per_rank
@@ -98,22 +87,37 @@ def gemm_kernel(M,
     return main
 
 
-def gemm_rs_op(A, B, C, output, ctx, gemm_kernel, gemm_stream, rs_stream, local_rank, print_source=False):
-    
+def gemm_rs_op(A,
+               B,
+               C,
+               output,
+               ctx,
+               gemm_kernel,
+               gemm_stream,
+               rs_stream,
+               local_rank,
+               print_source=False):
+
     current_stream = torch.cuda.current_stream()
     rs_stream.wait_stream(gemm_stream)
-    
-    gemm_kernel(A, B, ctx.scatter_signal_bufs[local_rank], ctx.counter_bufs[local_rank], C, stream=gemm_stream.cuda_stream)
-    
+
+    gemm_kernel(
+        A,
+        B,
+        ctx.scatter_signal_bufs[local_rank],
+        ctx.counter_bufs[local_rank],
+        C,
+        stream=gemm_stream.cuda_stream)
+
     if print_source and local_rank == 1:
         print(gemm_kernel.get_kernel_source())
-    
+
     with torch.cuda.stream(rs_stream):
         # don't allocate memory on other stream: error-prune
         output = reduce_scatter_2d_op(C, ctx, output)
     gemm_stream.wait_stream(rs_stream)
     current_stream.wait_stream(rs_stream)
-    
+
     return output
 
 
@@ -169,19 +173,19 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     rs_stream = torch.cuda.Stream(priority=-1)
     ctx = create_reduce_scater_2d_ctx(
         M,
-        N, 
-        local_rank, 
-        num_local_ranks, 
-        num_local_ranks, 
-        dtype, 
+        N,
+        local_rank,
+        num_local_ranks,
+        num_local_ranks,
+        dtype,
         allocator,
         overlap_with_gemm=True,
-        num_reduction_sms=15
-    )
+        num_reduction_sms=15)
 
     dist.barrier()
 
-    tilelang_out = gemm_rs_op(A, B, C, output, ctx, gemm_func, gemm_stream, rs_stream, local_rank, print_source=True)
+    tilelang_out = gemm_rs_op(
+        A, B, C, output, ctx, gemm_func, gemm_stream, rs_stream, local_rank, print_source=True)
     torch_out = torch_gemm_rs(group, A, B, None, num_local_ranks)
 
     atol = 1e-2
@@ -193,8 +197,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         print(f"torch_out: {torch_out}, tilelang_out: {tilelang_out}")
 
     _, tl_t = perf_fn(
-        lambda:
-        gemm_rs_op(A, B, C, output, ctx, gemm_func, gemm_stream, rs_stream, local_rank),
+        lambda: gemm_rs_op(A, B, C, output, ctx, gemm_func, gemm_stream, rs_stream, local_rank),
         warmup=5,
         rep=5)
 

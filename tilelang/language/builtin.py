@@ -731,8 +731,10 @@ def atom_add(barrier: PrimExpr, value: PrimExpr, scope: str = "gpu", sem: str = 
     """Perform a ptx async copy barrier using cp.async.mbarrier.arrive.noinc.
     """
     assert scope in ["gpu", "sys"], "Scope must be one of 'gpu', or 'sys'."
-    assert sem in ["relaxed", "acquire", "release", "acq_rel"], "Semantic must be one of 'relaxed', 'acquire', 'release', or 'acq_rel'."
-    return tir.call_intrin("uint32", tir.op.Op.get("tl.atom_add"), address_of(barrier), value, sem, scope)
+    assert sem in ["relaxed", "acquire", "release", "acq_rel"
+                  ], "Semantic must be one of 'relaxed', 'acquire', 'release', or 'acq_rel'."
+    return tir.call_intrin("uint32", tir.op.Op.get("tl.atom_add"), address_of(barrier), value, sem,
+                           scope)
 
 
 def st(barrier: PrimExpr, value: PrimExpr, scope: str = "gpu", sem: str = "relaxed"):

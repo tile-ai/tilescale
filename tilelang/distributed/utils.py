@@ -298,18 +298,10 @@ def cuda_stream_max_priority():
     CUDA_CHECK(ret[0])
     return ret[2]  # (leastPriority, greatestPriority) -> greatestPriority is max priority
 
-def CUDA_CHECK(err):
-    if isinstance(err, cuda.CUresult):
-        if err != cuda.CUresult.CUDA_SUCCESS:
-            raise RuntimeError(f"Cuda Error: {err}: {cuda.cuGetErrorName(err)}")
-    elif isinstance(err, cudart.cudaError_t):
-        if err != cudart.cudaError_t.cudaSuccess:
-            raise RuntimeError(f"Cuda Error: {err}: {cudart.cudaGetErrorString(err)}")
-    else:
-        raise RuntimeError(f"Unknown error type: {err}")
 
 _pynvml_initialized = False
 _lock = Lock()
+
 
 def ensure_nvml_initialized():
     global _pynvml_initialized
@@ -320,8 +312,9 @@ def ensure_nvml_initialized():
 
                 pynvml.nvmlInit()
                 _pynvml_initialized = True
-                
-@functools.lru_cache()
+
+
+@functools.lru_cache
 def has_fullmesh_nvlink_pynvml():
     num_devices = torch.cuda.device_count()
 
@@ -336,7 +329,8 @@ def has_fullmesh_nvlink_pynvml():
                 if remote_device == cur_device:
                     continue
                 remote_handle = handles[remote_device]
-                p2p_status = pynvml.nvmlDeviceGetP2PStatus(cur_handle, remote_handle, pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
+                p2p_status = pynvml.nvmlDeviceGetP2PStatus(cur_handle, remote_handle,
+                                                           pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
                 if p2p_status != pynvml.NVML_P2P_STATUS_OK:
                     return False
         return True
@@ -371,7 +365,7 @@ class NvidiaSmiUtil:
             pci_address = pci_id.replace("00000000:", "").lower()
 
             numa_node_path = f"/sys/bus/pci/devices/0000:{pci_address}/numa_node"
-            with open(numa_node_path, "r") as f:
+            with open(numa_node_path) as f:
                 numa_node = int(f.read().strip())
 
             assert numa_node >= 0
@@ -380,17 +374,20 @@ class NvidiaSmiUtil:
         except Exception as e:
             print(f"Error: {e}")
             return -1
-        
-@functools.lru_cache()
+
+
+@functools.lru_cache
 def has_fullmesh_nvlink():
     try:
         return has_fullmesh_nvlink_pynvml()
     except Exception:
         nvlink_matrix = NvidiaSmiUtil.get_nvlink_adjacency_matrix()
         has_nvlink = any([any(x == 1 for x in row) for row in nvlink_matrix])
-        _has_fullmesh_nvlink = all([i == j or v == 1 for i, row in enumerate(nvlink_matrix) for j, v in enumerate(row)])
+        _has_fullmesh_nvlink = all(
+            [i == j or v == 1 for i, row in enumerate(nvlink_matrix) for j, v in enumerate(row)])
         if has_nvlink and not _has_fullmesh_nvlink:
             warnings.warn(
-                "⚠️ found NVLink but not fullmesh NVLink, this may cause undefined behavior, please check your GPU topology"
+                "⚠️ found NVLink but not fullmesh NVLink, this may cause undefined behavior, please check your GPU topology",
+                stacklevel=2,
             )
         return _has_fullmesh_nvlink
