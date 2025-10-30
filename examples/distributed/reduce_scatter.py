@@ -361,10 +361,6 @@ def reduce_scatter_for_each_node(input: torch.Tensor,
     rs_per_node_buf = ctx.rs_per_node_buf
     p2p_buf = ctx.p2p_buf
 
-    print(
-        f"reduce_scatter_for_each_node: M={M}, N={N}, M_per_rank={M_per_rank}, M_per_node={M_per_node}, nnodes={nnodes}, node_id={node_id}, local_rank={local_rank}"
-    )
-
     stream = torch.cuda.current_stream()
     for n in range(0, nnodes):
         cur_node_id = (node_id + n + 1) % nnodes
