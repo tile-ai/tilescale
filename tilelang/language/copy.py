@@ -1,7 +1,7 @@
 """The language interface for tl programs."""
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, Optional
 from tilelang import language as T
 from tilelang.utils.language import get_buffer_region_from_load
 from tvm import ir, tir
@@ -10,16 +10,23 @@ from tilelang.language.utils import buffer_to_tile_region, buffer_region_to_tile
 
 def copy(src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
          dst: tir.Buffer | tir.BufferLoad,
+         src_pe: Optional[tir.PrimExpr] = -1,
+         dst_pe: Optional[tir.PrimExpr] = -1,
          coalesced_width: int | None = None,
          disable_tma: bool = False,
-         eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None):
+         eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
+         ):
     """Copy data between memory regions.
 
     Args:
         src (Union[tir.Buffer, tir.BufferLoad, tir.BufferRegion]): Source memory region
         dst (Union[tir.Buffer, tir.BufferLoad]): Destination memory region
+        src_pe (Optional[tir.PrimExpr], optional): Source PE index. Defaults to -1, which means copy from local
+        dst_pe (Optional[tir.PrimExpr], optional): Destination PE index. Defaults to -1, which means copy to local.
         coalesced_width (Optional[int], optional): Width for coalesced memory access. Defaults to None.
-
+        disable_tma (bool, optional): Whether to disable TMA. Defaults to False.
+        eviction_policy (Optional[Literal["evict_normal", "evict_first", "evict_last"]], optional): Eviction policy. Defaults to None.
+        
     Raises:
         TypeError: If copy extents cannot be deduced from arguments
 
@@ -83,8 +90,12 @@ def copy(src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
         eviction_policy = 0
     else:
         eviction_policy = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}[eviction_policy]
+    
+    assert src_pe == -1 or dst_pe == -1, "At least one of src_pe or dst_pe must be local rank"
+    is_remote_copy = src_pe is not None or dst_pe is not None
+
     return tir.call_intrin("handle", tir.op.Op.get("tl.copy"), src, dst, coalesced_width,
-                           disable_tma, eviction_policy)
+                           disable_tma, eviction_policy, src_pe, dst_pe, is_remote_copy)
 
 
 def c2d_im2col(img: tir.Buffer,

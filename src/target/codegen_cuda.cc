@@ -1543,6 +1543,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->use_distributed_ = true;
     std::string pe_str = this->PrintExpr(op->args[0]);
     os << "tl::get_remote_base_ptr(" << pe_str << ")";
+  } else if (op->op.same_as(tl::get_local_base_ptr())) {
+    this->use_distributed_ = true;
+    os << "tl::get_local_base_ptr()";
   } else if (op->op.same_as(tl::get_uintptr_t())) {
     os << "tl::get_uintptr_t(" << this->PrintExpr(op->args[0]) << ")";
   } else if (op->op.same_as(builtin::tvm_fill_fragment())) {

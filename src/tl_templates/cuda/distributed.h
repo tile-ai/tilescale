@@ -10,8 +10,12 @@ TL_DEVICE uint64_t get_rank() { return meta_data[0]; }
 
 TL_DEVICE uint64_t get_num_ranks() { return meta_data[1]; }
 
-TL_DEVICE uint64_t get_remote_base_ptr(uint64_t rank) {
-  return meta_data[2 + rank];
+TL_DEVICE void* get_remote_base_ptr(uint64_t rank) {
+  return (void*)meta_data[2 + rank];
+}
+
+TL_DEVICE uint64_t get_local_base_ptr() {
+  return meta_data[2 + get_rank()];
 }
 
 template <typename dtype_t> TL_DEVICE uint64_t get_uintptr_t(dtype_t *ptr) {

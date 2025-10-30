@@ -155,6 +155,18 @@ Copy::Copy(Array<PrimExpr> args, BufferMap vmap) {
   if (args.size() >= 5) {
     node->eviction_policy = args[4].as<IntImmNode>()->value;
   }
+  // remote copy params
+  if (args.size() >= 6) {
+    node->src_pe = args[5];
+  }
+  if (args.size() >= 7) {
+    node->dst_pe = args[6];
+  }
+  if (args.size() >= 8) {
+    node->is_remote_copy = Downcast<Bool>(args[7]);
+  }
+  // TODO: check symm buffer is on global
+  
   data_ = std::move(node);
 }
 
@@ -1940,11 +1952,11 @@ Array<PrimExpr> TMAIm2ColDesc::EncodeCallArgs() const {
 
 // Register the Copy operation with TVM's TIR system
 // This makes the copy operation available for use in TVM programs
-// - Takes 5 inputs: src_buffer, dst_buffer, coalesced_width, disable_tma,
-// eviction_policy
+// - Takes 8 inputs: src_buffer, dst_buffer, coalesced_width, disable_tma,
+// eviction_policy, src_pe, dst_pe, is_remote_copy
 // - Marked as opaque since it has side effects (memory writes)
 TIR_REGISTER_TL_OP(Copy, copy)
-    .set_num_inputs(5)
+    .set_num_inputs(8)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
