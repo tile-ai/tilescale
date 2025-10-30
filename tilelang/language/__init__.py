@@ -16,6 +16,7 @@ from tilelang.layout import Layout, Fragment  # noqa: F401
 from .proxy import (
     ptr,  # noqa: F401
     make_tensor,  # noqa: F401
+    make_tensor_like,  # noqa: F401
     Buffer,  # noqa: F401
     Tensor,  # noqa: F401
     StridedTensor,  # noqa: F401

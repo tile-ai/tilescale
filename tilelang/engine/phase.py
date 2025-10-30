@@ -104,6 +104,10 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LayoutReducer()(mod)
     # Infer memory layouts for fragments and shared memory
     mod = tilelang.transform.LayoutInference()(mod)
+    # Declare symmetric buffer on peer's global memory
+    print(f"before:\n{mod}")
+    mod = tilelang.transform.DeclareSymmBuffer()(mod)
+    print(f"after:\n{mod}")
     # Lower high-level tile operations to low-level operations
     mod = tilelang.transform.LowerTileOp()(mod)
     # Lower l2 persistent map
