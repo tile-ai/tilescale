@@ -155,19 +155,34 @@ Copy::Copy(Array<PrimExpr> args, BufferMap vmap) {
   if (args.size() >= 5) {
     node->eviction_policy = args[4].as<IntImmNode>()->value;
   }
-  // remote copy params
+
+  // Parse remote copy params
   if (args.size() >= 6) {
     node->src_pe = args[5];
   }
   if (args.size() >= 7) {
     node->dst_pe = args[6];
   }
-  if (args.size() >= 8) {
-    node->is_remote_copy = Downcast<Bool>(args[7]);
+
+  if (node->is_remote_push()) {
+    ICHECK(node->dst.scope()=="global") << "Can only copy to peer's global memory, but got " << node->dst.scope();
+  } else if (node->is_remote_pull()) {
+    ICHECK(node->src.scope()=="global") << "Can only pull from peer's global memory, but got " << node->src.scope();
   }
-  // TODO: check symm buffer is on global
   
   data_ = std::move(node);
+}
+
+bool CopyNode::is_remote_push() const {
+  return !(dst_pe->IsInstance<IntImmNode>() && dst_pe.as<IntImmNode>()->value == -1);
+}
+
+bool CopyNode::is_remote_pull() const {
+  return !(src_pe->IsInstance<IntImmNode>() && src_pe.as<IntImmNode>()->value == -1);
+}
+
+bool CopyNode::is_remote_copy() const {
+  return is_remote_push() || is_remote_pull();
 }
 
 /**

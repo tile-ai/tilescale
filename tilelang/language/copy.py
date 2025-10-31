@@ -10,8 +10,8 @@ from tilelang.language.utils import buffer_to_tile_region, buffer_region_to_tile
 
 def copy(src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
          dst: tir.Buffer | tir.BufferLoad,
-         src_pe: Optional[tir.PrimExpr] = -1,
-         dst_pe: Optional[tir.PrimExpr] = -1,
+         src_pe: Optional[tir.PrimExpr | tir.IntImm] = -1,
+         dst_pe: Optional[tir.PrimExpr | tir.IntImm] = -1,
          coalesced_width: int | None = None,
          disable_tma: bool = False,
          eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
@@ -92,10 +92,9 @@ def copy(src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
         eviction_policy = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}[eviction_policy]
     
     assert src_pe == -1 or dst_pe == -1, "At least one of src_pe or dst_pe must be local rank"
-    is_remote_copy = src_pe is not None or dst_pe is not None
 
     return tir.call_intrin("handle", tir.op.Op.get("tl.copy"), src, dst, coalesced_width,
-                           disable_tma, eviction_policy, src_pe, dst_pe, is_remote_copy)
+                           disable_tma, eviction_policy, src_pe, dst_pe)
 
 
 def c2d_im2col(img: tir.Buffer,

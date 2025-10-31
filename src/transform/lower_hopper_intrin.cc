@@ -39,8 +39,22 @@ public:
         CHECK(0) << call->op;
       }
       init_desc_args.push_back(var);
-      init_desc_args.insert(init_desc_args.end(), call->args.begin(),
-                            call->args.end());
+      
+      // Inline let-bound variables in the descriptor arguments
+      for (const auto &arg : call->args) {
+        if (auto arg_var = arg.as<Var>()) {
+          auto it = substituter.tma_let_bindings_.find(arg_var.value());
+          if (it != substituter.tma_let_bindings_.end()) {
+            // Replace variable with its let-bound expression
+            init_desc_args.push_back(it->second);
+          } else {
+            init_desc_args.push_back(arg);
+          }
+        } else {
+          init_desc_args.push_back(arg);
+        }
+      }
+      
       // add to function attribute
       Call init_desc =
           Call(DataType::Handle(), builtin::tvm_call_packed(), init_desc_args);
@@ -49,6 +63,7 @@ public:
       init_desc_arg_map.Set(var, init_desc_args);
     }
     f = WithAttr(std::move(f), "tma_descriptor_args", init_desc_arg_map);
+
     return f;
   }
 
@@ -99,9 +114,43 @@ public:
     return StmtExprMutator::VisitStmt_(op);
   }
 
+  Stmt VisitStmt_(const LetStmtNode *op) final {
+    PrimExpr value = this->VisitExpr(op->value);
+    Stmt body = this->VisitStmt(op->body);
+    
+    // Check if this variable is related to TMA (used in descriptor creation)
+    if (tma_related_vars_.count(op->var)) {
+      tma_let_bindings_[op->var] = value;
+    }
+    
+    if (value.same_as(op->value) && body.same_as(op->body)) {
+      return GetRef<Stmt>(op);
+    } else {
+      return LetStmt(op->var, value, body);
+    }
+  }
+
   PrimExpr VisitExpr_(const CallNode *call) final {
-    if (call->op.same_as(create_tma_descriptor()) ||
-        call->op.same_as(create_tma_im2col_descriptor())) {
+    if (call->op.same_as(create_tma_descriptor())) {
+      Var var;
+      auto iter = desc_map_.find(GetRef<Call>(call));
+      if (iter != desc_map_.end()) {
+        var = iter->second;
+      } else {
+        String name = call->args[2].as<Var>().value()->name_hint;
+        var = Var(name + "_desc",
+                  PointerType(PrimType(cuTensorMapType()), "grid_constant"));
+        desc_map_[GetRef<Call>(call)] = var;
+        prefetch_calls_.push_back(
+            Evaluate(Call(DataType::Handle(), builtin::call_extern(),
+                          {StringImm("tl::prefetch_tma_descriptor"), var})));
+        // Mark the base pointer variable as TMA-related
+        if (auto base_var = call->args[2].as<Var>()) {
+          tma_related_vars_.insert(base_var.value());
+        }
+      }
+      return var;
+    } else if (call->op.same_as(create_tma_im2col_descriptor())) {
       Var var;
       auto iter = desc_map_.find(GetRef<Call>(call));
       if (iter != desc_map_.end()) {
@@ -135,6 +184,8 @@ private:
   Array<Stmt> prefetch_calls_;
   Array<Stmt> init_mbarrier_calls_;
   std::unordered_map<Call, Var, StructuralHash, ExprDeepEqual> desc_map_;
+  std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> tma_related_vars_;
+  std::unordered_map<Var, PrimExpr, ObjectPtrHash, ObjectPtrEqual> tma_let_bindings_;
   LowerHopperIntrin(bool disable_shuffle_elect)
       : disable_shuffle_elect_(disable_shuffle_elect) {}
   bool disable_shuffle_elect_;
