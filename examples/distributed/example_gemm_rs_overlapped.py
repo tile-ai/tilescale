@@ -29,6 +29,15 @@ def gemm_kernel(M,
 
     M_per_rank = T.ceildiv(M, num_local_rank)
     GROUP_SIZE_M = 8
+    
+    def swizzle_2d(tile_id, num_pid_m, num_pid_n):
+        num_pid_in_group = GROUP_SIZE_M * num_pid_n
+        group_id = tile_id // num_pid_in_group
+        first_pid_m = group_id * GROUP_SIZE_M
+        group_size_m = T.min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+        pid_m = first_pid_m + (tile_id % group_size_m)
+        pid_n = (tile_id % num_pid_in_group) // group_size_m
+        return pid_m, pid_n
 
     @T.prim_func
     def main(
@@ -47,20 +56,11 @@ def gemm_kernel(M,
 
             num_pid_m = T.ceildiv(M, block_M)
             num_pid_n = T.ceildiv(N, block_N)
-            num_pid_in_group = GROUP_SIZE_M * num_pid_n
-            group_id = bid // num_pid_in_group
-            first_pid_m = group_id * GROUP_SIZE_M
-            group_size_m = T.min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-            pid_m_ = first_pid_m + ((bid % num_pid_in_group) % group_size_m)
-            pid_n_ = (bid % num_pid_in_group) // group_size_m
-
-            # threadblock swizzle
-            #  no stream-k support. only split by m x n
-            m_offset = M_per_rank * local_rank
-            pid_m_offset = T.ceildiv(m_offset, block_M)
+            
+            pid_m_, pid_n = swizzle_2d(bid, num_pid_m, num_pid_n)
+            pid_m_offset = (local_rank + 1) * M_per_rank // block_M
             pid_m = (pid_m_ + pid_m_offset) % num_pid_m
-            pid_n = pid_n_
-
+        
             tid = T.get_thread_binding(0)
             T.clear(C_local)
             for k in T.Pipelined(T.ceildiv(K // num_local_rank, block_K), num_stages=3):
