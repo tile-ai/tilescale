@@ -229,7 +229,7 @@ const Op &get_remote_base_ptr();
 /*!
  * \brief tvm intrinsics for getting the local base pointer
  */
- const Op &get_local_base_ptr();
+ const Op &get_local_base();
 
 /*!
  * \brief tvm intrinsics for getting the uintptr_t of a pointer
