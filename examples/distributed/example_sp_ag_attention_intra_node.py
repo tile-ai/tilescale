@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import tilelang
-import tilelang.language as T
 import argparse
 from itertools import accumulate
-from functools import partial
 import torch
 import torch.distributed as dist
 import torch.multiprocessing
@@ -16,6 +14,7 @@ from sp_ag_attention_intra_node import (
 )
 
 tilelang.disable_cache()
+
 
 class FusedSequenceParallelAttn(torch.nn.Module):
 
@@ -183,27 +182,35 @@ class TorchSequenceParallelAttn(torch.nn.Module):
                 half_q_shard_len = q_shard_len // 2
                 half_kv_shard_len = kv_shard_len // 2
 
-                q0_shard = q_shard[cu_seqlens_q_start:cu_seqlens_q_start + half_q_shard_len, :, :].clone()
-                q1_shard = q_shard[cu_seqlens_q_start + half_q_shard_len:cu_seqlens_q_end, :, :].clone()
+                q0_shard = q_shard[cu_seqlens_q_start:cu_seqlens_q_start +
+                                   half_q_shard_len, :, :].clone()
+                q1_shard = q_shard[cu_seqlens_q_start +
+                                   half_q_shard_len:cu_seqlens_q_end, :, :].clone()
 
-                q0_shard_permute = torch.permute(q0_shard.reshape(1, half_q_shard_len, q_head, head_dim),
-                                                 (0, 2, 1, 3)).contiguous()
-                q1_shard_permute = torch.permute(q1_shard.reshape(1, half_q_shard_len, q_head, head_dim),
-                                                 (0, 2, 1, 3)).contiguous()
+                q0_shard_permute = torch.permute(
+                    q0_shard.reshape(1, half_q_shard_len, q_head, head_dim),
+                    (0, 2, 1, 3)).contiguous()
+                q1_shard_permute = torch.permute(
+                    q1_shard.reshape(1, half_q_shard_len, q_head, head_dim),
+                    (0, 2, 1, 3)).contiguous()
 
-                k0_shard = k_shard[cu_seqlens_k_start:cu_seqlens_k_start + half_kv_shard_len, :, :].clone()
-                k1_shard = k_shard[cu_seqlens_k_start + half_kv_shard_len:cu_seqlens_k_end, :, :].clone()
-                v0_shard = v_shard[cu_seqlens_k_start:cu_seqlens_k_start + half_kv_shard_len, :, :].clone()
-                v1_shard = v_shard[cu_seqlens_k_start + half_kv_shard_len:cu_seqlens_k_end, :, :].clone()
+                k0_shard = k_shard[cu_seqlens_k_start:cu_seqlens_k_start +
+                                   half_kv_shard_len, :, :].clone()
+                k1_shard = k_shard[cu_seqlens_k_start +
+                                   half_kv_shard_len:cu_seqlens_k_end, :, :].clone()
+                v0_shard = v_shard[cu_seqlens_k_start:cu_seqlens_k_start +
+                                   half_kv_shard_len, :, :].clone()
+                v1_shard = v_shard[cu_seqlens_k_start +
+                                   half_kv_shard_len:cu_seqlens_k_end, :, :].clone()
 
                 buffer_size = (half_kv_shard_len * kv_head * head_dim * self.world_size)
 
-                ag_k0 = self.ag_k_buffer.reshape(-1)[:buffer_size].reshape(half_kv_shard_len * self.world_size, kv_head,
-                                                                           head_dim)
+                ag_k0 = self.ag_k_buffer.reshape(-1)[:buffer_size].reshape(
+                    half_kv_shard_len * self.world_size, kv_head, head_dim)
                 ag_k1 = self.ag_k_buffer.reshape(-1)[buffer_size:2 * buffer_size].reshape(
                     half_kv_shard_len * self.world_size, kv_head, head_dim)
-                ag_v0 = self.ag_v_buffer.reshape(-1)[:buffer_size].reshape(half_kv_shard_len * self.world_size, kv_head,
-                                                                           head_dim)
+                ag_v0 = self.ag_v_buffer.reshape(-1)[:buffer_size].reshape(
+                    half_kv_shard_len * self.world_size, kv_head, head_dim)
                 ag_v1 = self.ag_v_buffer.reshape(-1)[buffer_size:2 * buffer_size].reshape(
                     half_kv_shard_len * self.world_size, kv_head, head_dim)
                 torch.distributed.all_gather_into_tensor(
@@ -227,15 +234,19 @@ class TorchSequenceParallelAttn(torch.nn.Module):
                     group=self.pg,
                 )
                 ag_k1 = ag_k1.reshape(self.world_size, half_kv_shard_len, kv_head, head_dim)
-                ag_k1 = torch.flip(ag_k1, [0]).reshape(self.world_size * half_kv_shard_len, kv_head, head_dim)
+                ag_k1 = torch.flip(ag_k1, [0]).reshape(self.world_size * half_kv_shard_len, kv_head,
+                                                       head_dim)
                 ag_k = torch.cat((ag_k0, ag_k1), dim=0)
-                ag_k = torch.permute(ag_k.reshape(1, kv_len, kv_head, head_dim), (0, 2, 1, 3)).contiguous()
+                ag_k = torch.permute(ag_k.reshape(1, kv_len, kv_head, head_dim),
+                                     (0, 2, 1, 3)).contiguous()
                 ag_k = ag_k.repeat_interleave(q_head // kv_head, -3)
 
                 ag_v1 = ag_v1.reshape(self.world_size, half_kv_shard_len, kv_head, head_dim)
-                ag_v1 = torch.flip(ag_v1, [0]).reshape(self.world_size * half_kv_shard_len, kv_head, head_dim)
+                ag_v1 = torch.flip(ag_v1, [0]).reshape(self.world_size * half_kv_shard_len, kv_head,
+                                                       head_dim)
                 ag_v = torch.cat((ag_v0, ag_v1), dim=0)
-                ag_v = torch.permute(ag_v.reshape(1, kv_len, kv_head, head_dim), (0, 2, 1, 3)).contiguous()
+                ag_v = torch.permute(ag_v.reshape(1, kv_len, kv_head, head_dim),
+                                     (0, 2, 1, 3)).contiguous()
                 ag_v = ag_v.repeat_interleave(q_head // kv_head, -3)
 
                 offset_q0 = half_q_shard_len * self.rank
@@ -243,13 +254,16 @@ class TorchSequenceParallelAttn(torch.nn.Module):
                 prefix = kv_len - q_len
                 mask0 = _gen_mask(prefix + offset_q0, half_q_shard_len, kv_len)
                 mask1 = _gen_mask(prefix + offset_q1, half_q_shard_len, kv_len)
-                out0 = torch.nn.functional.scaled_dot_product_attention(q0_shard_permute, ag_k, ag_v, attn_mask=mask0)
-                out1 = torch.nn.functional.scaled_dot_product_attention(q1_shard_permute, ag_k, ag_v, attn_mask=mask1)
+                out0 = torch.nn.functional.scaled_dot_product_attention(
+                    q0_shard_permute, ag_k, ag_v, attn_mask=mask0)
+                out1 = torch.nn.functional.scaled_dot_product_attention(
+                    q1_shard_permute, ag_k, ag_v, attn_mask=mask1)
                 out = torch.cat((out0, out1), dim=2)  # [1, q_head, q_shard_len, head_dim]
             else:
                 cu_q_shard = q_shard[cu_seqlens_q_start:cu_seqlens_q_end, :, :].clone()
-                cu_q_shard_permute = torch.permute(cu_q_shard.reshape(1, q_shard_len, q_head, head_dim),
-                                                   (0, 2, 1, 3)).contiguous()
+                cu_q_shard_permute = torch.permute(
+                    cu_q_shard.reshape(1, q_shard_len, q_head, head_dim),
+                    (0, 2, 1, 3)).contiguous()
 
                 total_size = kv_len * kv_head * head_dim
                 ag_k = self.ag_k_buffer.reshape(-1)[:total_size].reshape(kv_len, kv_head, head_dim)
@@ -266,16 +280,19 @@ class TorchSequenceParallelAttn(torch.nn.Module):
                     cu_v_shard,
                     group=self.pg,
                 )
-                ag_k = torch.permute(ag_k.reshape(1, kv_len, kv_head, head_dim), (0, 2, 1, 3)).contiguous()
+                ag_k = torch.permute(ag_k.reshape(1, kv_len, kv_head, head_dim),
+                                     (0, 2, 1, 3)).contiguous()
                 ag_k = ag_k.repeat_interleave(q_head // kv_head, -3)
-                ag_v = torch.permute(ag_v.reshape(1, kv_len, kv_head, head_dim), (0, 2, 1, 3)).contiguous()
+                ag_v = torch.permute(ag_v.reshape(1, kv_len, kv_head, head_dim),
+                                     (0, 2, 1, 3)).contiguous()
                 ag_v = ag_v.repeat_interleave(q_head // kv_head, -3)
 
                 offset = self.rank * q_shard_len
                 prefix = kv_len - q_len
                 mask = _gen_mask(prefix + offset, q_shard_len, kv_len)
                 out = torch.nn.functional.scaled_dot_product_attention(
-                    cu_q_shard_permute, ag_k, ag_v, attn_mask=mask)  # [1, q_head, q_shard_len, head_dim]
+                    cu_q_shard_permute, ag_k, ag_v,
+                    attn_mask=mask)  # [1, q_head, q_shard_len, head_dim]
 
             out = torch.permute(out.reshape(q_head, q_shard_len, head_dim), (1, 0, 2)).contiguous()
             out_list.append(out)
@@ -288,7 +305,7 @@ class TorchSequenceParallelAttn(torch.nn.Module):
 def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     dtype = torch.float16
     device = "cuda"
-    
+
     batch_size = args.batch_size
     q_head = args.q_head
     kv_head = args.kv_head
@@ -316,21 +333,18 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     cu_seqlens_q = cu_seqlens_q // num_local_ranks
     cu_seqlens_k = torch.tensor(cu_seqlens_k_list, dtype=torch.int32, device=device)
 
-    q_shard = tilelang.tensor(
-        (cu_seqlens_q[-1], q_head, head_dim),
-        dtype=dtype,
-        allocator=allocator
-    ).normal_(mean=0.0, std=0.5)
-    k_shard = tilelang.tensor(
-        (cu_seqlens_k[-1] // num_local_ranks, kv_head, head_dim),
-        dtype=dtype,
-        allocator=allocator
-    ).normal_(mean=0.0, std=0.5)
-    v_shard = tilelang.tensor(
-        (cu_seqlens_k[-1] // num_local_ranks, kv_head, head_dim),
-        dtype=dtype,
-        allocator=allocator
-    ).fill_(1.0)
+    q_shard = tilelang.tensor((cu_seqlens_q[-1], q_head, head_dim),
+                              dtype=dtype,
+                              allocator=allocator).normal_(
+                                  mean=0.0, std=0.5)
+    k_shard = tilelang.tensor((cu_seqlens_k[-1] // num_local_ranks, kv_head, head_dim),
+                              dtype=dtype,
+                              allocator=allocator).normal_(
+                                  mean=0.0, std=0.5)
+    v_shard = tilelang.tensor((cu_seqlens_k[-1] // num_local_ranks, kv_head, head_dim),
+                              dtype=dtype,
+                              allocator=allocator).normal_(
+                                  mean=0.0, std=0.5)
 
     dist.barrier()
 
@@ -363,10 +377,10 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         is_causal,
         enable_zig_zag,
     )
-    
+
     tilescale_out = tilescale_module(q_shard, k_shard, v_shard, cu_seqlens_q, cu_seqlens_k)
     print(f"tilescale_out: {tilescale_out.shape}")
-    
+
     torch_out = torch_module(q_shard, k_shard, v_shard, cu_seqlens_q, cu_seqlens_k)
     print(f"torch_out: {torch_out.shape}")
 
@@ -383,24 +397,26 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         warmup=5,
         rep=5)
 
-    print(
-        f"rank {local_rank} tilescale time: {tl_t:.2f} ms"
-    )
+    print(f"rank {local_rank} tilescale time: {tl_t:.2f} ms")
 
     dist.destroy_process_group()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        '--num-processes', type=int, default=2, help='Number of processes to spawn (default: 2)')
-    parser.add_argument("--batch_size", type=int, default=2, help="batch size")
+        '--num-processes', type=int, default=1, help='Number of processes to spawn (default: 2)')
+    parser.add_argument("--batch_size", type=int, default=1, help="batch size")
     parser.add_argument("--q_head", type=int, default=32, help="num q heads")
     parser.add_argument("--kv_head", type=int, default=8, help="num kv heads")
-    parser.add_argument("--max_seqlen_q", type=int, default=8192, help="max sequence length of q")
-    parser.add_argument("--max_seqlen_k", type=int, default=12288, help="max sequence length of k/v")
+    parser.add_argument("--max_seqlen_q", type=int, default=256, help="max sequence length of q")
+    parser.add_argument(
+        "--max_seqlen_k", type=int, default=256, help="max sequence length of k/v")
     parser.add_argument("--head_dim", type=int, default=128, help="head dim")
-    parser.add_argument("--seqlens_q", type=int, nargs='+', default=[4096, 8192], help="sequence lengths of q")
-    parser.add_argument("--seqlens_k", type=int, nargs='+', default=[6144, 12288], help="sequence lengths of k/v")
+    parser.add_argument(
+        "--seqlens_q", type=int, nargs='+', default=[256], help="sequence lengths of q")
+    parser.add_argument(
+        "--seqlens_k", type=int, nargs='+', default=[256], help="sequence lengths of k/v")
     parser.add_argument('--is_causal', action='store_true', help='causal')
     parser.add_argument(
         "--zig_zag",
@@ -409,7 +425,7 @@ if __name__ == "__main__":
         default=True,
         help="enable zig zag opt",
     )
-    
+
     args = parser.parse_args()
     num_processes = args.num_processes
 

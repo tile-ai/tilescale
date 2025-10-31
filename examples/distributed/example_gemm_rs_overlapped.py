@@ -29,7 +29,7 @@ def gemm_kernel(M,
 
     M_per_rank = T.ceildiv(M, num_local_rank)
     GROUP_SIZE_M = 8
-    
+
     def swizzle_2d(tile_id, num_pid_m, num_pid_n):
         num_pid_in_group = GROUP_SIZE_M * num_pid_n
         group_id = tile_id // num_pid_in_group
@@ -56,11 +56,11 @@ def gemm_kernel(M,
 
             num_pid_m = T.ceildiv(M, block_M)
             num_pid_n = T.ceildiv(N, block_N)
-            
+
             pid_m_, pid_n = swizzle_2d(bid, num_pid_m, num_pid_n)
             pid_m_offset = (local_rank + 1) * M_per_rank // block_M
             pid_m = (pid_m_ + pid_m_offset) % num_pid_m
-        
+
             tid = T.get_thread_binding(0)
             T.clear(C_local)
             for k in T.Pipelined(T.ceildiv(K // num_local_rank, block_K), num_stages=3):

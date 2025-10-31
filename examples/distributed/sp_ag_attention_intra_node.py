@@ -2,28 +2,25 @@ import torch
 import tilelang
 import tilelang.language as T
 from typing import List
-import math
 from dataclasses import dataclass
 
 tilelang.disable_cache()
+
 
 @tilelang.jit
 def barrier_all_blocks_sys_kernel(num_local_rank,):
 
     @T.prim_func
-    def main(
-        barrier: T.Tensor((num_local_rank), "int32"),
-    ):
-        with T.Kernel(1, threads=32) as (bid):
+    def main(barrier: T.Tensor((num_local_rank), "int32"),):
+        with T.Kernel(1, threads=32):
             T.barrier_all_blocks_sys(barrier)
 
     return main
 
 
-@tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
+@tilelang.jit(pass_configs={
+    tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+})
 def flashattn(batch_size,
               groups,
               UQ,
@@ -97,7 +94,8 @@ def flashattn(batch_size,
 
             loop_range = (
                 T.min(T.ceildiv(k_current_seqlen, block_N), T.ceildiv(
-                    (bx + 1) * block_M, block_N)) if is_causal else T.ceildiv(k_current_seqlen, block_N))
+                    (bx + 1) *
+                    block_M, block_N)) if is_causal else T.ceildiv(k_current_seqlen, block_N))
 
             for k in T.Pipelined(loop_range, num_stages=num_stages):
                 T.copy(
@@ -111,20 +109,18 @@ def flashattn(batch_size,
                     for i, j in T.Parallel(block_M, block_N):
                         acc_s[i, j] = T.if_then_else((bx * block_M + i < k * block_N + j) or
                                                      (bx * block_M + i >= q_current_seqlen or
-                                                      k * block_N + j >= k_current_seqlen),
-                                                     -1e9, 0)
+                                                      k * block_N + j >= k_current_seqlen), -1e9, 0)
                 else:
                     for i, j in T.Parallel(block_M, block_N):
                         acc_s[i, j] = T.if_then_else((bx * block_M + i >= q_current_seqlen or
-                                                      k * block_N + j >= k_current_seqlen),
-                                                     -1e9, 0)
+                                                      k * block_N + j >= k_current_seqlen), -1e9, 0)
 
                 T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
                 T.copy(scores_max, scores_max_prev)
                 T.fill(scores_max, -T.infinity(accum_dtype))
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
-                
+
                 for i in T.Parallel(block_M):
                     scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
 
@@ -159,6 +155,7 @@ def flashattn(batch_size,
 
     return main
 
+
 @dataclass
 class SPAllGatherAttentionContextIntraNode:
     ag_k_buffers: List[torch.Tensor]
@@ -186,10 +183,16 @@ def create_sp_ag_attention_context_intra_node(
     device,
     allocator,
 ):
-    ag_k_buffers = tilelang.tensor((batch_size * max_seqlen_k, kv_head, head_dim), dtype=input_dtype, allocator=allocator, return_peers=True)
+    ag_k_buffers = tilelang.tensor((batch_size * max_seqlen_k, kv_head, head_dim),
+                                   dtype=input_dtype,
+                                   allocator=allocator,
+                                   return_peers=True)
     ag_k_buffer = ag_k_buffers[rank]
 
-    ag_v_buffers = tilelang.tensor((batch_size * max_seqlen_k, kv_head, head_dim), dtype=input_dtype, allocator=allocator, return_peers=True)
+    ag_v_buffers = tilelang.tensor((batch_size * max_seqlen_k, kv_head, head_dim),
+                                   dtype=input_dtype,
+                                   allocator=allocator,
+                                   return_peers=True)
     ag_v_buffer = ag_v_buffers[rank]
 
     attn_output_buffer = torch.empty(
@@ -199,16 +202,20 @@ def create_sp_ag_attention_context_intra_node(
         dtype=output_dtype,
         device=device,
     )
-    
+
     barrier = tilelang.tensor((world_size), dtype=torch.int32, allocator=allocator)
 
     # stream for copy
     ag_stream = torch.cuda.Stream()
 
-    ctx = SPAllGatherAttentionContextIntraNode(ag_k_buffers=ag_k_buffers, ag_k_buffer=ag_k_buffer,
-                                               ag_v_buffers=ag_v_buffers, ag_v_buffer=ag_v_buffer,
-                                               attn_output_buffer=attn_output_buffer, ag_stream=ag_stream,
-                                               barrier=barrier)
+    ctx = SPAllGatherAttentionContextIntraNode(
+        ag_k_buffers=ag_k_buffers,
+        ag_k_buffer=ag_k_buffer,
+        ag_v_buffers=ag_v_buffers,
+        ag_v_buffer=ag_v_buffer,
+        attn_output_buffer=attn_output_buffer,
+        ag_stream=ag_stream,
+        barrier=barrier)
 
     return ctx
 
@@ -216,6 +223,7 @@ def create_sp_ag_attention_context_intra_node(
 def barrier_all_on_stream(barrier: torch.Tensor, stream: torch.cuda.Stream, world_size: int):
     barrier_all_blocks_sys_func = barrier_all_blocks_sys_kernel(world_size)
     barrier_all_blocks_sys_func(barrier, stream=stream.cuda_stream)
+
 
 def cp_engine_producer_kv_all_gather(
     k_shard: torch.Tensor,  # [total_kv_shard, kv_head, head_dim]
@@ -239,8 +247,6 @@ def cp_engine_producer_kv_all_gather(
     total_kv_shard, kv_head, head_dim = k_shard.shape
     batch_size = cu_seqlens_k.shape[0] - 1
 
-    byte_per_token = kv_head * head_dim * k_shard.dtype.itemsize
-
     def _cp_engine_copy_data(dst, src, stream):
         with torch.cuda.stream(stream):
             dst.copy_(src)
@@ -252,16 +258,17 @@ def cp_engine_producer_kv_all_gather(
             cu_seqlens_k_end = cu_seqlens_k[i + 1].item()
             seqlen_k = cu_seqlens_k_end - cu_seqlens_k_start
             k_shard_len = seqlen_k // world_size
-            byte_start = cu_seqlens_k_start * byte_per_token
-            byte_per_rank = k_shard_len * byte_per_token
-            cp_size = byte_per_rank
 
-            k_dst = k_buffers[rank][cu_seqlens_k_start + rank * k_shard_len : cu_seqlens_k_start + (rank + 1) * k_shard_len, :, :]
-            k_src = k_shard[cu_seqlens_k_start // world_size : cu_seqlens_k_start // world_size + k_shard_len, :, :]
+            k_dst = k_buffers[rank][cu_seqlens_k_start + rank * k_shard_len:cu_seqlens_k_start +
+                                    (rank + 1) * k_shard_len, :, :]
+            k_src = k_shard[cu_seqlens_k_start // world_size:cu_seqlens_k_start // world_size +
+                            k_shard_len, :, :]
             _cp_engine_copy_data(k_dst, k_src, compute_stream)
 
-            v_dst = v_buffers[rank][cu_seqlens_k_start + rank * k_shard_len : cu_seqlens_k_start + (rank + 1) * k_shard_len, :, :]
-            v_src = v_shard[cu_seqlens_k_start // world_size : cu_seqlens_k_start // world_size + k_shard_len, :, :]
+            v_dst = v_buffers[rank][cu_seqlens_k_start + rank * k_shard_len:cu_seqlens_k_start +
+                                    (rank + 1) * k_shard_len, :, :]
+            v_src = v_shard[cu_seqlens_k_start // world_size:cu_seqlens_k_start // world_size +
+                            k_shard_len, :, :]
             _cp_engine_copy_data(v_dst, v_src, compute_stream)
 
     barrier_all_on_stream(barrier, compute_stream, world_size)
@@ -273,23 +280,27 @@ def cp_engine_producer_kv_all_gather(
             cu_seqlens_k_end = cu_seqlens_k[i + 1].item()
             seqlen_k = cu_seqlens_k_end - cu_seqlens_k_start
             k_shard_len = seqlen_k // world_size
-            byte_start = cu_seqlens_k_start * byte_per_token
-            byte_per_rank = k_shard_len * byte_per_token
-            cp_size = byte_per_rank
             for offset in range(1, world_size):
                 src_rank = (rank + offset) % world_size
 
-                k_src = k_buffers[src_rank][cu_seqlens_k_start + src_rank * k_shard_len : cu_seqlens_k_start + (src_rank + 1) * k_shard_len, :, :]
-                k_dst = k_buffers[rank][cu_seqlens_k_start + src_rank * k_shard_len : cu_seqlens_k_start + (src_rank + 1) * k_shard_len, :, :]
+                k_src = k_buffers[src_rank][cu_seqlens_k_start +
+                                            src_rank * k_shard_len:cu_seqlens_k_start +
+                                            (src_rank + 1) * k_shard_len, :, :]
+                k_dst = k_buffers[rank][cu_seqlens_k_start +
+                                        src_rank * k_shard_len:cu_seqlens_k_start +
+                                        (src_rank + 1) * k_shard_len, :, :]
                 _cp_engine_copy_data(k_dst, k_src, ag_stream)
 
-                v_src = v_buffers[src_rank][cu_seqlens_k_start + src_rank * k_shard_len : cu_seqlens_k_start + (src_rank + 1) * k_shard_len, :, :]
-                v_dst = v_buffers[rank][cu_seqlens_k_start + src_rank * k_shard_len : cu_seqlens_k_start + (src_rank + 1) * k_shard_len, :, :]
+                v_src = v_buffers[src_rank][cu_seqlens_k_start +
+                                            src_rank * k_shard_len:cu_seqlens_k_start +
+                                            (src_rank + 1) * k_shard_len, :, :]
+                v_dst = v_buffers[rank][cu_seqlens_k_start +
+                                        src_rank * k_shard_len:cu_seqlens_k_start +
+                                        (src_rank + 1) * k_shard_len, :, :]
                 _cp_engine_copy_data(v_dst, v_src, ag_stream)
 
     barrier_all_on_stream(barrier, ag_stream, world_size)
     compute_stream.wait_stream(ag_stream)
-
 
 
 def fused_sp_ag_attn_intra_node(
@@ -307,9 +318,10 @@ def fused_sp_ag_attn_intra_node(
     is_causal: bool = True,
     enable_zig_zag: bool = True,
 ):
-    
+
     BLOCK_M = 128
     BLOCK_N = 128
+    num_stages = 2
     threads = 256
     q_tokens = q_shard.shape[0]
     assert ctx.ag_k_buffers[rank].shape[0] == ctx.ag_v_buffers[rank].shape[0]
@@ -339,15 +351,11 @@ def fused_sp_ag_attn_intra_node(
         ctx.barrier,
     )
 
-    # flash attn
-    stage = 3 if is_causal else 1
-    # shape constraints
     HEAD_DIM_Q, HEAD_DIM_K = q_shard.shape[-1], k_shard.shape[-1]
     HEAD_DIM_V = v_shard.shape[-1]
     assert HEAD_DIM_Q == HEAD_DIM_K and HEAD_DIM_K == HEAD_DIM_V
     assert HEAD_DIM_K in {16, 32, 64, 128, 256}
-    sm_scale = 1 / math.sqrt(HEAD_DIM_Q)
-
+    
     with torch.cuda.stream(compute_stream):
         kernel = flashattn(
             batch,
@@ -359,9 +367,17 @@ def fused_sp_ag_attn_intra_node(
             is_causal,
             block_M=BLOCK_M,
             block_N=BLOCK_N,
-            num_stages=1,
+            num_stages=num_stages,
             threads=threads)
-        
-        kernel(q_shard, ag_k, ag_v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, output, stream=compute_stream.cuda_stream)
-    
+
+        kernel(
+            q_shard,
+            ag_k,
+            ag_v,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            output,
+            stream=compute_stream.cuda_stream)
+
     compute_stream.wait_stream(ctx.ag_stream)
