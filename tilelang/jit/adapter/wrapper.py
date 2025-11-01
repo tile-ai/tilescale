@@ -6,7 +6,8 @@ from typing import Any
 from tvm import IRModule
 from tvm.target import Target
 from .utils import (is_metal_target, match_declare_kernel, match_declare_kernel_cpu, is_cuda_target,
-                    is_hip_target, is_cpu_target, get_annotated_mod, pythonic_expr, tilescale_pythonic_expr)
+                    is_hip_target, is_cpu_target, get_annotated_mod, pythonic_expr,
+                    tilescale_pythonic_expr)
 import re
 import logging
 import textwrap

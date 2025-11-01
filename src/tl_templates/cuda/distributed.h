@@ -6,7 +6,7 @@
 namespace tl {
 
 extern "C" __device__ uint64_t meta_data[1024];
-extern "C" __host__ uint64_t* host_meta_data;
+extern "C" __host__ uint64_t *host_meta_data;
 
 TL_HOST_DEVICE uint64_t get_rank() {
 #ifdef __CUDA_ARCH__
@@ -24,17 +24,17 @@ TL_HOST_DEVICE uint64_t get_num_ranks() {
 #endif
 }
 
-TL_HOST_DEVICE void* get_remote_base_ptr(uint64_t rank) {
-  #ifdef __CUDA_ARCH__
-    return (void*)meta_data[2 + rank];
-  #else
-    return (void*)host_meta_data[2 + rank];
-    #endif
-  }
-  
+TL_HOST_DEVICE void *get_remote_base_ptr(uint64_t rank) {
+#ifdef __CUDA_ARCH__
+  return (void *)meta_data[2 + rank];
+#else
+  return (void *)host_meta_data[2 + rank];
+#endif
+}
 
 // NOTE(wt): Be careful about the return types here!
-// get_local_base() returns u64 since I could not find a way cast u64 to ptr in tir
+// get_local_base() returns u64 since I could not find a way cast u64 to ptr in
+// tir
 TL_HOST_DEVICE uint64_t get_local_base() {
 #ifdef __CUDA_ARCH__
   return meta_data[2 + get_rank()];
@@ -43,7 +43,8 @@ TL_HOST_DEVICE uint64_t get_local_base() {
 #endif
 }
 
-template <typename dtype_t> TL_HOST_DEVICE uint64_t get_uintptr_t(dtype_t *ptr) {
+template <typename dtype_t>
+TL_HOST_DEVICE uint64_t get_uintptr_t(dtype_t *ptr) {
   return reinterpret_cast<uint64_t>(ptr);
 }
 

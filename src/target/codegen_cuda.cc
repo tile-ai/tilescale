@@ -297,7 +297,8 @@ std::string CodeGenTileLangCUDA::Finish() {
 
   if (use_distributed_) {
     decl_stream << "uint64_t __constant__ meta_data[1024];\n";
-    decl_stream << "uint64_t* host_meta_data = nullptr;\n";  // An alias of host_table
+    decl_stream
+        << "uint64_t* host_meta_data = nullptr;\n"; // An alias of host_table
   }
   decl_stream << "#ifdef ENABLE_BF16\n";
   decl_stream << "#include <tl_templates/cuda/cuda_bf16_fallbacks.cuh>\n";
