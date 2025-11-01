@@ -93,8 +93,8 @@ public:
   Bool disable_tma = Bool(false); // Whether to disable TMA acceleration
 
   // Params for remote copy
-  PrimExpr src_pe; // Source PE for remote copy
-  PrimExpr dst_pe; // Destination PE for remote copy
+  PrimExpr src_pe;    // Source PE for remote copy
+  PrimExpr dst_pe;    // Destination PE for remote copy
   Buffer symm_buffer; // Symmetric buffer for remote copy
 
   bool is_remote_copy() const;

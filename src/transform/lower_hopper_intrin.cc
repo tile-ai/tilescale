@@ -39,7 +39,7 @@ public:
         CHECK(0) << call->op;
       }
       init_desc_args.push_back(var);
-      
+
       // Inline let-bound variables in the descriptor arguments
       for (const auto &arg : call->args) {
         if (auto arg_var = arg.as<Var>()) {
@@ -54,7 +54,7 @@ public:
           init_desc_args.push_back(arg);
         }
       }
-      
+
       // add to function attribute
       Call init_desc =
           Call(DataType::Handle(), builtin::tvm_call_packed(), init_desc_args);
@@ -117,12 +117,12 @@ public:
   Stmt VisitStmt_(const LetStmtNode *op) final {
     PrimExpr value = this->VisitExpr(op->value);
     Stmt body = this->VisitStmt(op->body);
-    
+
     // Check if this variable is related to TMA (used in descriptor creation)
     if (tma_related_vars_.count(op->var)) {
       tma_let_bindings_[op->var] = value;
     }
-    
+
     if (value.same_as(op->value) && body.same_as(op->body)) {
       return GetRef<Stmt>(op);
     } else {
@@ -185,7 +185,8 @@ private:
   Array<Stmt> init_mbarrier_calls_;
   std::unordered_map<Call, Var, StructuralHash, ExprDeepEqual> desc_map_;
   std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> tma_related_vars_;
-  std::unordered_map<Var, PrimExpr, ObjectPtrHash, ObjectPtrEqual> tma_let_bindings_;
+  std::unordered_map<Var, PrimExpr, ObjectPtrHash, ObjectPtrEqual>
+      tma_let_bindings_;
   LowerHopperIntrin(bool disable_shuffle_elect)
       : disable_shuffle_elect_(disable_shuffle_elect) {}
   bool disable_shuffle_elect_;

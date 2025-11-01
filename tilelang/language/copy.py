@@ -8,14 +8,15 @@ from tvm import ir, tir
 from tilelang.language.utils import buffer_to_tile_region, buffer_region_to_tile_region, buffer_load_to_tile_region
 
 
-def copy(src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
-         dst: tir.Buffer | tir.BufferLoad,
-         src_pe: Optional[tir.PrimExpr | tir.IntImm] = -1,
-         dst_pe: Optional[tir.PrimExpr | tir.IntImm] = -1,
-         coalesced_width: int | None = None,
-         disable_tma: bool = False,
-         eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
-         ):
+def copy(
+    src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
+    dst: tir.Buffer | tir.BufferLoad,
+    src_pe: Optional[tir.PrimExpr | tir.IntImm] = -1,
+    dst_pe: Optional[tir.PrimExpr | tir.IntImm] = -1,
+    coalesced_width: int | None = None,
+    disable_tma: bool = False,
+    eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
+):
     """Copy data between memory regions.
 
     Args:
@@ -90,7 +91,7 @@ def copy(src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
         eviction_policy = 0
     else:
         eviction_policy = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}[eviction_policy]
-    
+
     assert src_pe == -1 or dst_pe == -1, "At least one of src_pe or dst_pe must be local rank"
 
     return tir.call_intrin("handle", tir.op.Op.get("tl.copy"), src, dst, coalesced_width,

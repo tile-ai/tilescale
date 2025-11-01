@@ -19,14 +19,14 @@ def get_kernel(M, N, block_M, block_N, threads, kernel='simt_push_tile', rank=No
             dst: T.Tensor((M, N), "float32"),
             src: T.Tensor((M, N), "float32"),
     ):
-        with T.Kernel((1), threads=threads) as (bx):
+        with T.Kernel((1), threads=threads):
             rank = T.alloc_local([1], "uint64")
             rank[0] = T.get_rank()
 
             T.copy(
                 src,
                 dst,
-                dst_pe=1-rank[0],
+                dst_pe=1 - rank[0],
                 disable_tma=True  # Ensure testing SIMT remote copy
             )
 
@@ -51,7 +51,7 @@ def get_kernel(M, N, block_M, block_N, threads, kernel='simt_push_tile', rank=No
             T.copy(
                 smem,
                 dst[bx * block_M:(bx + 1) * block_M, by * block_N:(by + 1) * block_N],
-                dst_pe=1-rank[0],
+                dst_pe=1 - rank[0],
                 disable_tma=True  # Ensure testing SIMT remote copy
             )
 
@@ -70,7 +70,7 @@ def get_kernel(M, N, block_M, block_N, threads, kernel='simt_push_tile', rank=No
             T.copy(
                 src[bx * block_M:(bx + 1) * block_M, by * block_N:(by + 1) * block_N],
                 smem,
-                src_pe=1-rank[0],
+                src_pe=1 - rank[0],
                 disable_tma=True  # Ensure testing SIMT remote copy
             )
 
@@ -95,7 +95,8 @@ def get_kernel(M, N, block_M, block_N, threads, kernel='simt_push_tile', rank=No
             T.copy(
                 src[bx * block_M:(bx + 1) * block_M, by * block_N:(by + 1) * block_N],
                 smem,
-                src_pe=1-rank,
+                src_pe=1 - T.get_rank(),  
+                # NOTE(wt): We cannot use rank[0] as above for TMA remote copy currently.
             )
 
             T.copy(
@@ -124,7 +125,7 @@ def get_kernel(M, N, block_M, block_N, threads, kernel='simt_push_tile', rank=No
             T.copy(
                 smem,
                 dst[bx * block_M:(bx + 1) * block_M, by * block_N:(by + 1) * block_N],
-                dst_pe=1-rank
+                dst_pe=1 - T.get_rank()
             )
 
     return {
@@ -137,7 +138,7 @@ def get_kernel(M, N, block_M, block_N, threads, kernel='simt_push_tile', rank=No
 
 
 def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
-    M = args.M 
+    M = args.M
     N = args.N
     BLOCK_M = 64
     BLOCK_N = 128
@@ -152,8 +153,10 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         local_rank=local_rank,
         num_local_ranks=num_local_ranks,
         group=group)
-    
-    kernel = get_kernel(M, N, BLOCK_M, BLOCK_N, threads, kernel=args.kernel, rank=local_rank)  # only TMA kernels need compile-time aware peer rank
+
+    kernel = get_kernel(
+        M, N, BLOCK_M, BLOCK_N, threads, kernel=args.kernel,
+        rank=local_rank)  # only TMA kernels need compile-time aware peer rank
     kernel.initialize(allocator=allocator)
     if local_rank == 0:
         print(kernel.get_kernel_source())

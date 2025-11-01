@@ -208,9 +208,9 @@ TIR_DEFINE_TL_BUILTIN(get_remote_base_ptr)
                                Integer(CallEffectKind::kOpaque));
 
 TIR_DEFINE_TL_BUILTIN(get_local_base)
-.set_num_inputs(0)
-.set_attr<TCallEffectKind>("TCallEffectKind",
-                            Integer(CallEffectKind::kOpaque));
+    .set_num_inputs(0)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
 
 TIR_DEFINE_TL_BUILTIN(get_uintptr_t)
     .set_num_inputs(1)

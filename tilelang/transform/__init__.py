@@ -488,6 +488,7 @@ def LayoutReducer():
 
 # TileScale passes
 
+
 def DeclareSymmBuffer():
     """
     Declare symmetric buffer on peer's global memory.

@@ -302,16 +302,12 @@ def make_tensor(ptr: Var,
     return Tensor.from_ptr(ptr, shape, dtype, strides)
 
 
-def make_tensor_like(
-    tensor,
-    ptr: Var,
-    shape: Optional[tuple[PrimExpr, ...]] = None,
-    dtype: Optional[str] = None,
-    strides: Optional[tuple[PrimExpr, ...]] = None
-) -> tir.Buffer:
-    return Tensor.from_ptr(
-        ptr if ptr is not None else tensor.data,
-        shape if shape is not None else tensor.shape,
-        dtype if dtype is not None else tensor.dtype, 
-        strides if strides is not None else tensor.strides
-    )
+def make_tensor_like(tensor,
+                     ptr: Var,
+                     shape: Optional[tuple[PrimExpr, ...]] = None,
+                     dtype: Optional[str] = None,
+                     strides: Optional[tuple[PrimExpr, ...]] = None) -> tir.Buffer:
+    return Tensor.from_ptr(ptr if ptr is not None else tensor.data,
+                           shape if shape is not None else tensor.shape,
+                           dtype if dtype is not None else tensor.dtype,
+                           strides if strides is not None else tensor.strides)
