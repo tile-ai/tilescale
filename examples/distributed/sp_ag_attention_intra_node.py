@@ -28,6 +28,8 @@ def flashattn(batch_size,
               heads,
               dim,
               is_causal,
+              rank,
+              num_ranks,
               block_M=64,
               block_N=64,
               num_stages=1,
@@ -75,41 +77,34 @@ def flashattn(batch_size,
             v_start_idx = cu_seqlens_k[batch_idx]
             q_end_idx = cu_seqlens_q[batch_idx + 1]
             k_end_idx = cu_seqlens_k[batch_idx + 1]
-            v_end_idx = cu_seqlens_k[batch_idx + 1]
 
             q_current_seqlen = q_end_idx - q_start_idx
             k_current_seqlen = k_end_idx - k_start_idx
-            v_current_seqlen = v_end_idx - v_start_idx
 
             T.copy(
                 Q_unpad[q_start_idx + bx * block_M:q_start_idx + (bx + 1) * block_M, head_idx, :],
                 Q_shared)
-            for i, d in T.Parallel(block_M, dim):
-                if bx * block_M + i >= q_current_seqlen:
-                    Q_shared[i, d] = 0
 
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(accum_dtype))
 
+            prefix_len = k_current_seqlen - q_current_seqlen * num_ranks
             loop_range = (
-                T.min(T.ceildiv(k_current_seqlen, block_N), T.ceildiv(
-                    (bx + 1) *
-                    block_M, block_N)) if is_causal else T.ceildiv(k_current_seqlen, block_N))
+                T.ceildiv(prefix_len + q_current_seqlen * rank + (bx + 1) * block_M, block_N)
+                if is_causal else T.ceildiv(k_current_seqlen, block_N))
 
             for k in T.Pipelined(loop_range, num_stages=num_stages):
                 T.copy(
                     K_unpad[k_start_idx + k * block_N:k_start_idx + (k + 1) * block_N,
                             kv_head_idx, :], K_shared)
-                for i, d in T.Parallel(block_N, dim):
-                    if k * block_N + i >= k_current_seqlen:
-                        K_shared[i, d] = 0
 
                 if is_causal:
                     for i, j in T.Parallel(block_M, block_N):
-                        acc_s[i, j] = T.if_then_else((bx * block_M + i < k * block_N + j) or
-                                                     (bx * block_M + i >= q_current_seqlen or
-                                                      k * block_N + j >= k_current_seqlen), -1e9, 0)
+                        acc_s[i, j] = T.if_then_else(
+                            (prefix_len + q_current_seqlen * rank + bx * block_M + i
+                             < k * block_N + j) or (bx * block_M + i >= q_current_seqlen or
+                                                    k * block_N + j >= k_current_seqlen), -1e9, 0)
                 else:
                     for i, j in T.Parallel(block_M, block_N):
                         acc_s[i, j] = T.if_then_else((bx * block_M + i >= q_current_seqlen or
@@ -139,9 +134,6 @@ def flashattn(batch_size,
                 T.copy(
                     V_unpad[v_start_idx + k * block_N:v_start_idx + (k + 1) * block_N,
                             kv_head_idx, :], V_shared)
-                for i, d in T.Parallel(block_N, dim):
-                    if k * block_N + i >= v_current_seqlen:
-                        V_shared[i, d] = 0
 
                 T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
 
@@ -355,7 +347,7 @@ def fused_sp_ag_attn_intra_node(
     HEAD_DIM_V = v_shard.shape[-1]
     assert HEAD_DIM_Q == HEAD_DIM_K and HEAD_DIM_K == HEAD_DIM_V
     assert HEAD_DIM_K in {16, 32, 64, 128, 256}
-    
+
     with torch.cuda.stream(compute_stream):
         kernel = flashattn(
             batch,
@@ -365,6 +357,8 @@ def fused_sp_ag_attn_intra_node(
             q_head,
             HEAD_DIM_Q,
             is_causal,
+            rank,
+            world_size,
             block_M=BLOCK_M,
             block_N=BLOCK_N,
             num_stages=num_stages,

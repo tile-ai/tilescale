@@ -406,17 +406,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         '--num-processes', type=int, default=1, help='Number of processes to spawn (default: 2)')
-    parser.add_argument("--batch_size", type=int, default=1, help="batch size")
+    parser.add_argument("--batch_size", type=int, default=2, help="batch size")
     parser.add_argument("--q_head", type=int, default=32, help="num q heads")
     parser.add_argument("--kv_head", type=int, default=8, help="num kv heads")
-    parser.add_argument("--max_seqlen_q", type=int, default=256, help="max sequence length of q")
+    parser.add_argument("--max_seqlen_q", type=int, default=8192, help="max sequence length of q")
     parser.add_argument(
-        "--max_seqlen_k", type=int, default=256, help="max sequence length of k/v")
+        "--max_seqlen_k", type=int, default=12288, help="max sequence length of k/v")
     parser.add_argument("--head_dim", type=int, default=128, help="head dim")
     parser.add_argument(
-        "--seqlens_q", type=int, nargs='+', default=[256], help="sequence lengths of q")
+        "--seqlens_q", type=int, nargs='+', default=[4096, 8192], help="sequence lengths of q")
     parser.add_argument(
-        "--seqlens_k", type=int, nargs='+', default=[256], help="sequence lengths of k/v")
+        "--seqlens_k", type=int, nargs='+', default=[6144, 12288], help="sequence lengths of k/v")
     parser.add_argument('--is_causal', action='store_true', help='causal')
     parser.add_argument(
         "--zig_zag",
