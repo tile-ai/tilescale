@@ -153,8 +153,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         num_local_ranks=num_local_ranks,
         group=group)
 
-    kernel = get_kernel(
-        M, N, BLOCK_M, BLOCK_N, threads, kernel=args.kernel)
+    kernel = get_kernel(M, N, BLOCK_M, BLOCK_N, threads, kernel=args.kernel)
     kernel.initialize(allocator=allocator)
     if local_rank == 0:
         print(kernel.get_kernel_source())
