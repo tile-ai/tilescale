@@ -6,7 +6,7 @@
 namespace tl {
 
 extern "C" __device__ uint64_t meta_data[1024];
-extern "C" __host__ uint64_t *host_meta_data;
+extern "C" uint64_t *host_meta_data;
 
 TL_HOST_DEVICE uint64_t get_rank() {
 #ifdef __CUDA_ARCH__

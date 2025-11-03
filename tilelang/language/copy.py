@@ -92,8 +92,6 @@ def copy(
     else:
         eviction_policy = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}[eviction_policy]
 
-    assert src_pe == -1 or dst_pe == -1, "At least one of src_pe or dst_pe must be local rank"
-
     return tir.call_intrin("handle", tir.op.Op.get("tl.copy"), src, dst, coalesced_width,
                            disable_tma, eviction_policy, src_pe, dst_pe)
 

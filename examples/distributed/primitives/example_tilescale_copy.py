@@ -12,7 +12,7 @@ os.environ['NCCL_DEBUG'] = 'WARN'  # silence NCCL log
 
 
 @tilelang.jit
-def get_kernel(M, N, block_M, block_N, threads, kernel='simt_push_tile', rank=None):
+def get_kernel(M, N, block_M, block_N, threads, kernel='simt_push_tile'):
 
     @T.prim_func
     def simt_push_buffer(
@@ -154,8 +154,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         group=group)
 
     kernel = get_kernel(
-        M, N, BLOCK_M, BLOCK_N, threads, kernel=args.kernel,
-        rank=local_rank)  # only TMA kernels need compile-time aware peer rank
+        M, N, BLOCK_M, BLOCK_N, threads, kernel=args.kernel)
     kernel.initialize(allocator=allocator)
     if local_rank == 0:
         print(kernel.get_kernel_source())

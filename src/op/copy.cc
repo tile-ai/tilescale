@@ -164,6 +164,9 @@ Copy::Copy(Array<PrimExpr> args, BufferMap vmap) {
     node->dst_pe = args[6];
   }
 
+  ICHECK(!(node->is_remote_push() && node->is_remote_pull()))
+      << "At least one of src_pe or dst_pe must be local rank";
+
   if (node->is_remote_push()) {
     ICHECK(node->dst.scope() == "global")
         << "Can only copy to peer's global memory, but got "
