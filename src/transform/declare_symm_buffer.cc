@@ -73,7 +73,8 @@ private:
       buffer_data_to_buffer_.Set(buffer->data, buffer);
     }
     for (auto match_buffer : op->match_buffers) {
-      buffer_data_to_buffer_.Set(match_buffer->buffer->data, match_buffer->buffer);
+      buffer_data_to_buffer_.Set(match_buffer->buffer->data,
+                                 match_buffer->buffer);
     }
     return StmtExprMutator::VisitStmt_(op);
   }

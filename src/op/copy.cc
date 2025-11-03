@@ -1977,10 +1977,10 @@ Array<PrimExpr> TMAIm2ColDesc::EncodeCallArgs() const {
 // Register the Copy operation with TVM's TIR system
 // This makes the copy operation available for use in TVM programs
 // - Takes 8 inputs: src_buffer, dst_buffer, coalesced_width, disable_tma,
-// eviction_policy, src_pe, dst_pe, is_remote_copy
+// eviction_policy, src_pe, dst_pe
 // - Marked as opaque since it has side effects (memory writes)
 TIR_REGISTER_TL_OP(Copy, copy)
-    .set_num_inputs(8)
+    .set_num_inputs(7)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
