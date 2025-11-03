@@ -54,6 +54,11 @@ public:
 
     SymmBufferDeclarer declarer;
 
+    // Initialize buffer map from function's buffer_map
+    for (const auto &[_, buffer] : f->buffer_map) {
+      declarer.buffer_data_to_buffer_.Set(buffer->data, buffer);
+    }
+
     // Extract symm buffer info and replace them
     // The LetStmt insertion will happen in VisitStmt_ before each copy
     f.CopyOnWrite()->body = declarer.VisitStmt(f->body);
@@ -62,11 +67,28 @@ public:
   };
 
 private:
+  Stmt VisitStmt_(const BlockNode *op) final {
+    // Record the mapping from buffer data var to buffer for later lookup
+    for (auto buffer : op->alloc_buffers) {
+      buffer_data_to_buffer_.Set(buffer->data, buffer);
+    }
+    for (auto match_buffer : op->match_buffers) {
+      buffer_data_to_buffer_.Set(match_buffer->buffer->data, match_buffer->buffer);
+    }
+    return StmtExprMutator::VisitStmt_(op);
+  }
+
   Stmt VisitStmt_(const EvaluateNode *op) final {
     // Check if this Evaluate contains a Call
     if (const CallNode *call_op = op->value.as<CallNode>()) {
+      if (call_op->op.as<GlobalVarNode>()) {
+        // Do not process the call node to the global function.
+        return StmtExprMutator::VisitStmt_(op);
+      }
+      // LOG(INFO) << "Found call";
       auto parsed_op =
           ParseOperator(GetRef<Call>(call_op), buffer_data_to_buffer_);
+      // LOG(INFO) << "Parsed op: " << parsed_op;
       if (parsed_op.defined() && parsed_op.as<CopyNode>()) {
         // LOG(INFO) << "Found copy";
 
@@ -139,7 +161,7 @@ private:
           // Wrap with LetStmt that defines the symm pointer
           return LetStmt(symm_dst_var, symm_dst_ptr_expr, modified_stmt);
         } else if (parsed_op.as<CopyNode>()->is_remote_pull()) {
-          // LOG(INFO) << "Found remote pull";
+          LOG(INFO) << "Found remote pull";
 
           Buffer src = parsed_op.as<CopyNode>()->src;
           Array<Range> src_range = parsed_op.as<CopyNode>()->src_range;
