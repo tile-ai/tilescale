@@ -95,7 +95,7 @@ def get_kernel(M, N, block_M, block_N, threads, kernel='simt_push_tile', rank=No
             T.copy(
                 src[bx * block_M:(bx + 1) * block_M, by * block_N:(by + 1) * block_N],
                 smem,
-                src_pe=1 - T.get_rank(),  
+                src_pe=1 - T.get_rank(),
                 # NOTE(wt): We cannot use rank[0] as above for TMA remote copy currently.
             )
 
@@ -125,8 +125,7 @@ def get_kernel(M, N, block_M, block_N, threads, kernel='simt_push_tile', rank=No
             T.copy(
                 smem,
                 dst[bx * block_M:(bx + 1) * block_M, by * block_N:(by + 1) * block_N],
-                dst_pe=1 - T.get_rank()
-            )
+                dst_pe=1 - T.get_rank())
 
     return {
         'simt_push_buffer': simt_push_buffer,

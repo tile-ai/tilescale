@@ -1,7 +1,7 @@
 """The language interface for tl programs."""
 
 from __future__ import annotations
-from typing import Any, Optional, Sequence, SupportsIndex, TYPE_CHECKING
+from typing import Any, Sequence, SupportsIndex, TYPE_CHECKING
 from typing_extensions import Self
 
 from tvm import tir
@@ -304,9 +304,9 @@ def make_tensor(ptr: Var,
 
 def make_tensor_like(tensor,
                      ptr: Var,
-                     shape: Optional[tuple[PrimExpr, ...]] = None,
-                     dtype: Optional[str] = None,
-                     strides: Optional[tuple[PrimExpr, ...]] = None) -> tir.Buffer:
+                     shape: tuple[PrimExpr, ...] | None = None,
+                     dtype: str | None = None,
+                     strides: tuple[PrimExpr, ...] | None = None) -> tir.Buffer:
     return Tensor.from_ptr(ptr if ptr is not None else tensor.data,
                            shape if shape is not None else tensor.shape,
                            dtype if dtype is not None else tensor.dtype,

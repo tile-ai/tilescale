@@ -1,7 +1,7 @@
 """The language interface for tl programs."""
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal
 from tilelang import language as T
 from tilelang.utils.language import get_buffer_region_from_load
 from tvm import ir, tir
@@ -11,8 +11,8 @@ from tilelang.language.utils import buffer_to_tile_region, buffer_region_to_tile
 def copy(
     src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
     dst: tir.Buffer | tir.BufferLoad,
-    src_pe: Optional[tir.PrimExpr | tir.IntImm] = -1,
-    dst_pe: Optional[tir.PrimExpr | tir.IntImm] = -1,
+    src_pe: tir.PrimExpr | tir.IntImm | None = -1,
+    dst_pe: tir.PrimExpr | tir.IntImm | None = -1,
     coalesced_width: int | None = None,
     disable_tma: bool = False,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
@@ -27,7 +27,7 @@ def copy(
         coalesced_width (Optional[int], optional): Width for coalesced memory access. Defaults to None.
         disable_tma (bool, optional): Whether to disable TMA. Defaults to False.
         eviction_policy (Optional[Literal["evict_normal", "evict_first", "evict_last"]], optional): Eviction policy. Defaults to None.
-        
+
     Raises:
         TypeError: If copy extents cannot be deduced from arguments
 
