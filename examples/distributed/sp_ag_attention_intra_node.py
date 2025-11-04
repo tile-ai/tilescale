@@ -18,20 +18,17 @@ def barrier_all_blocks_sys_kernel(num_local_rank,):
     return main
 
 
-@tilelang.jit(pass_configs={
-    tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    
-}, compile_flags=[
-        "-O3",
-        "-Wno-deprecated-declarations",
-        "-U__CUDA_NO_HALF_OPERATORS__",
-        "-U__CUDA_NO_HALF_CONVERSIONS__",
-        "-U__CUDA_NO_HALF2_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-        "--expt-relaxed-constexpr",
-        "--expt-extended-lambda",
-        "--ptxas-options=-v,--register-usage-level=10",
-        "-DNDEBUG"],)
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    },
+    compile_flags=[
+        "-O3", "-Wno-deprecated-declarations", "-U__CUDA_NO_HALF_OPERATORS__",
+        "-U__CUDA_NO_HALF_CONVERSIONS__", "-U__CUDA_NO_HALF2_OPERATORS__",
+        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__", "--expt-relaxed-constexpr", "--expt-extended-lambda",
+        "--ptxas-options=-v,--register-usage-level=10", "-DNDEBUG"
+    ],
+)
 def flashattn(batch_size,
               groups,
               UQ,
@@ -53,7 +50,6 @@ def flashattn(batch_size,
     o_shape = [UQ, heads, dim]
     dtype = "float16"
     accum_dtype = "float"
-
 
     @T.macro
     def inner(
@@ -84,9 +80,8 @@ def flashattn(batch_size,
         global_offset_q: T.int32,
         kv_len_per_sp_block: T.int32,
     ):
-        T.copy(
-            Q_unpad[q_start_idx + bx * block_M:q_start_idx + (bx + 1) * block_M, head_idx, :],
-            Q_shared)
+        T.copy(Q_unpad[q_start_idx + bx * block_M:q_start_idx + (bx + 1) * block_M, head_idx, :],
+               Q_shared)
 
         T.fill(acc_o, 0)
         T.fill(logsum, 0)
@@ -99,9 +94,11 @@ def flashattn(batch_size,
 
         for k in T.Pipelined(loop_range, num_stages=num_stages):
             sp_block_idx = (k * block_N) // kv_len_per_sp_block
-            wait_rank = (sp_block_idx if sp_block_idx < num_ranks else 2 * num_ranks - sp_block_idx - 1)
-            kv_load_offset = ((k * block_N) % kv_len_per_sp_block + sp_block_idx // num_ranks * kv_len_per_sp_block +
-                            wait_rank * (k_current_seqlen // num_ranks))
+            wait_rank = (
+                sp_block_idx if sp_block_idx < num_ranks else 2 * num_ranks - sp_block_idx - 1)
+            kv_load_offset = ((k * block_N) % kv_len_per_sp_block +
+                              sp_block_idx // num_ranks * kv_len_per_sp_block + wait_rank *
+                              (k_current_seqlen // num_ranks))
             T.copy(
                 K_unpad[k_start_idx + kv_load_offset:k_start_idx + kv_load_offset + block_N,
                         kv_head_idx, :], K_shared)
@@ -109,13 +106,13 @@ def flashattn(batch_size,
             if is_causal:
                 for i, j in T.Parallel(block_M, block_N):
                     acc_s[i, j] = T.if_then_else(
-                        (prefix_len + global_offset_q + bx * block_M + i
-                            < k * block_N + j) or (bx * block_M + i >= q_current_seqlen or
-                                                k * block_N + j >= k_current_seqlen), -1e9, 0)
+                        (prefix_len + global_offset_q + bx * block_M + i < k * block_N + j) or
+                        (bx * block_M + i >= q_current_seqlen or
+                         k * block_N + j >= k_current_seqlen), -1e9, 0)
             else:
                 for i, j in T.Parallel(block_M, block_N):
                     acc_s[i, j] = T.if_then_else((bx * block_M + i >= q_current_seqlen or
-                                                    k * block_N + j >= k_current_seqlen), -1e9, 0)
+                                                  k * block_N + j >= k_current_seqlen), -1e9, 0)
 
             T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
@@ -190,22 +187,15 @@ def flashattn(batch_size,
 
             q_current_seqlen = q_end_idx - q_start_idx
             k_current_seqlen = k_end_idx - k_start_idx
-            
+
             global_offset_q = q_current_seqlen * rank
             kv_len_per_sp_block = k_current_seqlen // num_ranks
 
-            inner(Q_unpad, K_unpad, V_unpad, Output_unpad,
-                  Q_shared, K_shared, V_shared, O_shared,
-                  acc_s, acc_s_cast, acc_o,
-                  scores_max, scores_max_prev,
-                  scores_scale, scores_sum,
-                  logsum,
-                  q_start_idx, k_start_idx, v_start_idx,
-                  q_current_seqlen, k_current_seqlen,
-                  bx, head_idx, kv_head_idx,
-                  global_offset_q,
-                  kv_len_per_sp_block)
-            
+            inner(Q_unpad, K_unpad, V_unpad, Output_unpad, Q_shared, K_shared, V_shared, O_shared,
+                  acc_s, acc_s_cast, acc_o, scores_max, scores_max_prev, scores_scale, scores_sum,
+                  logsum, q_start_idx, k_start_idx, v_start_idx, q_current_seqlen, k_current_seqlen,
+                  bx, head_idx, kv_head_idx, global_offset_q, kv_len_per_sp_block)
+
     @T.prim_func
     def main_zigzag(
             Q_unpad: T.Tensor(q_shape, dtype),
@@ -244,23 +234,16 @@ def flashattn(batch_size,
 
             q_current_seqlen = q_end_idx - q_start_idx
             k_current_seqlen = k_end_idx - k_start_idx
-            
+
             half_q_shard_len = q_current_seqlen // 2
             global_offset_q = rank * half_q_shard_len if bx * block_M < half_q_shard_len else \
                 q_current_seqlen * num_ranks - (rank + 2) * half_q_shard_len
             kv_len_per_sp_block = k_current_seqlen // (2 * num_ranks)
 
-            inner(Q_unpad, K_unpad, V_unpad, Output_unpad,
-                  Q_shared, K_shared, V_shared, O_shared,
-                  acc_s, acc_s_cast, acc_o,
-                  scores_max, scores_max_prev,
-                  scores_scale, scores_sum,
-                  logsum,
-                  q_start_idx, k_start_idx, v_start_idx,
-                  q_current_seqlen, k_current_seqlen,
-                  bx, head_idx, kv_head_idx,
-                  global_offset_q,
-                  kv_len_per_sp_block)
+            inner(Q_unpad, K_unpad, V_unpad, Output_unpad, Q_shared, K_shared, V_shared, O_shared,
+                  acc_s, acc_s_cast, acc_o, scores_max, scores_max_prev, scores_scale, scores_sum,
+                  logsum, q_start_idx, k_start_idx, v_start_idx, q_current_seqlen, k_current_seqlen,
+                  bx, head_idx, kv_head_idx, global_offset_q, kv_len_per_sp_block)
 
     return main if not enable_zig_zag else main_zigzag
 
@@ -482,7 +465,7 @@ def fused_sp_ag_attn_intra_node(
             block_N=BLOCK_N,
             num_stages=num_stages,
             threads=threads)
-        
+
         if rank == 0 and print_source:
             print(kernel.get_kernel_source())
 

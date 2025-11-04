@@ -379,7 +379,8 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         enable_zig_zag,
     )
 
-    tilescale_out = tilescale_module(q_shard, k_shard, v_shard, cu_seqlens_q, cu_seqlens_k, print_source=True)
+    tilescale_out = tilescale_module(
+        q_shard, k_shard, v_shard, cu_seqlens_q, cu_seqlens_k, print_source=True)
     print(f"tilescale_out: {tilescale_out.shape}")
 
     torch_out = torch_module(q_shard, k_shard, v_shard, cu_seqlens_q, cu_seqlens_k)
