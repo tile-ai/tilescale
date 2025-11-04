@@ -20,7 +20,18 @@ def barrier_all_blocks_sys_kernel(num_local_rank,):
 
 @tilelang.jit(pass_configs={
     tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-})
+    
+}, compile_flags=[
+        "-O3",
+        "-Wno-deprecated-declarations",
+        "-U__CUDA_NO_HALF_OPERATORS__",
+        "-U__CUDA_NO_HALF_CONVERSIONS__",
+        "-U__CUDA_NO_HALF2_OPERATORS__",
+        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+        "--expt-relaxed-constexpr",
+        "--expt-extended-lambda",
+        "--ptxas-options=-v,--register-usage-level=10",
+        "-DNDEBUG"],)
 def flashattn(batch_size,
               groups,
               UQ,
@@ -28,6 +39,7 @@ def flashattn(batch_size,
               heads,
               dim,
               is_causal,
+              enable_zig_zag,
               rank,
               num_ranks,
               block_M=64,
@@ -41,6 +53,104 @@ def flashattn(batch_size,
     o_shape = [UQ, heads, dim]
     dtype = "float16"
     accum_dtype = "float"
+
+
+    @T.macro
+    def inner(
+        Q_unpad: T.Tensor(q_shape, dtype),
+        K_unpad: T.Tensor(kv_shape, dtype),
+        V_unpad: T.Tensor(kv_shape, dtype),
+        Output_unpad: T.Tensor(o_shape, dtype),
+        Q_shared: T.SharedBuffer([block_M, dim], dtype),
+        K_shared: T.SharedBuffer([block_N, dim], dtype),
+        V_shared: T.SharedBuffer([block_N, dim], dtype),
+        O_shared: T.SharedBuffer([block_M, dim], dtype),
+        acc_s: T.FragmentBuffer([block_M, block_N], accum_dtype),
+        acc_s_cast: T.FragmentBuffer([block_M, block_N], dtype),
+        acc_o: T.FragmentBuffer([block_M, dim], accum_dtype),
+        scores_max: T.FragmentBuffer([block_M], accum_dtype),
+        scores_max_prev: T.FragmentBuffer([block_M], accum_dtype),
+        scores_scale: T.FragmentBuffer([block_M], accum_dtype),
+        scores_sum: T.FragmentBuffer([block_M], accum_dtype),
+        logsum: T.FragmentBuffer([block_M], accum_dtype),
+        q_start_idx: T.int32,
+        k_start_idx: T.int32,
+        v_start_idx: T.int32,
+        q_current_seqlen: T.int32,
+        k_current_seqlen: T.int32,
+        bx: T.int32,
+        head_idx: T.int32,
+        kv_head_idx: T.int32,
+        global_offset_q: T.int32,
+        kv_len_per_sp_block: T.int32,
+    ):
+        T.copy(
+            Q_unpad[q_start_idx + bx * block_M:q_start_idx + (bx + 1) * block_M, head_idx, :],
+            Q_shared)
+
+        T.fill(acc_o, 0)
+        T.fill(logsum, 0)
+        T.fill(scores_max, -T.infinity(accum_dtype))
+
+        prefix_len = k_current_seqlen - q_current_seqlen * num_ranks
+        loop_range = (
+            T.ceildiv(prefix_len + global_offset_q + (bx + 1) * block_M, block_N)
+            if is_causal else T.ceildiv(k_current_seqlen, block_N))
+
+        for k in T.Pipelined(loop_range, num_stages=num_stages):
+            sp_block_idx = (k * block_N) // kv_len_per_sp_block
+            wait_rank = (sp_block_idx if sp_block_idx < num_ranks else 2 * num_ranks - sp_block_idx - 1)
+            kv_load_offset = ((k * block_N) % kv_len_per_sp_block + sp_block_idx // num_ranks * kv_len_per_sp_block +
+                            wait_rank * (k_current_seqlen // num_ranks))
+            T.copy(
+                K_unpad[k_start_idx + kv_load_offset:k_start_idx + kv_load_offset + block_N,
+                        kv_head_idx, :], K_shared)
+
+            if is_causal:
+                for i, j in T.Parallel(block_M, block_N):
+                    acc_s[i, j] = T.if_then_else(
+                        (prefix_len + global_offset_q + bx * block_M + i
+                            < k * block_N + j) or (bx * block_M + i >= q_current_seqlen or
+                                                k * block_N + j >= k_current_seqlen), -1e9, 0)
+            else:
+                for i, j in T.Parallel(block_M, block_N):
+                    acc_s[i, j] = T.if_then_else((bx * block_M + i >= q_current_seqlen or
+                                                    k * block_N + j >= k_current_seqlen), -1e9, 0)
+
+            T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+
+            T.copy(scores_max, scores_max_prev)
+            T.fill(scores_max, -T.infinity(accum_dtype))
+            T.reduce_max(acc_s, scores_max, dim=1, clear=False)
+
+            for i in T.Parallel(block_M):
+                scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
+
+            for i in T.Parallel(block_M):
+                scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
+            for i, j in T.Parallel(block_M, block_N):
+                acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
+            T.reduce_sum(acc_s, scores_sum, dim=1)
+            for i in T.Parallel(block_M):
+                logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
+            T.copy(acc_s, acc_s_cast)
+
+            for i, j in T.Parallel(block_M, dim):
+                acc_o[i, j] *= scores_scale[i]
+
+            T.copy(
+                V_unpad[v_start_idx + kv_load_offset:v_start_idx + kv_load_offset + block_N,
+                        kv_head_idx, :], V_shared)
+
+            T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
+
+        for i, j in T.Parallel(block_M, dim):
+            acc_o[i, j] /= logsum[i]
+        T.copy(acc_o, O_shared)
+
+        for i, d in T.Parallel(block_M, dim):
+            if bx * block_M + i < q_current_seqlen:
+                Output_unpad[q_start_idx + bx * block_M + i, head_idx, d] = O_shared[i, d]
 
     @T.prim_func
     def main(
@@ -80,72 +190,79 @@ def flashattn(batch_size,
 
             q_current_seqlen = q_end_idx - q_start_idx
             k_current_seqlen = k_end_idx - k_start_idx
+            
+            global_offset_q = q_current_seqlen * rank
+            kv_len_per_sp_block = k_current_seqlen // num_ranks
 
-            T.copy(
-                Q_unpad[q_start_idx + bx * block_M:q_start_idx + (bx + 1) * block_M, head_idx, :],
-                Q_shared)
+            inner(Q_unpad, K_unpad, V_unpad, Output_unpad,
+                  Q_shared, K_shared, V_shared, O_shared,
+                  acc_s, acc_s_cast, acc_o,
+                  scores_max, scores_max_prev,
+                  scores_scale, scores_sum,
+                  logsum,
+                  q_start_idx, k_start_idx, v_start_idx,
+                  q_current_seqlen, k_current_seqlen,
+                  bx, head_idx, kv_head_idx,
+                  global_offset_q,
+                  kv_len_per_sp_block)
+            
+    @T.prim_func
+    def main_zigzag(
+            Q_unpad: T.Tensor(q_shape, dtype),
+            K_unpad: T.Tensor(kv_shape, dtype),
+            V_unpad: T.Tensor(kv_shape, dtype),
+            cu_seqlens_q: T.Tensor([batch_size + 1], "int32"),
+            cu_seqlens_k: T.Tensor([batch_size + 1], "int32"),
+            max_seqlen_q: T.int32,
+            Output_unpad: T.Tensor(o_shape, dtype),
+    ):
+        with T.Kernel(
+                T.ceildiv(max_seqlen_q, block_M), heads, batch_size,
+                threads=threads) as (bx, by, bz):
+            Q_shared = T.alloc_shared([block_M, dim], dtype)
+            K_shared = T.alloc_shared([block_N, dim], dtype)
+            V_shared = T.alloc_shared([block_N, dim], dtype)
+            O_shared = T.alloc_shared([block_M, dim], dtype)
+            acc_s = T.alloc_fragment([block_M, block_N], accum_dtype)
+            acc_s_cast = T.alloc_fragment([block_M, block_N], dtype)
+            acc_o = T.alloc_fragment([block_M, dim], accum_dtype)
+            scores_max = T.alloc_fragment([block_M], accum_dtype)
+            scores_max_prev = T.alloc_fragment([block_M], accum_dtype)
+            scores_scale = T.alloc_fragment([block_M], accum_dtype)
+            scores_sum = T.alloc_fragment([block_M], accum_dtype)
+            logsum = T.alloc_fragment([block_M], accum_dtype)
 
-            T.fill(acc_o, 0)
-            T.fill(logsum, 0)
-            T.fill(scores_max, -T.infinity(accum_dtype))
+            batch_idx = bz
+            head_idx = by
+            kv_head_idx = head_idx // groups
 
-            prefix_len = k_current_seqlen - q_current_seqlen * num_ranks
-            loop_range = (
-                T.ceildiv(prefix_len + q_current_seqlen * rank + (bx + 1) * block_M, block_N)
-                if is_causal else T.ceildiv(k_current_seqlen, block_N))
+            q_start_idx = cu_seqlens_q[batch_idx]
+            k_start_idx = cu_seqlens_k[batch_idx]
+            v_start_idx = cu_seqlens_k[batch_idx]
+            q_end_idx = cu_seqlens_q[batch_idx + 1]
+            k_end_idx = cu_seqlens_k[batch_idx + 1]
 
-            for k in T.Pipelined(loop_range, num_stages=num_stages):
-                T.copy(
-                    K_unpad[k_start_idx + k * block_N:k_start_idx + (k + 1) * block_N,
-                            kv_head_idx, :], K_shared)
+            q_current_seqlen = q_end_idx - q_start_idx
+            k_current_seqlen = k_end_idx - k_start_idx
+            
+            half_q_shard_len = q_current_seqlen // 2
+            global_offset_q = rank * half_q_shard_len if bx * block_M < half_q_shard_len else \
+                q_current_seqlen * num_ranks - (rank + 2) * half_q_shard_len
+            kv_len_per_sp_block = k_current_seqlen // (2 * num_ranks)
 
-                if is_causal:
-                    for i, j in T.Parallel(block_M, block_N):
-                        acc_s[i, j] = T.if_then_else(
-                            (prefix_len + q_current_seqlen * rank + bx * block_M + i
-                             < k * block_N + j) or (bx * block_M + i >= q_current_seqlen or
-                                                    k * block_N + j >= k_current_seqlen), -1e9, 0)
-                else:
-                    for i, j in T.Parallel(block_M, block_N):
-                        acc_s[i, j] = T.if_then_else((bx * block_M + i >= q_current_seqlen or
-                                                      k * block_N + j >= k_current_seqlen), -1e9, 0)
+            inner(Q_unpad, K_unpad, V_unpad, Output_unpad,
+                  Q_shared, K_shared, V_shared, O_shared,
+                  acc_s, acc_s_cast, acc_o,
+                  scores_max, scores_max_prev,
+                  scores_scale, scores_sum,
+                  logsum,
+                  q_start_idx, k_start_idx, v_start_idx,
+                  q_current_seqlen, k_current_seqlen,
+                  bx, head_idx, kv_head_idx,
+                  global_offset_q,
+                  kv_len_per_sp_block)
 
-                T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
-
-                T.copy(scores_max, scores_max_prev)
-                T.fill(scores_max, -T.infinity(accum_dtype))
-                T.reduce_max(acc_s, scores_max, dim=1, clear=False)
-
-                for i in T.Parallel(block_M):
-                    scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
-
-                for i in T.Parallel(block_M):
-                    scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
-                for i, j in T.Parallel(block_M, block_N):
-                    acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
-                T.reduce_sum(acc_s, scores_sum, dim=1)
-                for i in T.Parallel(block_M):
-                    logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
-                T.copy(acc_s, acc_s_cast)
-
-                for i, j in T.Parallel(block_M, dim):
-                    acc_o[i, j] *= scores_scale[i]
-
-                T.copy(
-                    V_unpad[v_start_idx + k * block_N:v_start_idx + (k + 1) * block_N,
-                            kv_head_idx, :], V_shared)
-
-                T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
-
-            for i, j in T.Parallel(block_M, dim):
-                acc_o[i, j] /= logsum[i]
-            T.copy(acc_o, O_shared)
-
-            for i, d in T.Parallel(block_M, dim):
-                if bx * block_M + i < q_current_seqlen:
-                    Output_unpad[q_start_idx + bx * block_M + i, head_idx, d] = O_shared[i, d]
-
-    return main
+    return main if not enable_zig_zag else main_zigzag
 
 
 @dataclass
@@ -309,6 +426,7 @@ def fused_sp_ag_attn_intra_node(
     world_size: int,
     is_causal: bool = True,
     enable_zig_zag: bool = True,
+    print_source: bool = False,
 ):
 
     BLOCK_M = 128
@@ -357,12 +475,16 @@ def fused_sp_ag_attn_intra_node(
             q_head,
             HEAD_DIM_Q,
             is_causal,
+            enable_zig_zag,
             rank,
             world_size,
             block_M=BLOCK_M,
             block_N=BLOCK_N,
             num_stages=num_stages,
             threads=threads)
+        
+        if rank == 0 and print_source:
+            print(kernel.get_kernel_source())
 
         kernel(
             q_shard,

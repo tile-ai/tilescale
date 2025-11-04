@@ -73,7 +73,7 @@ class FusedSequenceParallelAttn(torch.nn.Module):
             self.allocator,
         )
 
-    def forward(self, q_shard, k_shard, v_shard, cu_seqlens_q, cu_seqlens_k):
+    def forward(self, q_shard, k_shard, v_shard, cu_seqlens_q, cu_seqlens_k, print_source=False):
         total_q_shard = cu_seqlens_q[-1]
         output_buffer = self.ctx.attn_output_buffer[:total_q_shard]
 
@@ -91,6 +91,7 @@ class FusedSequenceParallelAttn(torch.nn.Module):
             self.world_size,
             self.is_causal,
             self.enable_zig_zag,
+            print_source,
         )
 
         return output_buffer
@@ -378,7 +379,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         enable_zig_zag,
     )
 
-    tilescale_out = tilescale_module(q_shard, k_shard, v_shard, cu_seqlens_q, cu_seqlens_k)
+    tilescale_out = tilescale_module(q_shard, k_shard, v_shard, cu_seqlens_q, cu_seqlens_k, print_source=True)
     print(f"tilescale_out: {tilescale_out.shape}")
 
     torch_out = torch_module(q_shard, k_shard, v_shard, cu_seqlens_q, cu_seqlens_k)
