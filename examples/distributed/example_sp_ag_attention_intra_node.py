@@ -73,15 +73,15 @@ class FusedSequenceParallelAttn(torch.nn.Module):
             self.allocator,
         )
 
-    def forward(self, q_shard, k_shard, v_shard, cu_seqlens_q, cu_seqlens_k, print_source=False):
+    def forward(self, q_shard, k_shards, v_shards, cu_seqlens_q, cu_seqlens_k, print_source=False):
         total_q_shard = cu_seqlens_q[-1]
         output_buffer = self.ctx.attn_output_buffer[:total_q_shard]
 
         fused_sp_ag_attn_intra_node(
             self.ctx,
             q_shard,
-            k_shard,
-            v_shard,
+            k_shards,
+            v_shards,
             output_buffer,
             cu_seqlens_q,
             cu_seqlens_k,
@@ -338,14 +338,14 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                               dtype=dtype,
                               allocator=allocator).normal_(
                                   mean=0.0, std=0.5)
-    k_shard = tilelang.tensor((cu_seqlens_k[-1] // num_local_ranks, kv_head, head_dim),
+    k_shards = tilelang.tensor((cu_seqlens_k[-1] // num_local_ranks, kv_head, head_dim),
                               dtype=dtype,
-                              allocator=allocator).normal_(
-                                  mean=0.0, std=0.5)
-    v_shard = tilelang.tensor((cu_seqlens_k[-1] // num_local_ranks, kv_head, head_dim),
+                              allocator=allocator, return_peers=True)
+    v_shards = tilelang.tensor((cu_seqlens_k[-1] // num_local_ranks, kv_head, head_dim),
                               dtype=dtype,
-                              allocator=allocator).normal_(
-                                  mean=0.0, std=0.5)
+                              allocator=allocator, return_peers=True)
+    k_shards[local_rank].normal_(mean=0.0, std=0.5)
+    v_shards[local_rank].normal_(mean=0.0, std=0.5)
 
     dist.barrier()
 
@@ -380,10 +380,10 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     )
 
     tilescale_out = tilescale_module(
-        q_shard, k_shard, v_shard, cu_seqlens_q, cu_seqlens_k, print_source=True)
+        q_shard, k_shards, v_shards, cu_seqlens_q, cu_seqlens_k, print_source=True)
     print(f"tilescale_out: {tilescale_out.shape}")
 
-    torch_out = torch_module(q_shard, k_shard, v_shard, cu_seqlens_q, cu_seqlens_k)
+    torch_out = torch_module(q_shard, k_shards[local_rank], v_shards[local_rank], cu_seqlens_q, cu_seqlens_k)
     print(f"torch_out: {torch_out.shape}")
 
     atol = 1e-2
@@ -395,7 +395,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         print(f"torch_out: {torch_out}, tilelang_out: {tilescale_out}")
 
     _, tl_t = perf_fn(
-        lambda: tilescale_module(q_shard, k_shard, v_shard, cu_seqlens_q, cu_seqlens_k),
+        lambda: tilescale_module(q_shard, k_shards, v_shards, cu_seqlens_q, cu_seqlens_k),
         warmup=5,
         rep=5)
 
@@ -421,7 +421,7 @@ if __name__ == "__main__":
         "--seqlens_k", type=int, nargs='+', default=[6144, 12288], help="sequence lengths of k/v")
     parser.add_argument('--is_causal', action='store_true', help='causal')
     parser.add_argument(
-        "--zig_zag",
+        "--zig-zag",
         "--no-zig-zag",
         action=argparse.BooleanOptionalAction,
         default=True,

@@ -320,12 +320,12 @@ def barrier_all_on_stream(barrier: torch.Tensor, stream: torch.cuda.Stream, worl
 
 
 def cp_engine_producer_kv_all_gather(
-    k_shard: torch.Tensor,  # [total_kv_shard, kv_head, head_dim]
-    v_shard: torch.Tensor,  # [total_kv_shard, kv_head, head_dim]
+    k_shards: list[torch.Tensor],  # [total_kv_shard, kv_head, head_dim]
+    v_shards: list[torch.Tensor],  # [total_kv_shard, kv_head, head_dim]
     k_buffer: torch.Tensor,  # [total_kv, kv_head, head_dim]
     v_buffer: torch.Tensor,  # [total_kv, kv_head, head_dim]
-    k_buffers: List[torch.Tensor],
-    v_buffers: List[torch.Tensor],
+    k_buffers: list[torch.Tensor],
+    v_buffers: list[torch.Tensor],
     cu_seqlens_k: torch.Tensor,  # kv_full_lens
     rank: int,
     world_size: int,
@@ -335,12 +335,12 @@ def cp_engine_producer_kv_all_gather(
 ):
     assert k_buffer.is_contiguous()
     assert v_buffer.is_contiguous()
-    assert k_shard.is_contiguous()
-    assert v_shard.is_contiguous()
+    assert k_shards[rank].is_contiguous()
+    assert v_shards[rank].is_contiguous()
 
-    total_kv_shard, kv_head, head_dim = k_shard.shape
+    total_kv_shard, kv_head, head_dim = k_shards[rank].shape
     batch_size = cu_seqlens_k.shape[0] - 1
-    byte_per_token = kv_head * head_dim * k_shard.dtype.itemsize
+    byte_per_token = kv_head * head_dim * k_shards[rank].dtype.itemsize
 
     def _cp_engine_copy_data(dst_ptr, src_ptr, cp_size, stream):
         (err,) = cudart.cudaMemcpyAsync(
@@ -365,15 +365,15 @@ def cp_engine_producer_kv_all_gather(
             cp_size = byte_per_rank
 
             k_dst_ptr = k_buffers[rank].data_ptr() + byte_start + rank * byte_per_rank
-            k_src_ptr = k_shard.data_ptr() + byte_start // world_size
+            k_src_ptr = k_shards[rank].data_ptr() + byte_start // world_size
             _cp_engine_copy_data(k_dst_ptr, k_src_ptr, cp_size, compute_stream)
 
             v_dst_ptr = v_buffers[rank].data_ptr() + byte_start + rank * byte_per_rank
-            v_src_ptr = v_shard.data_ptr() + byte_start // world_size
+            v_src_ptr = v_shards[rank].data_ptr() + byte_start // world_size
             _cp_engine_copy_data(v_dst_ptr, v_src_ptr, cp_size, compute_stream)
 
-    barrier_all_on_stream(barrier, compute_stream, world_size)
-    ag_stream.wait_stream(compute_stream)
+    # barrier_all_on_stream(barrier, compute_stream, world_size)
+    # ag_stream.wait_stream(compute_stream)
 
     with torch.cuda.stream(ag_stream):
         for i in range(batch_size):
@@ -387,11 +387,11 @@ def cp_engine_producer_kv_all_gather(
             for offset in range(1, world_size):
                 src_rank = (rank + offset) % world_size
 
-                k_src_ptr = (k_buffers[src_rank].data_ptr() + byte_start + src_rank * byte_per_rank)
+                k_src_ptr = (k_shards[src_rank].data_ptr() + byte_start // world_size)
                 k_dst_ptr = (k_buffers[rank].data_ptr() + byte_start + src_rank * byte_per_rank)
                 _cp_engine_copy_data(k_dst_ptr, k_src_ptr, cp_size, ag_stream)
 
-                v_src_ptr = (v_buffers[src_rank].data_ptr() + byte_start + src_rank * byte_per_rank)
+                v_src_ptr = (v_shards[src_rank].data_ptr() + byte_start // world_size)
                 v_dst_ptr = (v_buffers[rank].data_ptr() + byte_start + src_rank * byte_per_rank)
                 _cp_engine_copy_data(v_dst_ptr, v_src_ptr, cp_size, ag_stream)
 
@@ -402,8 +402,8 @@ def cp_engine_producer_kv_all_gather(
 def fused_sp_ag_attn_intra_node(
     ctx: SPAllGatherAttentionContextIntraNode,
     q_shard: torch.Tensor,  # [total_q_shard, q_head, head_dim]
-    k_shard: torch.Tensor,  # [total_kv_shard, kv_head, head_dim]
-    v_shard: torch.Tensor,  # [total_kv_shard, kv_head, head_dim]
+    k_shards: list[torch.Tensor],  # [total_kv_shard, kv_head, head_dim]
+    v_shards: list[torch.Tensor],  # [total_kv_shard, kv_head, head_dim]
     output: torch.Tensor,  # [total_q_shard, q_head, head_dim]
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
@@ -424,7 +424,7 @@ def fused_sp_ag_attn_intra_node(
     assert ctx.ag_k_buffers[rank].shape[0] == ctx.ag_v_buffers[rank].shape[0]
     kv_tokens = ctx.ag_k_buffers[rank].shape[0]
     q_head = q_shard.shape[1]
-    kv_head = k_shard.shape[1]
+    kv_head = k_shards[rank].shape[1]
     batch = cu_seqlens_q.shape[0] - 1
 
     compute_stream = torch.cuda.current_stream()
@@ -434,8 +434,8 @@ def fused_sp_ag_attn_intra_node(
     ctx.ag_stream.wait_stream(compute_stream)
     # kv all gather
     cp_engine_producer_kv_all_gather(
-        k_shard,
-        v_shard,
+        k_shards,
+        v_shards,
         ag_k,
         ag_v,
         ctx.ag_k_buffers,
@@ -448,8 +448,8 @@ def fused_sp_ag_attn_intra_node(
         ctx.barrier,
     )
 
-    HEAD_DIM_Q, HEAD_DIM_K = q_shard.shape[-1], k_shard.shape[-1]
-    HEAD_DIM_V = v_shard.shape[-1]
+    HEAD_DIM_Q, HEAD_DIM_K = q_shard.shape[-1], k_shards[rank].shape[-1]
+    HEAD_DIM_V = v_shards[rank].shape[-1]
     assert HEAD_DIM_Q == HEAD_DIM_K and HEAD_DIM_K == HEAD_DIM_V
     assert HEAD_DIM_K in {16, 32, 64, 128, 256}
 
@@ -484,3 +484,4 @@ def fused_sp_ag_attn_intra_node(
             stream=compute_stream.cuda_stream)
 
     compute_stream.wait_stream(ctx.ag_stream)
+    barrier_all_on_stream(ctx.barrier, compute_stream, world_size)
