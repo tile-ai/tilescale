@@ -3,6 +3,8 @@ import tilelang
 import tilelang.language as T
 from typing import List
 from dataclasses import dataclass
+from cuda import cudart
+from tilelang.distributed.utils import CUDA_CHECK
 
 tilelang.disable_cache()
 
@@ -338,10 +340,18 @@ def cp_engine_producer_kv_all_gather(
 
     total_kv_shard, kv_head, head_dim = k_shard.shape
     batch_size = cu_seqlens_k.shape[0] - 1
+    byte_per_token = kv_head * head_dim * k_shard.dtype.itemsize
 
-    def _cp_engine_copy_data(dst, src, stream):
-        with torch.cuda.stream(stream):
-            dst.copy_(src)
+    def _cp_engine_copy_data(dst_ptr, src_ptr, cp_size, stream):
+        (err,) = cudart.cudaMemcpyAsync(
+            dst_ptr,
+            src_ptr,
+            cp_size,
+            cudart.cudaMemcpyKind.cudaMemcpyDefault,
+            stream.cuda_stream,
+        )
+
+        CUDA_CHECK(err)
 
     # local copy in compute stream
     with torch.cuda.stream(compute_stream):
@@ -350,18 +360,17 @@ def cp_engine_producer_kv_all_gather(
             cu_seqlens_k_end = cu_seqlens_k[i + 1].item()
             seqlen_k = cu_seqlens_k_end - cu_seqlens_k_start
             k_shard_len = seqlen_k // world_size
+            byte_start = cu_seqlens_k_start * byte_per_token
+            byte_per_rank = k_shard_len * byte_per_token
+            cp_size = byte_per_rank
 
-            k_dst = k_buffers[rank][cu_seqlens_k_start + rank * k_shard_len:cu_seqlens_k_start +
-                                    (rank + 1) * k_shard_len, :, :]
-            k_src = k_shard[cu_seqlens_k_start // world_size:cu_seqlens_k_start // world_size +
-                            k_shard_len, :, :]
-            _cp_engine_copy_data(k_dst, k_src, compute_stream)
+            k_dst_ptr = k_buffers[rank].data_ptr() + byte_start + rank * byte_per_rank
+            k_src_ptr = k_shard.data_ptr() + byte_start // world_size
+            _cp_engine_copy_data(k_dst_ptr, k_src_ptr, cp_size, compute_stream)
 
-            v_dst = v_buffers[rank][cu_seqlens_k_start + rank * k_shard_len:cu_seqlens_k_start +
-                                    (rank + 1) * k_shard_len, :, :]
-            v_src = v_shard[cu_seqlens_k_start // world_size:cu_seqlens_k_start // world_size +
-                            k_shard_len, :, :]
-            _cp_engine_copy_data(v_dst, v_src, compute_stream)
+            v_dst_ptr = v_buffers[rank].data_ptr() + byte_start + rank * byte_per_rank
+            v_src_ptr = v_shard.data_ptr() + byte_start // world_size
+            _cp_engine_copy_data(v_dst_ptr, v_src_ptr, cp_size, compute_stream)
 
     barrier_all_on_stream(barrier, compute_stream, world_size)
     ag_stream.wait_stream(compute_stream)
@@ -372,24 +381,19 @@ def cp_engine_producer_kv_all_gather(
             cu_seqlens_k_end = cu_seqlens_k[i + 1].item()
             seqlen_k = cu_seqlens_k_end - cu_seqlens_k_start
             k_shard_len = seqlen_k // world_size
+            byte_start = cu_seqlens_k_start * byte_per_token
+            byte_per_rank = k_shard_len * byte_per_token
+            cp_size = byte_per_rank
             for offset in range(1, world_size):
                 src_rank = (rank + offset) % world_size
 
-                k_src = k_buffers[src_rank][cu_seqlens_k_start +
-                                            src_rank * k_shard_len:cu_seqlens_k_start +
-                                            (src_rank + 1) * k_shard_len, :, :]
-                k_dst = k_buffers[rank][cu_seqlens_k_start +
-                                        src_rank * k_shard_len:cu_seqlens_k_start +
-                                        (src_rank + 1) * k_shard_len, :, :]
-                _cp_engine_copy_data(k_dst, k_src, ag_stream)
+                k_src_ptr = (k_buffers[src_rank].data_ptr() + byte_start + src_rank * byte_per_rank)
+                k_dst_ptr = (k_buffers[rank].data_ptr() + byte_start + src_rank * byte_per_rank)
+                _cp_engine_copy_data(k_dst_ptr, k_src_ptr, cp_size, ag_stream)
 
-                v_src = v_buffers[src_rank][cu_seqlens_k_start +
-                                            src_rank * k_shard_len:cu_seqlens_k_start +
-                                            (src_rank + 1) * k_shard_len, :, :]
-                v_dst = v_buffers[rank][cu_seqlens_k_start +
-                                        src_rank * k_shard_len:cu_seqlens_k_start +
-                                        (src_rank + 1) * k_shard_len, :, :]
-                _cp_engine_copy_data(v_dst, v_src, ag_stream)
+                v_src_ptr = (v_buffers[src_rank].data_ptr() + byte_start + src_rank * byte_per_rank)
+                v_dst_ptr = (v_buffers[rank].data_ptr() + byte_start + src_rank * byte_per_rank)
+                _cp_engine_copy_data(v_dst_ptr, v_src_ptr, cp_size, ag_stream)
 
     barrier_all_on_stream(barrier, ag_stream, world_size)
     compute_stream.wait_stream(ag_stream)
