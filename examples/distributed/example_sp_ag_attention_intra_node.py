@@ -397,7 +397,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         print(f"rank {local_rank} check passed.✅")
     else:
         print(f"rank {local_rank} check failed.❌")
-        # print(f"torch_out: {torch_out}, tilelang_out: {tilescale_out}")
+        print(f"torch_out: {torch_out}, tilelang_out: {tilescale_out}")
 
     _, tl_t = perf_fn(
         lambda: tilescale_module(q_shard, k_shards, v_shards, cu_seqlens_q, cu_seqlens_k),
@@ -444,5 +444,3 @@ if __name__ == "__main__":
     num_processes = args.num_processes
 
     torch.multiprocessing.spawn(main, args=(num_processes, args), nprocs=num_processes)
-
-    # main(0, 1, args)
