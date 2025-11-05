@@ -343,11 +343,13 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                               allocator=allocator).normal_(
                                   mean=0.0, std=0.5)
     k_shards = tilelang.tensor((cu_seqlens_k[-1] // num_local_ranks, kv_head, head_dim),
-                              dtype=dtype,
-                              allocator=allocator, return_peers=True)
+                               dtype=dtype,
+                               allocator=allocator,
+                               return_peers=True)
     v_shards = tilelang.tensor((cu_seqlens_k[-1] // num_local_ranks, kv_head, head_dim),
-                              dtype=dtype,
-                              allocator=allocator, return_peers=True)
+                               dtype=dtype,
+                               allocator=allocator,
+                               return_peers=True)
     k_shards[local_rank].normal_(mean=0.0, std=0.5)
     v_shards[local_rank].normal_(mean=0.0, std=0.5)
 
@@ -388,7 +390,8 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         q_shard, k_shards, v_shards, cu_seqlens_q, cu_seqlens_k, print_source=True)
     print(f"tilescale_out: {tilescale_out.shape}")
 
-    torch_out = torch_module(q_shard, k_shards[local_rank], v_shards[local_rank], cu_seqlens_q, cu_seqlens_k)
+    torch_out = torch_module(q_shard, k_shards[local_rank], v_shards[local_rank], cu_seqlens_q,
+                             cu_seqlens_k)
     print(f"torch_out: {torch_out.shape}")
 
     atol = 1e-2
