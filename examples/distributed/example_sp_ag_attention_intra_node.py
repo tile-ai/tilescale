@@ -32,6 +32,7 @@ class FusedSequenceParallelAttn(torch.nn.Module):
         device="cuda",
         is_causal=True,
         enable_zig_zag=True,
+        enable_specialized=False,
         allocator=None,
     ):
         super(FusedSequenceParallelAttn, self).__init__()
@@ -56,6 +57,7 @@ class FusedSequenceParallelAttn(torch.nn.Module):
         self.device = device
         self.is_causal = is_causal
         self.enable_zig_zag = enable_zig_zag
+        self.enable_specialized = enable_specialized
         self.allocator = allocator
 
         self.ctx = create_sp_ag_attention_context_intra_node(
@@ -91,6 +93,7 @@ class FusedSequenceParallelAttn(torch.nn.Module):
             self.world_size,
             self.is_causal,
             self.enable_zig_zag,
+            self.enable_specialized,
             print_source,
         )
 
@@ -315,6 +318,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     head_dim = args.head_dim
     is_causal = args.is_causal
     enable_zig_zag = args.zig_zag
+    enable_specialized = args.enable_specialized
     seqlens_q = args.seqlens_q
     cu_seqlens_q_list = [0] + list(accumulate(seqlens_q))
     seqlens_k = args.seqlens_k
@@ -362,6 +366,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         device,
         is_causal,
         enable_zig_zag,
+        enable_specialized,
         allocator=allocator,
     )
     torch_module = TorchSequenceParallelAttn(
@@ -392,7 +397,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         print(f"rank {local_rank} check passed.✅")
     else:
         print(f"rank {local_rank} check failed.❌")
-        print(f"torch_out: {torch_out}, tilelang_out: {tilescale_out}")
+        # print(f"torch_out: {torch_out}, tilelang_out: {tilescale_out}")
 
     _, tl_t = perf_fn(
         lambda: tilescale_module(q_shard, k_shards, v_shards, cu_seqlens_q, cu_seqlens_k),
@@ -427,8 +432,17 @@ if __name__ == "__main__":
         default=True,
         help="enable zig zag opt",
     )
+    parser.add_argument(
+        "--enable-specialized",
+        "--disable-specialized",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="enable specialized optimized version",
+    )
 
     args = parser.parse_args()
     num_processes = args.num_processes
 
     torch.multiprocessing.spawn(main, args=(num_processes, args), nprocs=num_processes)
+
+    # main(0, 1, args)
