@@ -11,6 +11,16 @@
 
 We currently provide three methods to install **TileScale**:
 
+**(optional)Prepare the container**:
+
+```bash
+docker pull nvcr.io/nvidia/pytorch:25.03-py3
+docker run --name tilescale --ipc=host --network=host --privileged --cap-add=SYS_ADMIN --shm-size=10g --gpus=all -it nvcr.io/nvidia/pytorch:25.03-py3 /bin/bash	
+echo -n > /etc/pip/constraint.txt
+bash Miniconda3-latest-Linux-x86_64.sh # install conda
+conda install -c conda-forge libstdcxx-ng
+```
+
 1. **Clone the Repository**:
 
 ```bash
