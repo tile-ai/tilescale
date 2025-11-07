@@ -335,11 +335,14 @@ void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode *op) {
 void CodeGenTileLangCUDA::BindThreadIndex(const IterVar &iv) {
   ICHECK(!var_idmap_.count(iv->var.get()));
   std::string tag = iv->thread_tag;
-  // clusterIdx.* is not a CUDA builtin. Fallback to 0 for now so codegen compiles.
+  // clusterIdx.* is not a CUDA builtin. Fallback to 0 for now so codegen
+  // compiles.
   if (tag.rfind("clusterIdx.", 0) == 0) {
-    var_idmap_[iv->var.get()] = CastFromTo("0", DataType::UInt(32), iv->var.dtype());
+    var_idmap_[iv->var.get()] =
+        CastFromTo("0", DataType::UInt(32), iv->var.dtype());
   } else {
-    var_idmap_[iv->var.get()] = CastFromTo(tag, DataType::UInt(32), iv->var.dtype());
+    var_idmap_[iv->var.get()] =
+        CastFromTo(tag, DataType::UInt(32), iv->var.dtype());
   }
 }
 

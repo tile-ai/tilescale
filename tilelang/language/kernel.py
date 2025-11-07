@@ -8,7 +8,6 @@ from tvm.script.ir_builder.tir.frame import TIRFrame, BlockFrame
 from tvm.ffi import register_object
 from tilelang import _ffi_api
 import threading
-from typing import List, Tuple, Optional
 
 # Ensure single-dimension kernel bindings can be unpacked like iterables.
 # especially for issue https://github.com/tile-ai/tilelang/issues/830
@@ -325,9 +324,9 @@ def Kernel(
 
 def ScopeKernel(
     *,
-    grid: Tuple | List,
-    cluster: Optional[Tuple | List] = None,
-    threads: int | List[int] | Tuple | None = None,
+    grid: tuple | list,
+    cluster: tuple | list | None = None,
+    threads: int | list[int] | tuple | None = None,
     is_cpu: bool = False,
     prelude: str | None = None,
 ):
@@ -421,7 +420,7 @@ def _collect_tag_bindings(prefix: str) -> list[Var]:
     cur = KernelLaunchFrame.Current()
     assert cur is not None, "KernelLaunchFrame is not initialized"
     order = {"x": 0, "y": 1, "z": 2}
-    slots: list[Optional[Var]] = [None, None, None]
+    slots: list[Var | None] = [None, None, None]
     for fr in cur.frames[:-1]:  # skip trailing attribute block
         iv = getattr(fr, "iter_var", None)
         if iv is None:
@@ -441,7 +440,7 @@ def _collect_tag_extents(prefix: str) -> list:
     cur = KernelLaunchFrame.Current()
     assert cur is not None, "KernelLaunchFrame is not initialized"
     order = {"x": 0, "y": 1, "z": 2}
-    slots: list[Optional[int]] = [None, None, None]
+    slots: list[int | None] = [None, None, None]
     for fr in cur.frames[:-1]:
         iv = getattr(fr, "iter_var", None)
         if iv is None:
@@ -457,7 +456,7 @@ def _collect_tag_extents(prefix: str) -> list:
     return [e for e in slots if e is not None]
 
 
-def get_cluster_binding(dim: Optional[int] = None):
+def get_cluster_binding(dim: int | None = None):
     """
     Returns the cluster-local binding for the given dimension.
     This equals blockIdx.{dim} % cluster[{dim}] inside ScopeKernel.
@@ -470,7 +469,7 @@ def get_cluster_binding(dim: Optional[int] = None):
     return binds[dim]
 
 
-def get_cluster_bindings() -> List:
+def get_cluster_bindings() -> list:
     """Returns all three cluster-local bindings (see get_cluster_binding)."""
     return [get_cluster_binding(i) for i in range(3)]
 
@@ -495,7 +494,7 @@ def get_grid_extent(dim: int = 0):
     return cur.get_block_extent(dim)
 
 
-def get_grid_extents() -> List:
+def get_grid_extents() -> list:
     """Returns all three logical grid extents (inside ScopeKernel)."""
     return [get_grid_extent(i) for i in range(3)]
 
@@ -507,7 +506,7 @@ def get_cluster_extent(dim: int = 0):
     return ext[dim]
 
 
-def get_cluster_extents() -> List:
+def get_cluster_extents() -> list:
     """Returns all three cluster extents (inside ScopeKernel)."""
     cluster = _current_cluster_shape_or_none()
     assert cluster is not None, "get_cluster_extents must be used inside T.ScopeKernel"

@@ -130,7 +130,8 @@ private:
         // so downstream wrappers (e.g., TLCUDASourceWrapper) can read it.
         thread_extent.Set(iv->thread_tag, op->value);
         // For host-side launch params, skip clusterIdx.* because cluster is
-        // configured at kernel launch level via attributes (cudaLaunchKernelEx).
+        // configured at kernel launch level via attributes
+        // (cudaLaunchKernelEx).
         if (tag.rfind("clusterIdx.", 0) != 0) {
           info_.launch_params.push_back(iv->thread_tag);
         }

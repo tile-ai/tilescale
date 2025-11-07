@@ -291,10 +291,11 @@ KernelLaunchFrame KernelLaunch(const Array<PrimExpr> &grid_size,
 
 // A scope kernel launch that separates logical grid and cluster shapes, but
 // lowers to a standard KernelLaunch with blocks = grid[i] * cluster[i].
-KernelLaunchFrame ScopeKernelLaunch(const Array<PrimExpr> &grid_size,
-                                    const Optional<Array<PrimExpr>> &cluster_size_opt,
-                                    const Optional<Array<PrimExpr>> &block_size_opt,
-                                    const Map<String, ffi::Any> &attrs) {
+KernelLaunchFrame
+ScopeKernelLaunch(const Array<PrimExpr> &grid_size,
+                  const Optional<Array<PrimExpr>> &cluster_size_opt,
+                  const Optional<Array<PrimExpr>> &block_size_opt,
+                  const Map<String, ffi::Any> &attrs) {
   ObjectPtr<KernelLaunchFrameNode> n = make_object<KernelLaunchFrameNode>();
 
   bool is_cpu_kernel_frame =

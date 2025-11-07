@@ -28,7 +28,7 @@ PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY_HIP = """
     return 0;
 """
 
-PREDEF_ATTRIBUTE_SET_CLUSTER_SIZE= """
+PREDEF_ATTRIBUTE_SET_CLUSTER_SIZE = """
     cudaError_t result_cluster_size_{0} = cudaFuncSetAttribute({0}, cudaFuncAttributeNonPortableClusterSizeAllowed, 1);
     if (result_cluster_size_{0} != cudaSuccess) {{
         snprintf(error_buf, ERROR_BUF_SIZE, "Failed to set the allowed cluster size with error: %s", cudaGetErrorString(result_cluster_size_{0}));
@@ -251,6 +251,7 @@ CLUSTER_LAUNCH_FUNC_PY = """
     }}
 """
 
+
 class BaseWrapper(ABC):
 
     @abstractmethod
@@ -426,9 +427,10 @@ class TLCUDASourceWrapper:
                                            desc_name_map, desc_name_var_map)
                 to_void_ptr = [f"(void*)&{arg}" for arg in args_list]
                 args_list = "{" + ", ".join(to_void_ptr) + "}"
-                kernel_launch_code += CLUSTER_LAUNCH_FUNC_PY.format(
-                    function_name, grid_str, block_str, cluster[0], cluster[1], cluster[2],
-                    smem_str, args_list)
+                kernel_launch_code += CLUSTER_LAUNCH_FUNC_PY.format(function_name, grid_str,
+                                                                    block_str, cluster[0],
+                                                                    cluster[1], cluster[2],
+                                                                    smem_str, args_list)
             elif self.use_cooperative_groups[function_name]:
                 args_list = func_call_args(declaration, function_args, function_params,
                                            desc_name_map, desc_name_var_map)
@@ -688,8 +690,7 @@ class TLCUDASourceWrapper:
                     function_name, dynamic_smem_buf)
         for function_name, cluster in self.cluster_info.items():
             if any(str(self._pythonic_expr(v)) != "1" for v in cluster):
-                call_str += PREDEF_ATTRIBUTE_SET_CLUSTER_SIZE.format(
-                    function_name)
+                call_str += PREDEF_ATTRIBUTE_SET_CLUSTER_SIZE.format(function_name)
         nvshmem_init_str = "nvshmem_init();\n\t" if self.use_nvshmem else ""
         # Format the initialization function using the call_str
         init_funcs = PREDEF_INIT_FUNC.format(nvshmem_init_str + call_str)
