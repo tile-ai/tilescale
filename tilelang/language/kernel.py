@@ -8,6 +8,7 @@ from tvm.script.ir_builder.tir.frame import TIRFrame, BlockFrame
 from tvm.ffi import register_object
 from tilelang import _ffi_api
 import threading
+from typing import List, Tuple, Optional
 
 # Ensure single-dimension kernel bindings can be unpacked like iterables.
 # especially for issue https://github.com/tile-ai/tilelang/issues/830
@@ -117,9 +118,16 @@ class KernelLaunchFrame(TIRFrame):
             # CPU kernel frame, return a list of for frame items.
             return _normalize_bindings([frame.vars[0] for frame in self.frames[0:-1]])
         else:
-            # Otherwise, return a list of iter_var.var objects (excluding the last 4 frames).
-            # As 4 frames for threadIdx.x, threadIdx.y, threadIdx.z and block frame with attributes
-            return _normalize_bindings([frame.iter_var.var for frame in self.frames[0:-4]])
+            # Otherwise, return blockIdx.* bindings only (exclude cluster and thread frames).
+            binds: list[Var] = []
+            for fr in self.frames[0:-4]:
+                iv = getattr(fr, "iter_var", None)
+                if iv is None:
+                    continue
+                tag = getattr(iv, "thread_tag", None)
+                if isinstance(tag, str) and tag.startswith("blockIdx."):
+                    binds.append(iv.var)
+            return _normalize_bindings(binds)
 
     def __exit__(self, ptype, value, trace):
         """
@@ -140,13 +148,24 @@ class KernelLaunchFrame(TIRFrame):
         stack = _get_current_stack()
         return stack.top() if stack else None
 
+    def _collect_block_iters(self) -> list:
+        frames = []
+        for fr in self.frames[:-4]:  # exclude thread dims and attr block
+            iv = getattr(fr, "iter_var", None)
+            if iv is None:
+                continue
+            tag = getattr(iv, "thread_tag", None)
+            if isinstance(tag, str) and tag.startswith("blockIdx."):
+                frames.append(iv)
+        return frames
+
     def get_block_extent(self, dim: int) -> int:
         """
         Returns the block extent for the given dimension.
         dim=0 corresponds to blockIdx.x, dim=1 to blockIdx.y, and dim=2 to blockIdx.z.
         """
-        iter_var = self.frames[dim].iter_var
-        return int(iter_var.dom.extent)
+        iters = self._collect_block_iters()
+        return int(iters[dim].dom.extent)
 
     def get_block_extents(self) -> list[int]:
         """
@@ -196,20 +215,21 @@ class KernelLaunchFrame(TIRFrame):
         Returns the block binding for the given dimension.
         dim=0 corresponds to blockIdx.x, dim=1 to blockIdx.y, and dim=2 to blockIdx.z.
         """
-        return self.frames[dim].iter_var.var
+        iters = self._collect_block_iters()
+        return iters[dim].var
 
     def get_block_bindings(self) -> list[Var]:
         """
         Returns all three block bindings.
         """
-        return [frame.iter_var.var for frame in self.frames[0:-4]]
+        return [iv.var for iv in self._collect_block_iters()]
 
     @property
     def blocks(self) -> list[Var]:
         """
         Returns the block indices from the topmost frame.
         """
-        return [frame.iter_var.var for frame in self.frames[0:-4]]
+        return [iv.var for iv in self._collect_block_iters()]
 
     @property
     def threads(self) -> list[Var]:
@@ -303,6 +323,58 @@ def Kernel(
     return _ffi_api.KernelLaunch(blocks, threads, attrs)
 
 
+def ScopeKernel(
+    *,
+    grid: Tuple | List,
+    cluster: Optional[Tuple | List] = None,
+    threads: int | List[int] | Tuple | None = None,
+    is_cpu: bool = False,
+    prelude: str | None = None,
+):
+    """Launch a kernel with explicit logical grid and cluster shapes.
+
+    This mimics T.Kernel, but accepts a `grid` and a `cluster` shape.
+    Under the hood it launches blocks = grid[i] * cluster[i].
+    """
+    attrs: dict = {}
+
+    if not is_cpu and threads is None:
+        threads = 128
+
+    # Normalize threads to 3D if provided
+    if isinstance(threads, int):
+        threads = [threads, 1, 1]
+    elif isinstance(threads, list):
+        threads = threads + [1] * (3 - len(threads))
+    elif isinstance(threads, tuple):
+        threads = list(threads) + [1] * (3 - len(threads))
+    else:
+        assert is_cpu, "threads must be an integer or a list/tuple of integers"
+
+    if is_cpu:
+        attrs["tilelang.is_cpu_kernel_frame"] = True
+
+    if prelude is not None:
+        attrs["pragma_import_c"] = prelude
+
+    # Normalize grid/cluster to up to 3 dims
+    def _norm_dims(x, fill=1):
+        if x is None:
+            return [fill, fill, fill]
+        if isinstance(x, (int, tir.PrimExpr)):
+            return [x, fill, fill]
+        if isinstance(x, tuple):
+            x = list(x)
+        if isinstance(x, list):
+            return x + [fill] * (3 - len(x))
+        raise TypeError("grid/cluster must be int, list or tuple")
+
+    grid3 = _norm_dims(grid)
+    cluster_opt = None if cluster is None else _norm_dims(cluster, 1)
+
+    return _ffi_api.ScopeKernelLaunch(grid3, cluster_opt, threads, attrs)
+
+
 def get_thread_binding(dim: int = 0) -> Var:
     """Returns the thread binding for the given dimension.
     """
@@ -329,6 +401,117 @@ def get_block_bindings() -> list[Var]:
     """
     assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
     return KernelLaunchFrame.Current().get_block_bindings()
+
+
+def _current_cluster_shape_or_none():
+    cur = KernelLaunchFrame.Current()
+    if cur is None:
+        return None
+    try:
+        last_block_frame = cur.frames[-1]
+        if not isinstance(last_block_frame, BlockFrame):
+            return None
+        cluster = last_block_frame.annotations.get("tilelang.cluster_shape")
+        return cluster
+    except Exception:
+        return None
+
+
+def _collect_tag_bindings(prefix: str) -> list[Var]:
+    cur = KernelLaunchFrame.Current()
+    assert cur is not None, "KernelLaunchFrame is not initialized"
+    order = {"x": 0, "y": 1, "z": 2}
+    slots: list[Optional[Var]] = [None, None, None]
+    for fr in cur.frames[:-1]:  # skip trailing attribute block
+        iv = getattr(fr, "iter_var", None)
+        if iv is None:
+            continue
+        tag = getattr(iv, "thread_tag", None)
+        if not isinstance(tag, str):
+            continue
+        if tag.startswith(prefix):
+            axis = tag.split(".")[-1]
+            idx = order.get(axis)
+            if idx is not None:
+                slots[idx] = iv.var
+    return [v for v in slots if v is not None]
+
+
+def _collect_tag_extents(prefix: str) -> list:
+    cur = KernelLaunchFrame.Current()
+    assert cur is not None, "KernelLaunchFrame is not initialized"
+    order = {"x": 0, "y": 1, "z": 2}
+    slots: list[Optional[int]] = [None, None, None]
+    for fr in cur.frames[:-1]:
+        iv = getattr(fr, "iter_var", None)
+        if iv is None:
+            continue
+        tag = getattr(iv, "thread_tag", None)
+        if not isinstance(tag, str):
+            continue
+        if tag.startswith(prefix):
+            axis = tag.split(".")[-1]
+            idx = order.get(axis)
+            if idx is not None:
+                slots[idx] = int(iv.dom.extent)
+    return [e for e in slots if e is not None]
+
+
+def get_cluster_binding(dim: Optional[int] = None):
+    """
+    Returns the cluster-local binding for the given dimension.
+    This equals blockIdx.{dim} % cluster[{dim}] inside ScopeKernel.
+    """
+    assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
+    binds = _collect_tag_bindings("clusterIdx.")
+    assert len(binds) > 0, "get_cluster_binding must be used inside T.ScopeKernel with cluster dims"
+    if dim is None:
+        return binds
+    return binds[dim]
+
+
+def get_cluster_bindings() -> List:
+    """Returns all three cluster-local bindings (see get_cluster_binding)."""
+    return [get_cluster_binding(i) for i in range(3)]
+
+
+def get_grid_extent(dim: int = 0):
+    """Returns the logical grid extent for the given dimension (inside ScopeKernel)."""
+    cur = KernelLaunchFrame.Current()
+    assert cur is not None, "KernelLaunchFrame is not initialized"
+    # Prefer annotated grid_shape if available
+    try:
+        last_block_frame = cur.frames[-1]
+        if isinstance(last_block_frame, BlockFrame):
+            grid_shape = last_block_frame.annotations.get("tilelang.grid_shape")
+            if grid_shape is not None:
+                return grid_shape[dim]
+    except Exception:
+        pass
+    # Fallback: try to read extents by tag
+    ext = _collect_tag_extents("blockIdx.")
+    if dim < len(ext):
+        return ext[dim]
+    return cur.get_block_extent(dim)
+
+
+def get_grid_extents() -> List:
+    """Returns all three logical grid extents (inside ScopeKernel)."""
+    return [get_grid_extent(i) for i in range(3)]
+
+
+def get_cluster_extent(dim: int = 0):
+    """Returns the cluster extent for the given dimension (inside ScopeKernel)."""
+    ext = _collect_tag_extents("clusterIdx.")
+    assert len(ext) > 0, "get_cluster_extent must be used inside T.ScopeKernel"
+    return ext[dim]
+
+
+def get_cluster_extents() -> List:
+    """Returns all three cluster extents (inside ScopeKernel)."""
+    cluster = _current_cluster_shape_or_none()
+    assert cluster is not None, "get_cluster_extents must be used inside T.ScopeKernel"
+    return [cluster[i] for i in range(3)]
 
 
 def get_thread_extent(dim: int = 0) -> int:

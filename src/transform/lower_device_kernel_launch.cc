@@ -125,8 +125,15 @@ private:
       // use the first appearance as def.
       if (!defined_thread.count(iv.get())) {
         defined_thread.insert(iv.get());
-        info_.launch_params.push_back(iv->thread_tag);
+        std::string tag = iv->thread_tag;
+        // Always record extent for thread/block/cluster in thread_extent
+        // so downstream wrappers (e.g., TLCUDASourceWrapper) can read it.
         thread_extent.Set(iv->thread_tag, op->value);
+        // For host-side launch params, skip clusterIdx.* because cluster is
+        // configured at kernel launch level via attributes (cudaLaunchKernelEx).
+        if (tag.rfind("clusterIdx.", 0) != 0) {
+          info_.launch_params.push_back(iv->thread_tag);
+        }
       }
     }
 

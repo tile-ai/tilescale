@@ -28,6 +28,14 @@ PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY_HIP = """
     return 0;
 """
 
+PREDEF_ATTRIBUTE_SET_CLUSTER_SIZE= """
+    cudaError_t result_cluster_size_{0} = cudaFuncSetAttribute({0}, cudaFuncAttributeNonPortableClusterSizeAllowed, 1);
+    if (result_cluster_size_{0} != cudaSuccess) {{
+        snprintf(error_buf, ERROR_BUF_SIZE, "Failed to set the allowed cluster size with error: %s", cudaGetErrorString(result_cluster_size_{0}));
+        return -1;
+    }}
+"""
+
 PREDEF_INIT_FUNC = """
 #define ERROR_BUF_SIZE 1024
 static char error_buf[ERROR_BUF_SIZE];
@@ -218,6 +226,30 @@ KERNEL_LAUNCH_FUNC_PY = """
 \t\traise RuntimeError(f"Failed to launch kernel {0}: {{res}}")
 """
 
+CLUSTER_LAUNCH_FUNC_PY = """
+    cudaLaunchConfig_t config = {{0}};
+    config.gridDim = {1};
+    config.blockDim = {2};
+
+    cudaLaunchAttribute attribute[1];
+    attribute[0].id = cudaLaunchAttributeClusterDimension;
+    attribute[0].val.clusterDim.x = {3};
+    attribute[0].val.clusterDim.y = {4};
+    attribute[0].val.clusterDim.z = {5};
+    config.attrs = attribute;
+    config.dynamicSmemBytes = {6};
+    config.stream = stream;
+    config.numAttrs = 1;
+
+    void *args[] = {7};
+
+    cudaError_t status_{0} = cudaLaunchKernelExC(&config, reinterpret_cast<const void*>
+    ({0}), args);
+    if (status_{0} != cudaSuccess) {{
+        snprintf(error_buf, ERROR_BUF_SIZE, "Failed to execute cudaLaunchKernelExC with error: %s", cudaGetErrorString(status_{0}));
+        return -1;
+    }}
+"""
 
 class BaseWrapper(ABC):
 
@@ -271,6 +303,7 @@ class TLCUDASourceWrapper:
         self.dynamic_smem_buf: int | None = None
         self.block_info: list[int] | dict = [1, 1, 1]
         self.grid_info: list[int] | dict = [1, 1, 1]
+        self.cluster_info: list[int] | dict = [1, 1, 1]
         self.tma_descriptor_args: dict | None = None
         self.use_distributed = env.USE_DISTRIBUTED
         self.use_nvshmem = env.USE_NVSHMEM
@@ -380,11 +413,23 @@ class TLCUDASourceWrapper:
 
             block_str = f"dim3({self._pythonic_expr(block_info[0])}, {self._pythonic_expr(block_info[1])}, {self._pythonic_expr(block_info[2])})"
             grid_str = f"dim3({self._pythonic_expr(grid_info[0])}, {self._pythonic_expr(grid_info[1])}, {self._pythonic_expr(grid_info[2])})"
+            cluster = self.cluster_info.get(function_name, [1, 1, 1])
             smem_str = 0 if dynamic_smem_buf is None else dynamic_smem_buf
             init_l2_persistent_map = self.generate_l2_persistent_map(function_name)
             kernel_launch_code += init_l2_persistent_map
 
-            if self.use_cooperative_groups[function_name]:
+            # Determine if cluster launch path is required
+            need_cluster = any(str(self._pythonic_expr(v)) != "1" for v in cluster)
+
+            if need_cluster:
+                args_list = func_call_args(declaration, function_args, function_params,
+                                           desc_name_map, desc_name_var_map)
+                to_void_ptr = [f"(void*)&{arg}" for arg in args_list]
+                args_list = "{" + ", ".join(to_void_ptr) + "}"
+                kernel_launch_code += CLUSTER_LAUNCH_FUNC_PY.format(
+                    function_name, grid_str, block_str, cluster[0], cluster[1], cluster[2],
+                    smem_str, args_list)
+            elif self.use_cooperative_groups[function_name]:
                 args_list = func_call_args(declaration, function_args, function_params,
                                            desc_name_map, desc_name_var_map)
                 assert len(function_params) == len(
@@ -550,6 +595,7 @@ class TLCUDASourceWrapper:
 
         block_info_map = {}
         grid_info_map = {}
+        cluster_info_map = {}
         dynamic_smem_buf_map = {}
         function_names = []
         use_cooperative_groups_map = {}
@@ -557,6 +603,7 @@ class TLCUDASourceWrapper:
             # Default block and grid configurations
             block_info = [1, 1, 1]
             grid_info = [1, 1, 1]
+            cluster_info = [1, 1, 1]
             function_name = g_var.name_hint
             attrs = func.attrs
             dynamic_smem_buf = None
@@ -573,9 +620,12 @@ class TLCUDASourceWrapper:
                         block_info["xyz".index(tag[-1])] = extent
                     elif "blockIdx" in tag:
                         grid_info["xyz".index(tag[-1])] = extent
+                    elif "clusterIdx" in tag:
+                        cluster_info["xyz".index(tag[-1])] = extent
             # Map the extracted configurations to each function
             block_info_map[function_name] = block_info
             grid_info_map[function_name] = grid_info
+            cluster_info_map[function_name] = cluster_info
             dynamic_smem_buf_map[function_name] = dynamic_smem_buf
             use_cooperative_groups_map[function_name] = use_cooperative_groups
             function_names.append(function_name)
@@ -583,6 +633,7 @@ class TLCUDASourceWrapper:
         # Store the mappings for use in code generation
         self.block_info = block_info_map
         self.grid_info = grid_info_map
+        self.cluster_info = cluster_info_map
         self.dynamic_smem_buf = dynamic_smem_buf_map
         self.use_cooperative_groups = use_cooperative_groups_map
 
@@ -635,6 +686,10 @@ class TLCUDASourceWrapper:
                 # Format the cudaFuncSetAttribute call for dynamic shared memory
                 call_str += PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY.format(
                     function_name, dynamic_smem_buf)
+        for function_name, cluster in self.cluster_info.items():
+            if any(str(self._pythonic_expr(v)) != "1" for v in cluster):
+                call_str += PREDEF_ATTRIBUTE_SET_CLUSTER_SIZE.format(
+                    function_name)
         nvshmem_init_str = "nvshmem_init();\n\t" if self.use_nvshmem else ""
         # Format the initialization function using the call_str
         init_funcs = PREDEF_INIT_FUNC.format(nvshmem_init_str + call_str)

@@ -31,10 +31,17 @@ from .math_intrinsics import *  # noqa: F401
 from .kernel import (
     Kernel,  # noqa: F401
     KernelLaunchFrame,  # noqa: F401
+    ScopeKernel,  # noqa: F401
     get_thread_binding,  # noqa: F401
     get_thread_bindings,  # noqa: F401
     get_block_binding,  # noqa: F401
     get_block_bindings,  # noqa: F401
+    get_cluster_binding,  # noqa: F401
+    get_cluster_bindings,  # noqa: F401
+    get_grid_extent,  # noqa: F401
+    get_grid_extents,  # noqa: F401
+    get_cluster_extent,  # noqa: F401
+    get_cluster_extents,  # noqa: F401
 )
 from .warpgroup import ws  # noqa: F401
 from .allocate import (

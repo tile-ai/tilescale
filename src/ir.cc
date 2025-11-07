@@ -289,6 +289,120 @@ KernelLaunchFrame KernelLaunch(const Array<PrimExpr> &grid_size,
   return KernelLaunchFrame(n);
 }
 
+// A scope kernel launch that separates logical grid and cluster shapes, but
+// lowers to a standard KernelLaunch with blocks = grid[i] * cluster[i].
+KernelLaunchFrame ScopeKernelLaunch(const Array<PrimExpr> &grid_size,
+                                    const Optional<Array<PrimExpr>> &cluster_size_opt,
+                                    const Optional<Array<PrimExpr>> &block_size_opt,
+                                    const Map<String, ffi::Any> &attrs) {
+  ObjectPtr<KernelLaunchFrameNode> n = make_object<KernelLaunchFrameNode>();
+
+  bool is_cpu_kernel_frame =
+      attrs.defined() && attrs.count(tilelang_is_cpu_kernel_frame);
+
+  // Normalize cluster size to up to 3 dims, defaulting to 1s
+  Array<PrimExpr> cluster_size = cluster_size_opt.value_or(Array<PrimExpr>());
+
+  auto get_cluster = [&](int i, DataType dt) -> PrimExpr {
+    if (cluster_size.defined() && i < static_cast<int>(cluster_size.size()))
+      return cluster_size[i];
+    return make_const(dt, 1);
+  };
+
+  if (is_cpu_kernel_frame) {
+    // CPU: Only serial grid loops
+    for (int i = 0; i < static_cast<int>(grid_size.size()); i++) {
+      n->frames.push_back(
+          MakeIterVarFrame("block_var_" + std::to_string(i), grid_size[i]));
+    }
+  } else {
+    if (cluster_size.defined()) {
+      ICHECK(cluster_size.size() <= 3);
+      if (!cluster_size.empty()) {
+        n->frames.push_back(LaunchThread(
+            CreateEnvThread("cx", "clusterIdx.x", cluster_size[0].dtype()),
+            cluster_size[0]));
+      }
+      if (cluster_size.size() > 1) {
+        n->frames.push_back(LaunchThread(
+            CreateEnvThread("cy", "clusterIdx.y", cluster_size[1].dtype()),
+            cluster_size[1]));
+      }
+      if (cluster_size.size() > 2) {
+        n->frames.push_back(LaunchThread(
+            CreateEnvThread("cz", "clusterIdx.z", cluster_size[2].dtype()),
+            cluster_size[2]));
+      }
+    }
+
+    ICHECK(grid_size.size() <= 3);
+    if (!grid_size.empty()) {
+      PrimExpr extent = grid_size[0];
+      n->frames.push_back(LaunchThread(
+          CreateEnvThread("bx", "blockIdx.x", extent.dtype()), extent));
+    }
+    if (grid_size.size() > 1) {
+      PrimExpr extent = grid_size[1];
+      n->frames.push_back(LaunchThread(
+          CreateEnvThread("by", "blockIdx.y", extent.dtype()), extent));
+    }
+    if (grid_size.size() > 2) {
+      PrimExpr extent = grid_size[2];
+      n->frames.push_back(LaunchThread(
+          CreateEnvThread("bz", "blockIdx.z", extent.dtype()), extent));
+    }
+
+    if (block_size_opt.defined()) {
+      const auto &block_size = block_size_opt.value();
+      ICHECK(block_size.size() <= 3);
+      if (!block_size.empty()) {
+        n->frames.push_back(LaunchThread(
+            CreateEnvThread("tx", "threadIdx.x", block_size[0].dtype()),
+            block_size[0]));
+      }
+      if (block_size.size() > 1) {
+        n->frames.push_back(LaunchThread(
+            CreateEnvThread("ty", "threadIdx.y", block_size[1].dtype()),
+            block_size[1]));
+      }
+      if (block_size.size() > 2) {
+        n->frames.push_back(LaunchThread(
+            CreateEnvThread("tz", "threadIdx.z", block_size[2].dtype()),
+            block_size[2]));
+      }
+    }
+  }
+
+  // Attach a terminal block to carry annotations including cluster/grid shapes
+  auto empty_block = tvm::script::ir_builder::tir::Block(MainBlockName);
+  Map<String, ffi::Any> annot;
+  if (attrs.defined()) {
+    annot = attrs;
+  }
+
+  // Normalize and attach grid/cluster shapes as annotations for Python helpers
+  Array<PrimExpr> grid_shape;
+  Array<PrimExpr> cluster_shape;
+  grid_shape.reserve(3);
+  cluster_shape.reserve(3);
+  for (int i = 0; i < 3; ++i) {
+    PrimExpr g = (i < static_cast<int>(grid_size.size()))
+                     ? grid_size[i]
+                     : make_const(DataType::Int(32), 1);
+    DataType dt = g.dtype();
+    grid_shape.push_back(g);
+    cluster_shape.push_back(get_cluster(i, dt));
+  }
+  annot.Set("tilelang.grid_shape", grid_shape);
+  annot.Set("tilelang.cluster_shape", cluster_shape);
+
+  empty_block->annotations = annot;
+
+  n->frames.push_back(empty_block);
+
+  return KernelLaunchFrame(n);
+}
+
 TVM_REGISTER_NODE_TYPE(KernelLaunchFrameNode);
 
 TVM_FFI_STATIC_INIT_BLOCK({
@@ -297,7 +411,8 @@ TVM_FFI_STATIC_INIT_BLOCK({
       .def("tl.Parallel", ParallelFor)
       .def("tl.Pipelined", PipelinedFor)
       .def("tl.Persistent", PersistentFor)
-      .def("tl.KernelLaunch", KernelLaunch);
+      .def("tl.KernelLaunch", KernelLaunch)
+      .def("tl.ScopeKernelLaunch", ScopeKernelLaunch);
 });
 
 class WarpSpecializeFrameNode : public TIRFrameNode {
