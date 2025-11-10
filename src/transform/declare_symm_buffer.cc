@@ -32,7 +32,6 @@ static int name_suffix_id =
 /* Create a PrimExpr to calculate the symmetry pointer given a local ptr and
  * target PE */
 PrimExpr CalculateSymmPtr(PrimExpr ptr, PrimExpr pe) {
-  PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
   PrimExpr local_base_ptr = Call(DataType::Handle(), tl::get_local_base(), {});
   PrimExpr offset_to_base =
       Sub(Call(DataType::Handle(), tl::get_uintptr_t(), {ptr}), local_base_ptr);
@@ -162,7 +161,7 @@ private:
           // Wrap with LetStmt that defines the symm pointer
           return LetStmt(symm_dst_var, symm_dst_ptr_expr, modified_stmt);
         } else if (parsed_op.as<CopyNode>()->is_remote_pull()) {
-          LOG(INFO) << "Found remote pull";
+          // LOG(INFO) << "Found remote pull";
 
           Buffer src = parsed_op.as<CopyNode>()->src;
           Array<Range> src_range = parsed_op.as<CopyNode>()->src_range;
@@ -196,7 +195,7 @@ private:
           Array<PrimExpr> src_region_args;
           src_region_args.push_back(src_load);
           src_region_args.push_back(
-              IntImm(DataType::Int(32), call_op->args[1]
+              IntImm(DataType::Int(32), call_op->args[0]
                                             .as<CallNode>()
                                             ->args[1]
                                             .as<IntImmNode>()
