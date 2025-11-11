@@ -155,7 +155,43 @@ Copy::Copy(Array<PrimExpr> args, BufferMap vmap) {
   if (args.size() >= 5) {
     node->eviction_policy = args[4].as<IntImmNode>()->value;
   }
+
+  // Parse remote copy params
+  if (args.size() >= 6) {
+    node->src_pe = args[5];
+  }
+  if (args.size() >= 7) {
+    node->dst_pe = args[6];
+  }
+
+  ICHECK(!(node->is_remote_push() && node->is_remote_pull()))
+      << "At least one of src_pe or dst_pe must be local rank";
+
+  if (node->is_remote_push()) {
+    ICHECK(node->dst.scope() == "global")
+        << "Can only copy to peer's global memory, but got "
+        << node->dst.scope();
+  } else if (node->is_remote_pull()) {
+    ICHECK(node->src.scope() == "global")
+        << "Can only pull from peer's global memory, but got "
+        << node->src.scope();
+  }
+
   data_ = std::move(node);
+}
+
+bool CopyNode::is_remote_push() const {
+  return !(dst_pe->IsInstance<IntImmNode>() &&
+           dst_pe.as<IntImmNode>()->value == -1);
+}
+
+bool CopyNode::is_remote_pull() const {
+  return !(src_pe->IsInstance<IntImmNode>() &&
+           src_pe.as<IntImmNode>()->value == -1);
+}
+
+bool CopyNode::is_remote_copy() const {
+  return is_remote_push() || is_remote_pull();
 }
 
 /**
@@ -1940,11 +1976,11 @@ Array<PrimExpr> TMAIm2ColDesc::EncodeCallArgs() const {
 
 // Register the Copy operation with TVM's TIR system
 // This makes the copy operation available for use in TVM programs
-// - Takes 5 inputs: src_buffer, dst_buffer, coalesced_width, disable_tma,
-// eviction_policy
+// - Takes 8 inputs: src_buffer, dst_buffer, coalesced_width, disable_tma,
+// eviction_policy, src_pe, dst_pe
 // - Marked as opaque since it has side effects (memory writes)
 TIR_REGISTER_TL_OP(Copy, copy)
-    .set_num_inputs(5)
+    .set_num_inputs(7)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 

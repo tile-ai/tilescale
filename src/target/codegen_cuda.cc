@@ -297,6 +297,8 @@ std::string CodeGenTileLangCUDA::Finish() {
 
   if (use_distributed_) {
     decl_stream << "uint64_t __constant__ meta_data[1024];\n";
+    decl_stream
+        << "uint64_t* host_meta_data = nullptr;\n"; // An alias of host_table
   }
   decl_stream << "#ifdef ENABLE_BF16\n";
   decl_stream << "#include <tl_templates/cuda/cuda_bf16_fallbacks.cuh>\n";
@@ -1539,10 +1541,20 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::get_num_ranks())) {
     this->use_distributed_ = true;
     os << "tl::get_num_ranks()";
+  } else if (op->op.same_as(tl::get_remote_base())) {
+    this->use_distributed_ = true;
+    std::string pe_str = this->PrintExpr(op->args[0]);
+    os << "tl::get_remote_base(" << pe_str << ")";
   } else if (op->op.same_as(tl::get_remote_base_ptr())) {
     this->use_distributed_ = true;
     std::string pe_str = this->PrintExpr(op->args[0]);
     os << "tl::get_remote_base_ptr(" << pe_str << ")";
+  } else if (op->op.same_as(tl::get_local_base())) {
+    this->use_distributed_ = true;
+    os << "tl::get_local_base()";
+  } else if (op->op.same_as(tl::get_local_base_ptr())) {
+    this->use_distributed_ = true;
+    os << "tl::get_local_base_ptr()";
   } else if (op->op.same_as(tl::get_uintptr_t())) {
     os << "tl::get_uintptr_t(" << this->PrintExpr(op->args[0]) << ")";
   } else if (op->op.same_as(builtin::tvm_fill_fragment())) {

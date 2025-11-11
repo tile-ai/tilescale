@@ -155,7 +155,7 @@ TL_DEVICE void sync_grid(uint32_t *barrier) {
 TL_DEVICE void barrier_all_blocks_sys(int offset, int rank, int num_ranks) {
 // Macro to compute the barrier pointer for a given target rank
 #define BARRIER_PTR(tgt_rank)                                                  \
-  (reinterpret_cast<int32_t *>(get_remote_base_ptr(tgt_rank) + offset))
+  (reinterpret_cast<int32_t *>(get_remote_base(tgt_rank) + offset))
 
   memory_fence_sys();
   __syncthreads();

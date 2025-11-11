@@ -32,6 +32,10 @@ using int4_t = int4;
 
 #define TL_DEVICE __forceinline__ __device__
 #define TL_DEVICE_NOINLINE __noinline__ __device__
+#define TL_HOST __forceinline__ __host__
+#define TL_HOST_NOINLINE __noinline__ __host__
+#define TL_HOST_DEVICE __forceinline__ __host__ __device__
+#define TL_HOST_DEVICE_NOINLINE __noinline__ __host__ __device__
 #define TL_PATCH
 
 #define TILELANG_CHECK(stmt)                                                   \

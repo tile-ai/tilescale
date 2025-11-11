@@ -300,3 +300,14 @@ def make_tensor(ptr: Var,
                 dtype: str = "float32",
                 strides: tuple[PrimExpr, ...] = None) -> tir.Buffer:
     return Tensor.from_ptr(ptr, shape, dtype, strides)
+
+
+def make_tensor_like(tensor,
+                     ptr: Var,
+                     shape: tuple[PrimExpr, ...] | None = None,
+                     dtype: str | None = None,
+                     strides: tuple[PrimExpr, ...] | None = None) -> tir.Buffer:
+    return Tensor.from_ptr(ptr if ptr is not None else tensor.data,
+                           shape if shape is not None else tensor.shape,
+                           dtype if dtype is not None else tensor.dtype,
+                           strides if strides is not None else tensor.strides)
