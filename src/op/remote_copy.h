@@ -32,10 +32,10 @@ public:
   Buffer dst_buffer;           ///< Destination buffer reference
   Array<PrimExpr> src_indices; ///< Source indices used for address computation
   Array<PrimExpr>
-      dst_indices;   ///< Destination indices used for address computation
-  std::string scope; ///< scope: {gpu, cluster}
+      dst_indices;       ///< Destination indices used for address computation
+  std::string scope;     ///< scope: {gpu, cluster}
   std::string workgroup; ///< workgroup: {warp, block}
-  PrimExpr mbarr_addr; ///< Address of the mbarrier (for cluster scope)
+  PrimExpr mbarr_addr;   ///< Address of the mbarrier (for cluster scope)
 
   static constexpr const char *_type_key = "tl.PutOp";
   TVM_DECLARE_FINAL_OBJECT_INFO(PutOpNode, TileOperatorNode);
@@ -131,7 +131,7 @@ public:
   Buffer dst_buffer;           ///< Destination buffer reference
   Array<PrimExpr> src_indices; ///< Source indices used for address computation
   Array<PrimExpr>
-      dst_indices;   ///< Destination indices used for address computation
+      dst_indices;       ///< Destination indices used for address computation
   std::string workgroup; ///< Scope: {warp, block}
 
   static constexpr const char *_type_key = "tl.GetOp";
@@ -170,7 +170,8 @@ public:
            equal(src_buffer, other->src_buffer) &&
            equal(dst_buffer, other->dst_buffer) &&
            equal(src_indices, other->src_indices) &&
-           equal(dst_indices, other->dst_indices) && workgroup == other->workgroup;
+           equal(dst_indices, other->dst_indices) &&
+           workgroup == other->workgroup;
   }
 
   void SHashReduce(SHashReducer hash_reduce) const {

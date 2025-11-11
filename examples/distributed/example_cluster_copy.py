@@ -5,18 +5,14 @@ import torch
 
 tilelang.disable_cache()
 
-@tilelang.jit(out_idx=[-1],
-              pass_configs={
+
+@tilelang.jit(
+    out_idx=[-1],
+    pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
     })
-def copy_cluster(M,
-                   N,
-                   block_M,
-                   block_N,
-                   threads,
-                   cluster,
-                   dtype="float16"):
+def copy_cluster(M, N, block_M, block_N, threads, cluster, dtype="float16"):
 
     @T.prim_func
     def main(
@@ -31,21 +27,21 @@ def copy_cluster(M,
             bx, by, _ = T.get_block_bindings()
             cx, cy, cz = T.get_cluster_bindings()
             tx = T.get_thread_binding(0)
-            r_idx = 0
-            s_idx = 0
 
             A_local = T.alloc_fragment((block_M, block_N), dtype)
             B_shared = T.alloc_shared((block_M, block_N), dtype)
             bar_ready = T.alloc_barrier(arrive_count=1)
-            
+
             if (tx == 0):
                 T.ptx_arrive_barrier_expect_tx(bar_ready[0], 2048)
 
             T.copy(A[bx * block_M, by * block_N], A_local)
             for i in T.serial(4):
                 T.put_thread(
-                    src=T.address_of(A_local[(i * 256 + tx * 8) // block_N, (i * 256 + tx * 8) % block_N]),
-                    dst=T.address_of(B_shared[(i * 256 + tx * 8) // block_N, (i * 256 + tx * 8) % block_N]),
+                    src=T.address_of(A_local[(i * 256 + tx * 8) // block_N,
+                                             (i * 256 + tx * 8) % block_N]),
+                    dst=T.address_of(B_shared[(i * 256 + tx * 8) // block_N,
+                                              (i * 256 + tx * 8) % block_N]),
                     size=0,
                     mbar=T.address_of(bar_ready),
                     dst_pe=(cx + 1) % cluster[0],
@@ -60,6 +56,7 @@ def copy_cluster(M,
 def ref_program(A):
     return A
 
+
 def main(M=4096, N=4096, cluster=None):
 
     BLOCK_M = 32
@@ -73,6 +70,8 @@ def main(M=4096, N=4096, cluster=None):
     # print(A)
     # print(B)
     assert torch.allclose(A, B, rtol=0.01, atol=0.01)
+    print("All checks passed.✅")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

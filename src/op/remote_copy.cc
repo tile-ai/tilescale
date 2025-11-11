@@ -88,17 +88,22 @@ PutOp::PutOp(Array<PrimExpr> args, BufferMap vmap) {
 }
 
 // TODO: generalize to other sizes
-Stmt LowerClusterCopy(PrimExpr src_addr, PrimExpr dst_addr, PrimExpr mbarr_addr) {
-  Array<PrimExpr> map_dst_args{ StringImm("tl::get_peer_addr"), dst_addr };
-  Array<PrimExpr> map_bar_args{ StringImm("tl::get_peer_addr"), mbarr_addr };
+Stmt LowerClusterCopy(PrimExpr src_addr, PrimExpr dst_addr,
+                      PrimExpr mbarr_addr) {
+  Array<PrimExpr> map_dst_args{StringImm("tl::get_peer_addr"), dst_addr};
+  Array<PrimExpr> map_bar_args{StringImm("tl::get_peer_addr"), mbarr_addr};
 
-  PrimExpr mapped_dst_addr = Call(DataType::Handle(), builtin::call_extern(), map_dst_args);
-  PrimExpr mapped_bar_addr = Call(DataType::Handle(), builtin::call_extern(), map_bar_args);
+  PrimExpr mapped_dst_addr =
+      Call(DataType::Handle(), builtin::call_extern(), map_dst_args);
+  PrimExpr mapped_bar_addr =
+      Call(DataType::Handle(), builtin::call_extern(), map_bar_args);
 
   Array<PrimExpr> stmt_args;
   stmt_args.push_back(StringImm("tl::st_async_128b"));
   stmt_args.push_back(mapped_dst_addr);
-  stmt_args.push_back(Call(DataType::Handle(), builtin::call_extern(), {StringImm("*reinterpret_cast<float4*>"), src_addr}));
+  stmt_args.push_back(
+      Call(DataType::Handle(), builtin::call_extern(),
+           {StringImm("*reinterpret_cast<float4*>"), src_addr}));
   stmt_args.push_back(mapped_bar_addr);
 
   return Evaluate(Call(DataType::Handle(), builtin::call_extern(), stmt_args));
@@ -113,13 +118,13 @@ Stmt PutOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
         << "cluster put only supports thread workgroup";
     return LowerClusterCopy(src_addr, dst_addr, mbarr_addr);
   } else {
-  if (workgroup == "warp") {
-    ss << "tl::cp_warp<" << copy_size << ", " << unroll_factor << ">";
-  } else if (workgroup == "block") {
-    ss << "tl::cp_block<" << copy_size << ">";
-  } else {
-    LOG(FATAL) << "Invalid workgroup: " << workgroup;
-  }
+    if (workgroup == "warp") {
+      ss << "tl::cp_warp<" << copy_size << ", " << unroll_factor << ">";
+    } else if (workgroup == "block") {
+      ss << "tl::cp_block<" << copy_size << ">";
+    } else {
+      LOG(FATAL) << "Invalid workgroup: " << workgroup;
+    }
   }
 
   new_args.push_back(StringImm(ss.str()));

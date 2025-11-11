@@ -18,12 +18,12 @@ def get_num_ranks():
 
 
 def put_thread(src: PrimExpr,
-             dst: PrimExpr,
-             size: PrimExpr,
-             mbar: PrimExpr | None = None,
-             dst_pe: PrimExpr | None = None,
-             unroll_factor: int = 4,
-             scope: str = "gpu"):
+               dst: PrimExpr,
+               size: PrimExpr,
+               mbar: PrimExpr | None = None,
+               dst_pe: PrimExpr | None = None,
+               unroll_factor: int = 4,
+               scope: str = "gpu"):
     """Put to a remote buffer with unrolled loop.
 
     Args:
@@ -40,11 +40,12 @@ def put_thread(src: PrimExpr,
         unroll_factor: int
             The unroll factor
         scope: str
-            The copy scopy, can be gpu or cluser.
+            The copy scopy, can be gpu or cluster.
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.put"), src, dst, size, dst_pe, unroll_factor, scope,
-                           "thread", mbar)
-    
+    return tir.call_intrin("handle", tir.op.Op.get("tl.put"), src, dst, size, dst_pe, unroll_factor,
+                           scope, "thread", mbar)
+
+
 def put_warp(src: PrimExpr,
              dst: PrimExpr,
              size: PrimExpr,
@@ -67,8 +68,8 @@ def put_warp(src: PrimExpr,
         unroll_factor: int
             The unroll factor
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.put"), src, dst, size, dst_pe, unroll_factor, scope,
-                           "warp")
+    return tir.call_intrin("handle", tir.op.Op.get("tl.put"), src, dst, size, dst_pe, unroll_factor,
+                           scope, "warp")
 
 
 def get_warp(src: PrimExpr,
@@ -96,7 +97,11 @@ def get_warp(src: PrimExpr,
                            "warp")
 
 
-def put_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, dst_pe: PrimExpr | None = None, scope: str = "gpu"):
+def put_block(src: PrimExpr,
+              dst: PrimExpr,
+              size: PrimExpr,
+              dst_pe: PrimExpr | None = None,
+              scope: str = "gpu"):
     """Put to a remote buffer.
 
     Args:
@@ -111,7 +116,7 @@ def put_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, dst_pe: PrimExpr | N
             If provided, the dst is a symmetric address, otherwise it is a UVA address.
             If not provided, the dst is a UVA address and dst_pe is None.
         scope: str
-            The copy scopy, can be gpu or cluser.
+            The copy scopy, can be gpu or cluster.
     """
     return tir.call_intrin(
         "handle", tir.op.Op.get("tl.put"), src, dst, size, dst_pe, 0, scope, "block"
