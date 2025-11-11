@@ -324,12 +324,18 @@ def tilescale_pythonic_expr(expr: tvm.tir.PrimExpr, dtype_map: dict[str, str] | 
             s, p = "tl::get_rank()", PRECEDENCE.get(tvm.tir.Call, ATOMIC_PRECEDENCE)
         elif isinstance(node, tvm.tir.Call) and node.op == tir.op.Op.get("tl.get_num_ranks"):
             s, p = "tl::get_num_ranks()", PRECEDENCE.get(tvm.tir.Call, ATOMIC_PRECEDENCE)
+        elif isinstance(node, tvm.tir.Call) and node.op == tir.op.Op.get("tl.get_remote_base"):
+            pe_str, _ = node_to_result_map[node.args[0]]
+            s, p = "tl::get_remote_base(" + pe_str + ")", PRECEDENCE.get(
+                tvm.tir.Call, ATOMIC_PRECEDENCE)
         elif isinstance(node, tvm.tir.Call) and node.op == tir.op.Op.get("tl.get_remote_base_ptr"):
             pe_str, _ = node_to_result_map[node.args[0]]
             s, p = "tl::get_remote_base_ptr(" + pe_str + ")", PRECEDENCE.get(
                 tvm.tir.Call, ATOMIC_PRECEDENCE)
         elif isinstance(node, tvm.tir.Call) and node.op == tir.op.Op.get("tl.get_local_base"):
             s, p = "tl::get_local_base()", PRECEDENCE.get(tvm.tir.Call, ATOMIC_PRECEDENCE)
+        elif isinstance(node, tvm.tir.Call) and node.op == tir.op.Op.get("tl.get_local_base_ptr"):
+            s, p = "tl::get_local_base_ptr()", PRECEDENCE.get(tvm.tir.Call, ATOMIC_PRECEDENCE)
         elif isinstance(node, tvm.tir.Call) and node.op == tir.op.Op.get("tl.get_uintptr_t"):
             ptr_str, _ = node_to_result_map[node.args[0]]
             s, p = "tl::get_uintptr_t(" + ptr_str + ")", PRECEDENCE.get(

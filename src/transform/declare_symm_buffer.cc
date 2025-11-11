@@ -39,7 +39,6 @@ PrimExpr CalculateSymmPtr(PrimExpr ptr, PrimExpr pe) {
                     offset_to_base;
   return result;
 }
-
 /*!
  * \brief Declare the symmetry buffer to prepare for operators
  * that need buffers on peer's symm heap
