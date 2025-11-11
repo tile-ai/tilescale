@@ -149,6 +149,11 @@ TL_DEVICE void sync_grid(uint32_t *barrier) {
   sync_grids_wait(token, barrier);
 }
 
+TL_DEVICE void sync_cluster() {
+  asm volatile("barrier.cluster.arrive.aligned;\n" : : );
+  asm volatile("barrier.cluster.wait.aligned;\n" : : );
+}
+
 // Synchronize all blocks at a system-level barrier
 // TODO(wt): Add sync-only option and timeout handling
 

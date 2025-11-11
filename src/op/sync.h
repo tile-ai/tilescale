@@ -60,6 +60,14 @@ TVM_DLL const Op &sync_barrier_gpu();
  */
 TVM_DLL const Op &sync_grid();
 
+
+/*!
+ * \brief Synchronize all blocks in a cluster
+ *
+ * void sync_cluster()
+ */
+TVM_DLL const Op &sync_cluster();
+
 /*!
  * \brief Synchronize all blocks at a system-level barrier
  *

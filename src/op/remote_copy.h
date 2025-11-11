@@ -33,7 +33,9 @@ public:
   Array<PrimExpr> src_indices; ///< Source indices used for address computation
   Array<PrimExpr>
       dst_indices;   ///< Destination indices used for address computation
-  std::string scope; ///< Scope: {warp, block}
+  std::string scope; ///< scope: {gpu, cluster}
+  std::string workgroup; ///< workgroup: {warp, block}
+  PrimExpr mbarr_addr; ///< Address of the mbarrier (for cluster scope)
 
   static constexpr const char *_type_key = "tl.PutOp";
   TVM_DECLARE_FINAL_OBJECT_INFO(PutOpNode, TileOperatorNode);
@@ -57,7 +59,9 @@ public:
         .def_ro("dst_buffer", &PutOpNode::dst_buffer)
         .def_ro("src_indices", &PutOpNode::src_indices)
         .def_ro("dst_indices", &PutOpNode::dst_indices)
-        .def_ro("scope", &PutOpNode::scope);
+        .def_ro("scope", &PutOpNode::scope)
+        .def_ro("workgroup", &PutOpNode::workgroup)
+        .def_ro("mbarr_addr", &PutOpNode::mbarr_addr);
   }
 
   bool SEqualReduce(const PutOpNode *other, SEqualReducer equal) const {
@@ -71,7 +75,9 @@ public:
            equal(src_buffer, other->src_buffer) &&
            equal(dst_buffer, other->dst_buffer) &&
            equal(src_indices, other->src_indices) &&
-           equal(dst_indices, other->dst_indices) && scope == other->scope;
+           equal(scope, other->scope) &&
+           equal(dst_indices, other->dst_indices) &&
+           equal(mbarr_addr, other->mbarr_addr);
   }
 
   void SHashReduce(SHashReducer hash_reduce) const {
@@ -88,6 +94,8 @@ public:
     hash_reduce(src_indices);
     hash_reduce(dst_indices);
     hash_reduce(scope);
+    hash_reduce(workgroup);
+    hash_reduce(mbarr_addr);
   }
 
   static constexpr bool _type_has_method_sequal_reduce = true;
@@ -124,7 +132,7 @@ public:
   Array<PrimExpr> src_indices; ///< Source indices used for address computation
   Array<PrimExpr>
       dst_indices;   ///< Destination indices used for address computation
-  std::string scope; ///< Scope: {warp, block}
+  std::string workgroup; ///< Scope: {warp, block}
 
   static constexpr const char *_type_key = "tl.GetOp";
   TVM_DECLARE_FINAL_OBJECT_INFO(GetOpNode, TileOperatorNode);
@@ -148,7 +156,7 @@ public:
         .def_ro("dst_buffer", &GetOpNode::dst_buffer)
         .def_ro("src_indices", &GetOpNode::src_indices)
         .def_ro("dst_indices", &GetOpNode::dst_indices)
-        .def_ro("scope", &GetOpNode::scope);
+        .def_ro("workgroup", &GetOpNode::workgroup);
   }
 
   bool SEqualReduce(const GetOpNode *other, SEqualReducer equal) const {
@@ -162,7 +170,7 @@ public:
            equal(src_buffer, other->src_buffer) &&
            equal(dst_buffer, other->dst_buffer) &&
            equal(src_indices, other->src_indices) &&
-           equal(dst_indices, other->dst_indices) && scope == other->scope;
+           equal(dst_indices, other->dst_indices) && workgroup == other->workgroup;
   }
 
   void SHashReduce(SHashReducer hash_reduce) const {
@@ -178,7 +186,7 @@ public:
     hash_reduce(dst_buffer);
     hash_reduce(src_indices);
     hash_reduce(dst_indices);
-    hash_reduce(scope);
+    hash_reduce(workgroup);
   }
 
   static constexpr bool _type_has_method_sequal_reduce = true;

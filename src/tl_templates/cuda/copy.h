@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common.h"
+#include <cutlass/arch/barrier.h>
 
 #ifdef __CUDA_ARCH_LIST__
 #if __CUDA_ARCH_LIST__ >= 900
@@ -374,6 +375,25 @@ template <int N, typename dtype_t>
 TL_DEVICE void cp_block(dtype_t *dst_addr, const uint64_t src_addr_uint64) {
   const dtype_t *src_addr = reinterpret_cast<const dtype_t *>(src_addr_uint64);
   nvshmem_cp_block<N>(dst_addr, src_addr);
+}
+
+template<typename T>
+TL_DEVICE void st_async_128b(void* dst_ptr, const T& data, const cutlass::arch::ClusterTransactionBarrier* mbar_ptr) {
+    long2 data_long2 = *reinterpret_cast<const long2*>(&data);
+    uint32_t dst_addr = cute::cast_smem_ptr_to_uint(dst_ptr);
+    uint32_t mbar_addr = cute::cast_smem_ptr_to_uint(mbar_ptr);
+    asm volatile (
+        "st.async.weak.shared::cluster.mbarrier::complete_tx::bytes.v2.s64 [%0], {%1, %2}, [%3]; \n"
+        :
+        : "r"(dst_addr), "l"(data_long2.x), "l"(data_long2.y), "r"(mbar_addr)
+    );
+}
+
+// FIXME: PEER_ADDR_MASK may be invalid for some cluster configurations
+static constexpr int PEER_ADDR_MASK = 16777216; // peer_addr = my_addr ^ PEER_ADDR_MASK.
+template<typename T>
+TL_DEVICE T* get_peer_addr(const T* p) {
+    return (T*)((int64_t)(p) ^ PEER_ADDR_MASK);
 }
 
 } // namespace tl

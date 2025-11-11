@@ -78,21 +78,48 @@ PutOp::PutOp(Array<PrimExpr> args, BufferMap vmap) {
   node->dst_pe = args[3];
   node->unroll_factor = args[4].as<IntImm>().value()->value;
   node->scope = args[5].as<StringImm>().value()->value;
+  node->workgroup = args[6].as<StringImm>().value()->value;
+  if (args.size() > 7) {
+    node->mbarr_addr = args[7];
+  }
   node->is_symmetric = node->dst_pe.defined();
   data_ = std::move(node);
   (void)vmap;
+}
+
+// TODO: generalize to other sizes
+Stmt LowerClusterCopy(PrimExpr src_addr, PrimExpr dst_addr, PrimExpr mbarr_addr) {
+  Array<PrimExpr> map_dst_args{ StringImm("tl::get_peer_addr"), dst_addr };
+  Array<PrimExpr> map_bar_args{ StringImm("tl::get_peer_addr"), mbarr_addr };
+
+  PrimExpr mapped_dst_addr = Call(DataType::Handle(), builtin::call_extern(), map_dst_args);
+  PrimExpr mapped_bar_addr = Call(DataType::Handle(), builtin::call_extern(), map_bar_args);
+
+  Array<PrimExpr> stmt_args;
+  stmt_args.push_back(StringImm("tl::st_async_128b"));
+  stmt_args.push_back(mapped_dst_addr);
+  stmt_args.push_back(Call(DataType::Handle(), builtin::call_extern(), {StringImm("*reinterpret_cast<float4*>"), src_addr}));
+  stmt_args.push_back(mapped_bar_addr);
+
+  return Evaluate(Call(DataType::Handle(), builtin::call_extern(), stmt_args));
 }
 
 Stmt PutOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   (void)analyzer;
   Array<PrimExpr> new_args;
   std::stringstream ss;
-  if (scope == "warp") {
+  if (scope == "cluster") {
+    ICHECK(workgroup == "thread")
+        << "cluster put only supports thread workgroup";
+    return LowerClusterCopy(src_addr, dst_addr, mbarr_addr);
+  } else {
+  if (workgroup == "warp") {
     ss << "tl::cp_warp<" << copy_size << ", " << unroll_factor << ">";
-  } else if (scope == "block") {
+  } else if (workgroup == "block") {
     ss << "tl::cp_block<" << copy_size << ">";
   } else {
-    LOG(FATAL) << "Invalid scope: " << scope;
+    LOG(FATAL) << "Invalid workgroup: " << workgroup;
+  }
   }
 
   new_args.push_back(StringImm(ss.str()));
@@ -181,7 +208,7 @@ GetOp::GetOp(Array<PrimExpr> args, BufferMap vmap) {
   node->copy_size = args[2];
   node->src_pe = args[3];
   node->unroll_factor = args[4].as<IntImm>().value()->value;
-  node->scope = args[5].as<StringImm>().value()->value;
+  node->workgroup = args[5].as<StringImm>().value()->value;
   node->is_symmetric = node->src_pe.defined();
   data_ = std::move(node);
   (void)vmap;
@@ -191,12 +218,12 @@ Stmt GetOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   (void)analyzer;
   Array<PrimExpr> new_args;
   std::stringstream ss;
-  if (scope == "warp") {
+  if (workgroup == "warp") {
     ss << "tl::cp_warp<" << copy_size << ", " << unroll_factor << ">";
-  } else if (scope == "block") {
+  } else if (workgroup == "block") {
     ss << "tl::cp_block<" << copy_size << ">";
   } else {
-    LOG(FATAL) << "Invalid scope: " << scope;
+    LOG(FATAL) << "Invalid workgroup: " << workgroup;
   }
 
   new_args.push_back(StringImm(ss.str()));

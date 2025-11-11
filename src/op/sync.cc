@@ -63,6 +63,9 @@ TIR_DEFINE_TL_BUILTIN(sync_barrier_gpu)
 TIR_DEFINE_TL_BUILTIN(sync_grid).set_num_inputs(1).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
+TIR_DEFINE_TL_BUILTIN(sync_cluster).set_num_inputs(0).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
+
 BarrierAllBlocksSysOp::BarrierAllBlocksSysOp(Array<PrimExpr> args,
                                              BufferMap vmap) {
   ObjectPtr<BarrierAllBlocksSysOpNode> node =

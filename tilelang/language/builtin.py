@@ -622,6 +622,15 @@ def sync_grid(barrier: PrimExpr):
     return tir.call_intrin("handle", tir.op.Op.get("tl.sync_grid"), address_of(barrier))
 
 
+def sync_cluster():
+    """Synchronize at a barrier for GPU-level synchronization in cooperative group style.
+
+    Args:
+        barrier: The barrier to synchronize at
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.sync_cluster"))
+
+
 def barrier_all_blocks_sys(barrier: PrimExpr):
     """Synchronize all blocks at a system-level barrier.
 
