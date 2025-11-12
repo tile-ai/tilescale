@@ -14,8 +14,8 @@ if version.parse(cuda_python_version) >= version.parse("12.8.0"):
     from cuda.bindings import runtime as cudart
 else:
     from cuda import cudart
-# NODES=2 NODE_RANK=0 ARNOLD_WORKER_0_HOST=ip0 bash tilelang/distributed/launch.sh ./examples/distributed/example_overlapping_allgather.py
-# NODES=2 NODE_RANK=1 ARNOLD_WORKER_0_HOST=ip0 bash tilelang/distributed/launch.sh ./examples/distributed/example_overlapping_allgather.py
+# NODES=2 NODE_RANK=0 MASTER_IP=ip0 bash tilelang/distributed/launch.sh ./examples/distributed/example_overlapping_allgather.py
+# NODES=2 NODE_RANK=1 MASTER_IP=ip0 bash tilelang/distributed/launch.sh ./examples/distributed/example_overlapping_allgather.py
 
 
 def internode_gather(M, local_world_size, block_M, threads):

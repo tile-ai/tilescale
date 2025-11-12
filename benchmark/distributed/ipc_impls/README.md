@@ -5,7 +5,7 @@ We launch only one block on each rank to avoid NVLink bandwidth as the bottlenec
 
 ## NVSHMEM-based push/pull
 ```bash
-GPUS=2 bash tilelang/distributed/launch.sh benchmark/distributed/ipc_impls/benchmark_nvshmem_p2p.py
+NPROC_PER_NODE=2 bash tilelang/distributed/launch.sh benchmark/distributed/ipc_impls/benchmark_nvshmem_p2p.py
 ```
 
 ## Unrolled-copy implemented in TileScale (*ours*)
