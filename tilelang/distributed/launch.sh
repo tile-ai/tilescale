@@ -17,7 +17,7 @@ export NCCL_DEBUG=${NCCL_DEBUG:="WARN"}  # set env var. `NCCL_DEBUG` to expected
 
 # set launch configurations
 nproc_per_node=${NPROC_PER_NODE:=$(nvidia-smi --list-gpus | wc -l)}  # set env var. `NPROC_PER_NODE` to # of GPUs per node
-nnodes=${NNODES:=1}  # set env var. `NODES` to # of nodes
+nnodes=${NODES:=1}  # set env var. `NODES` to # of nodes
 node_rank=${NODE_RANK:=0}  # set env var. `NODE_RANK` to the rank of current node
 
 master_ip=${MASTER_IP:="127.0.0.1"}

@@ -18,7 +18,7 @@ import pynvshmem
 import tilelang
 import tilelang.language as T
 from tilelang.carver.arch import driver
-from tilelang.distributed import init_distributed, dtype_map, perf_fn
+from tilelang.distributed import init_distributed, dtype_map, perf_fn, wait_eq
 from triton_dist.kernels.nvidia.allgather_gemm import ag_gemm, create_ag_gemm_context
 from functools import partial
 

@@ -13,8 +13,8 @@ In order to run inter-node distributed programs, we shall run the launch script 
 Example:
 ```bash
 # master 0
-NODES=2 NODE_RANK=0 MASTER_IP=ip0 bash tilelang/distributed/launch.sh ./examples/distributed/internode/example_overlapping_allgather.py
+NODES=2 NODE_RANK=0 MASTER_IP=ip0 bash tilelang/distributed/launch.sh ./examples/distributed/internode/example_allgather_internode.py
 # workder 1
-NODES=2 NODE_RANK=1 MASTER_IP=ip0 bash tilelang/distributed/launch.sh ./examples/distributed/internode/example_overlapping_allgather.py
+NODES=2 NODE_RANK=1 MASTER_IP=ip0 bash tilelang/distributed/launch.sh ./examples/distributed/internode/example_allgather_internode.py
 ```
 
