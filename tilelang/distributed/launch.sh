@@ -16,17 +16,17 @@ export NCCL_DEBUG=${NCCL_DEBUG:="WARN"}  # set env var. `NCCL_DEBUG` to expected
 # Choices: [VERSION, WARN(default), INFO, TRACE], 
 
 # set launch configurations
-nproc_per_node=${GPUS:=$(nvidia-smi --list-gpus | wc -l)}  # set env var. `GPUS` to # of GPUs per node
-nnodes=${NODES:=1}  # set env var. `NODES` to # of nodes
+nproc_per_node=${NPROC_PER_NODE:=$(nvidia-smi --list-gpus | wc -l)}  # set env var. `NPROC_PER_NODE` to # of GPUs per node
+nnodes=${NNODES:=1}  # set env var. `NODES` to # of nodes
 node_rank=${NODE_RANK:=0}  # set env var. `NODE_RANK` to the rank of current node
 
-master_addr=${ARNOLD_WORKER_0_HOST:="127.0.0.1"}
-if [ -z ${ARNOLD_WORKER_0_PORT} ]; then
-  master_port="8361"
+master_ip=${MASTER_IP:="127.0.0.1"}
+if [ -z ${MASTER_PORT} ]; then
+  master_port="$(( RANDOM % 1000 + 20000))"  # random port between 20000 and 21000
 else
-  master_port=$(echo "$ARNOLD_WORKER_0_PORT" | cut -d "," -f 1)
+  master_port=$(echo "$MASTER_PORT" | cut -d "," -f 1)
 fi
-additional_args="--rdzv_endpoint=${master_addr}:${master_port}"
+additional_args="--rdzv_endpoint=${master_ip}:${master_port}"
 IB_HCA=mlx5
 
 

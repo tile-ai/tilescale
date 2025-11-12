@@ -1,7 +1,7 @@
 # This benchmark aims to measure the bandwidth of NVHSMEM-based communication.
 # We launch only one block on each rank to avoid NVLink bandwidth as the bottleneck.
 
-# Usage: GPUS=2 bash tilelang/distributed/launch.sh benchmark/distributed/benchmark_nvshmem_p2p.py
+# Usage: NPROC_PER_NODE=2 bash tilelang/distributed/launch.sh benchmark/distributed/benchmark_nvshmem_p2p.py
 
 import os
 import tilelang
