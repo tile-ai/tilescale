@@ -152,8 +152,8 @@ def putmem_signal_block(dest, src, nelems, sig_addr, signal, sig_op, pe):
         sig_op: The type of update to be performed on the remote signal data object.
         pe: The PE ID of the destination PE.
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.PutmemSignalBlock"), dest, src, 
-                            nelems, sig_addr, signal, sig_op, pe)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.PutmemSignalBlock"), dest, src, nelems,
+                           sig_addr, signal, sig_op, pe)
 
 
 def putmem_signal_nbi_block(dest, src, nelems, sig_addr, signal, sig_op, pe):
