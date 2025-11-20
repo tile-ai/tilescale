@@ -31,8 +31,8 @@ dtype_map = {
     "float16": torch.float16,
     "float8_e4m3fn": torch.float8_e4m3fn,
     "float8_e5m2": torch.float8_e5m2,
-    "s8": torch.int8,
-    "s32": torch.int32,
+    "int8": torch.int8,
+    "int32": torch.int32,
     "float32": torch.float32,
 }
 
@@ -280,6 +280,14 @@ def set_signal(signal_tensor: torch.Tensor, signal: int, stream: torch.cuda.Stre
             cuda.CUstreamWriteValue_flags.CU_STREAM_WRITE_VALUE_DEFAULT,
         )
         CUDA_CHECK(err)
+    elif signal_tensor.dtype in (torch.int64, torch.uint64):
+        (err,) = cuda.cuStreamWriteValue64(
+            stream.cuda_stream,
+            signal_tensor.data_ptr(),
+            signal,
+            cuda.CUstreamWriteValue_flags.CU_STREAM_WRITE_VALUE_DEFAULT,
+        )
+        CUDA_CHECK(err)
     else:
         raise Exception(f"Unsupported signal dtype {signal_tensor.dtype}")
 
@@ -291,6 +299,14 @@ def wait_eq(signal_tensor: torch.Tensor,
     stream = stream or torch.cuda.current_stream()
     if signal_tensor.dtype == torch.int32:
         (err,) = cuda.cuStreamWaitValue32(
+            stream.cuda_stream,
+            signal_tensor.data_ptr(),
+            signal,
+            cuda.CUstreamWaitValue_flags.CU_STREAM_WAIT_VALUE_EQ,
+        )
+        CUDA_CHECK(err)
+    elif signal_tensor.dtype == torch.uint64:
+        (err,) = cuda.cuStreamWaitValue64(
             stream.cuda_stream,
             signal_tensor.data_ptr(),
             signal,
