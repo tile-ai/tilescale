@@ -100,12 +100,12 @@ Stmt PutOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     PrimExpr dst_addr_expr = MakeRemappedAddress(T, dst_buffer, dst_indices);
     PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
     PrimExpr local_base_ptr =
-        Call(DataType::Handle(), tl::get_remote_base_ptr(), {local_rank});
+        Call(DataType::Handle(), tl::get_remote_base(), {local_rank});
     PrimExpr offset_to_base =
         Sub(Call(DataType::Handle(), tl::get_uintptr_t(), {dst_addr_expr}),
             local_base_ptr);
     new_args.push_back(
-        Call(DataType::Handle(), tl::get_remote_base_ptr(), {dst_pe}) +
+        Call(DataType::Handle(), tl::get_remote_base(), {dst_pe}) +
         offset_to_base);
   } else {
     new_args.push_back(MakeRemappedAddress(T, dst_buffer, dst_indices));
@@ -206,12 +206,12 @@ Stmt GetOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     PrimExpr src_addr_expr = MakeRemappedAddress(T, src_buffer, src_indices);
     PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
     PrimExpr local_base_ptr =
-        Call(DataType::Handle(), tl::get_remote_base_ptr(), {local_rank});
+        Call(DataType::Handle(), tl::get_remote_base(), {local_rank});
     PrimExpr offset_to_base =
         Sub(Call(DataType::Handle(), tl::get_uintptr_t(), {src_addr_expr}),
             local_base_ptr);
     new_args.push_back(
-        Call(DataType::Handle(), tl::get_remote_base_ptr(), {src_pe}) +
+        Call(DataType::Handle(), tl::get_remote_base(), {src_pe}) +
         offset_to_base);
   } else {
     new_args.push_back(MakeRemappedAddress(T, src_buffer, src_indices));

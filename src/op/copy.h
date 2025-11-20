@@ -92,6 +92,15 @@ public:
   IntImm coalesced_width; // Width (in elements) for coalesced memory access
   Bool disable_tma = Bool(false); // Whether to disable TMA acceleration
 
+  // Params for remote copy
+  PrimExpr src_pe;    // Source PE for remote copy
+  PrimExpr dst_pe;    // Destination PE for remote copy
+  Buffer symm_buffer; // Symmetric buffer for remote copy
+
+  bool is_remote_copy() const;
+  bool is_remote_push() const;
+  bool is_remote_pull() const;
+
   mutable ParallelOp par_op_; // Optional associated parallelization operator
 
   enum class EvictionPolicy : uint8_t {

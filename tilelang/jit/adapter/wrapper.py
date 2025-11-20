@@ -6,7 +6,8 @@ from typing import Any
 from tvm import IRModule
 from tvm.target import Target
 from .utils import (is_metal_target, match_declare_kernel, match_declare_kernel_cpu, is_cuda_target,
-                    is_hip_target, is_cpu_target, get_annotated_mod, pythonic_expr)
+                    is_hip_target, is_cpu_target, get_annotated_mod, pythonic_expr,
+                    tilescale_pythonic_expr)
 import re
 import logging
 import textwrap
@@ -61,6 +62,7 @@ extern "C" int init_table(const void* host_table, size_t n) {{
         if (error_buf) std::snprintf(error_buf, 256, "cudaMemcpyToSymbol failed: %s", cudaGetErrorString(err));
         return static_cast<int>(err);
     }}
+    host_meta_data = (uint64_t*)host_table;
     return 0;
 }}
 """
@@ -283,6 +285,9 @@ class TLCUDASourceWrapper:
     def _pythonic_expr(self, expr: tvm.tir.PrimExpr) -> str:
         return pythonic_expr(expr, self._TYPE_MAP)
 
+    def _tilescale_pythonic_expr(self, expr: tvm.tir.PrimExpr) -> str:
+        return tilescale_pythonic_expr(expr, self._TYPE_MAP)
+
     def is_tma_descriptor_arg(self, arg_name: str) -> bool:
         return arg_name in self.prim_func.buffer_map
 
@@ -325,7 +330,12 @@ class TLCUDASourceWrapper:
             # Extract the function call arguments matching the function definition
             def maybe_desc(name: str, matches: list[str], i: int):
                 match = matches[i]
-                if not (match == name + "_desc" or match.startswith(name + "_desc_")):
+                if not (match == name + "_desc" \
+                        or match.startswith(name + "_desc_")
+                        or (match.startswith(name + "_symm_") and match.endswith("_desc"))
+                        # The last cases belongs to TMA copy from symm buffer
+                        # Check naming in src/transform/declare_symm_buffer.cc
+                    ):
                     return False
                 desc_decls = []
                 if desc_name_map is not None:
@@ -452,6 +462,8 @@ class TLCUDASourceWrapper:
                     f"TMA descriptor args too short: {len(args)} elements, expected at least 3")
 
             tma_create_str, _, dtype, tensor_rank, globalAddress, *remaining_args = args
+
+            globalAddress = self._tilescale_pythonic_expr(globalAddress)
 
             is_img2col = (tma_create_str.value == "__tvm_tensormap_create_im2col")
             dtype = self._pythonic_expr(dtype)

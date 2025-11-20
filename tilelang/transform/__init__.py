@@ -484,3 +484,15 @@ def LayoutReducer():
         The transform pass object produced by the FFI backend.
     """
     return _ffi_api.LayoutReducer()  # type: ignore
+
+
+# TileScale passes
+
+
+def DeclareSymmBuffer():
+    """
+    Declare symmetric buffer on peer's global memory.
+
+    This pass prepares for distributed operators, such as remote copy.
+    """
+    return _ffi_api.DeclareSymmBuffer()  # type: ignore

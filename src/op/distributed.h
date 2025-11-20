@@ -212,22 +212,37 @@ const Op &FcollectBlock();
 const Op &CpengineCpAsync();
 
 /*!
- * \brief tvm intrinsics for getting the rank of the current process
+ * \brief tilescale intrinsics for getting the rank of the current process
  */
 const Op &get_rank();
 
 /*!
- * \brief tvm intrinsics for getting the number of processes
+ * \brief tilescale intrinsics for getting the number of ranks
  */
 const Op &get_num_ranks();
 
 /*!
- * \brief tvm intrinsics for getting the remote base pointer
+ * \brief tilescale intrinsics for getting the remote base address (u64)
+ */
+const Op &get_remote_base();
+
+/*!
+ * \brief tilescale intrinsics for getting the remote base pointer
  */
 const Op &get_remote_base_ptr();
 
 /*!
- * \brief tvm intrinsics for getting the uintptr_t of a pointer
+ * \brief tilescale intrinsics for getting the local base address (u64)
+ */
+const Op &get_local_base();
+
+/*!
+ * \brief tilescale intrinsics for getting the local base pointer
+ */
+const Op &get_local_base_ptr();
+
+/*!
+ * \brief tilescale intrinsics for getting the u64 value of a pointer
  */
 const Op &get_uintptr_t();
 } // namespace tl

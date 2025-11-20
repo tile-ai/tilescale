@@ -94,7 +94,7 @@ Stmt BarrierAllBlocksSysOpNode::Lower(const LowerArgs &T,
   PrimExpr rank = Call(DataType::Int(64), tl::get_rank(), {});
   PrimExpr num_ranks = Call(DataType::Int(64), tl::get_num_ranks(), {});
   PrimExpr local_base_ptr =
-      Call(DataType::Handle(), tl::get_remote_base_ptr(), {rank});
+      Call(DataType::Handle(), tl::get_remote_base(), {rank});
   PrimExpr offset_to_base =
       Sub(Call(DataType::Handle(), tl::get_uintptr_t(), {bar_addr}),
           local_base_ptr);
