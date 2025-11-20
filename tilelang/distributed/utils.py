@@ -36,6 +36,15 @@ dtype_map = {
     "float32": torch.float32,
 }
 
+dsize_map = {
+    "bfloat16": 2,
+    "float16": 2,
+    "float8_e4m3fn": 1,
+    "float8_e5m2": 1,
+    "s8": 1,
+    "s32": 4,
+    "float32": 4,
+}
 
 def init_dist(local_rank: int, num_local_ranks: int):
     ip = os.getenv('MASTER_ADDR', '127.0.0.1')
