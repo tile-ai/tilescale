@@ -7,10 +7,26 @@ import tilelang.language.tir.op as _tir_op
 import functools
 
 
+class SerialStepSpec:
+    """A lightweight spec object for stepped serial loops.
+
+    This is consumed by the TileLang TIR parser override to realize
+    inclusive stepped loops like T.serial(start, end, step).
+    """
+
+    def __init__(self, start: PrimExpr, stop: PrimExpr, step: PrimExpr | int,
+                 annotations: dict[str, Any] | None):
+        self.start = start
+        self.stop = stop
+        self.step = step
+        self.annotations = annotations
+
+
 def serial(start: PrimExpr,
-           stop: PrimExpr = None,
+           stop: PrimExpr | None = None,
+           step: PrimExpr | int | None = None,
            *,
-           annotations: dict[str, Any] = None) -> frame.ForFrame:
+           annotations: dict[str, Any] = None) -> frame.ForFrame | SerialStepSpec:
     """The serial For statement.
 
     Parameters
@@ -21,6 +37,14 @@ def serial(start: PrimExpr,
     stop : PrimExpr
         The maximum value of iteration.
 
+    step : PrimExpr | int | None
+        Optional step size of iteration. When provided as the third positional
+        argument (or keyword), the loop iterates inclusively with stride `step`:
+        i = start, start+step, ..., <= end. If `end-start` is not divisible by
+        `step`, the last value will be the largest `start + k*step` such that
+        it does not exceed `end` (for positive step). Negative steps are not
+        currently supported.
+
     annotations : Dict[str, Any]
         The optional annotations of the For statement.
 
@@ -29,7 +53,17 @@ def serial(start: PrimExpr,
     res : frame.ForFrame
         The ForFrame.
     """
-    return _ir.serial(start=start, stop=stop, annotations=annotations)
+    # If no step is provided, delegate to the upstream builder (supports
+    # both one-arg and two-arg forms).
+    if step is None:
+        return _ir.serial(start=start, stop=stop, annotations=annotations)
+
+    # Step provided: return a spec for the parser override to lower into an
+    # inclusive stepped loop. Require `stop` to be provided explicitly.
+    if stop is None:
+        raise TypeError("T.serial(start, end, step): `end` must be provided when `step` is set")
+
+    return SerialStepSpec(start=start, stop=stop, step=step, annotations=annotations)
 
 
 def parallel(start: PrimExpr,
