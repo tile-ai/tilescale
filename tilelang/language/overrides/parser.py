@@ -189,11 +189,10 @@ def tilelang_visit_for(self, node: doc.For) -> None:  # pylint: disable=unused-a
         self.report_error(node.iter, "T.serial step must be a positive integer")
         return
 
-    # extent = floor_div(max(0, end - start), step) + 1
     # Use tvm.tir.floordiv via builder ops from tilelang.tir.ir if available
     # Avoid importing op wrappers; compute using arithmetic to keep it simple.
-    # We construct: (end - start) // step + 1, relying on TVMScript to convert.
-    extent = (end - start) // step_val + 1  # type: ignore[operator]
+    # We construct: T.ceildiv((end - start), step)
+    extent = T.ceildiv(end - start, step_val) # type: ignore[operator]
 
     for_frame = T.serial(0, extent, annotations=annotations)
     with self.var_table.with_frame():
