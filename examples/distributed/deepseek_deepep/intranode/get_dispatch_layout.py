@@ -1,21 +1,23 @@
 # For intranode only
-from __future__ import annotations
+# This op is non-distributed
+### python get_dispatch_layout.py
+
+import os, sys
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))  # add parent folder to path
 
 import torch
 import tilelang
 import tilelang.language as T
 from tilelang.profiler import do_bench
-from typing import tuple
-import sys
+from typing import Tuple
 from argparse import ArgumentParser
-
-tilelang.disable_cache()
+from utils import gen_inputs  # noqa: F403
 
 
 # TODO(wt): Add async functionality
 def get_dispatch_layout(
         topk_idx: torch.Tensor, num_experts: int,
-        num_ranks: int) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
+        num_ranks: int) -> Tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
     """Calculate the layout required for later communication.
 
     Arguments:
@@ -78,7 +80,7 @@ def get_dispatch_layout_kernel(
     experts_per_rank = num_experts // num_ranks
 
     @T.prim_func
-    def main(
+    def get_dispatch_layout_main(
             topk_idx: T.Tensor([num_tokens, num_topk], "int64"),  # type: ignore
             num_tokens_per_rank: T.Tensor([num_ranks], "int32"),  # type: ignore
             num_tokens_per_expert: T.Tensor([num_experts], "int32"),  # type: ignore
@@ -93,16 +95,13 @@ def get_dispatch_layout_kernel(
             expert_begin_idx = T.alloc_local([1], "int32")
             expert_begin_idx[0] = bid * experts_per_sm
             expert_end_idx = T.alloc_local([1], "int32")
-            expert_end_idx[0] = expert_begin_idx[0] + experts_per_sm
-            if expert_end_idx[0] > num_experts:
-                expert_end_idx[0] = num_experts  # tl does not support min/max
+            expert_end_idx[0] = T.min(expert_begin_idx[0] + experts_per_sm, num_experts)
 
             if expert_begin_idx[0] < expert_end_idx[0]:
-                for i in T.serial(0, T.ceildiv(num_tokens - tid,
-                                               threads)):  # tl does not support strided loop
+                for i in T.serial(tid, num_tokens, threads):
                     for j in T.serial(0, num_topk):
                         expert_idx = T.alloc_local([1], "int32")
-                        expert_idx[0] = T.cast(topk_idx[tid + i * threads, j], "int32")
+                        expert_idx[0] = T.cast(topk_idx[i, j], "int32")
                         if expert_begin_idx[0] <= expert_idx[0] and expert_idx[0] < expert_end_idx[
                                 0]:
                             tokens_per_expert_per_thread[tid,
@@ -121,9 +120,7 @@ def get_dispatch_layout_kernel(
             rank_begin_idx = T.alloc_local([1], "int32")
             rank_begin_idx[0] = (bid - sm_begin[0]) * ranks_per_sm
             rank_end_idx = T.alloc_local([1], "int32")
-            rank_end_idx[0] = rank_begin_idx[0] + ranks_per_sm
-            if rank_end_idx[0] > num_ranks:
-                rank_end_idx[0] = num_ranks  # tl does not support min/max
+            rank_end_idx[0] = T.min(rank_begin_idx[0] + ranks_per_sm, num_ranks)
 
             if rank_begin_idx[0] >= 0 and rank_begin_idx[0] < rank_end_idx[0]:
                 tokens_per_rank_per_thread = T.alloc_shared([threads, ranks_per_sm], "int32")
@@ -134,15 +131,14 @@ def get_dispatch_layout_kernel(
                 expert_end = T.alloc_local([1], "int32")
                 expert_end[0] = rank_end_idx[0] * experts_per_rank
 
-                for i in T.serial(0, T.ceildiv(num_tokens - tid,
-                                               threads)):  # tl does not support strided loop
+                for i in T.serial(tid, num_tokens, threads):
                     is_in_rank = T.alloc_local([ranks_per_sm], "int32")
                     T.clear(is_in_rank)
 
                     for j in T.serial(0, num_topk):
                         expert_idx = T.alloc_local([1], "int32")
                         rank_idx = T.alloc_local([1], "int32")
-                        expert_idx[0] = T.cast(topk_idx[tid + i * threads, j], "int32")
+                        expert_idx[0] = T.cast(topk_idx[i, j], "int32")
                         if expert_begin[0] <= expert_idx[0] and expert_idx[0] < expert_end[0]:
                             rank_idx[0] = expert_idx[0] // experts_per_rank - rank_begin_idx[0]
 
@@ -150,10 +146,10 @@ def get_dispatch_layout_kernel(
 
                     for j in T.serial(rank_begin_idx[0], rank_end_idx[0]):
                         if is_in_rank[j - rank_begin_idx[0]] > 0:
-                            is_token_in_rank[tid + i * threads, j] = True
+                            is_token_in_rank[i, j] = True
                             tokens_per_rank_per_thread[tid, j - rank_begin_idx[0]] += 1
                         else:
-                            is_token_in_rank[tid + i * threads, j] = False
+                            is_token_in_rank[i, j] = False
 
                 if rank_begin_idx[0] + tid < rank_end_idx[0]:
                     sum = T.alloc_local([1], "int32")
@@ -162,24 +158,7 @@ def get_dispatch_layout_kernel(
                         sum[0] += tokens_per_rank_per_thread[i, tid]
                     num_tokens_per_rank[rank_begin_idx[0] + tid] = sum[0]
 
-    return main
-
-
-# Check: DeepEP/tests/test_intranode.py:test_main
-def gen_topk_idx(num_tokens: int, num_topk: int, num_experts: int):
-    """Generate a random topk_idx tensor for testing.
-    Arguments:
-        num_tokens: the number of tokens.
-        num_topk: the number of top-k experts to select for each token.
-        num_experts: the number of experts.
-    Returns:
-        topk_idx: `[num_tokens, num_topk]` with `torch.int64`, the expert indices selected by each token,
-            `-1` means no selections.
-    """
-    assert num_topk <= num_experts, "num_topk must be less than or equal to num_experts"
-    scores = torch.randn((num_tokens, num_experts), dtype=torch.float32, device='cuda').abs() + 1
-    topk_idx = torch.topk(scores, num_topk, dim=-1, largest=True, sorted=False)[1]
-    return topk_idx
+    return get_dispatch_layout_main
 
 
 def test_get_dispatch_layout(
@@ -190,29 +169,27 @@ def test_get_dispatch_layout(
 ):
     try:
         import deep_ep_cpp  # noqa: F403
-    except Exception as e:
-        print(
-            "Please install DeepEP to run this test.",
-            flush=True,
-            file=sys.stderr,
-        )
-        raise e
+    except ModuleNotFoundError as e:
+        raise ModuleNotFoundError("Please install DeepEP to run this test.")
 
     # Validate correctness
-    topk_idx = gen_topk_idx(num_tokens, num_topk, num_experts)
-    buffer = deep_ep_cpp.Buffer(0, num_ranks, 0, 0, False, False)
+    topk_idx = gen_inputs(num_tokens, 1, num_topk, num_experts, num_ranks)[1]
+    buffer = deep_ep_cpp.Buffer(
+        0, # rank
+        num_ranks, 
+        0, # num_nvl_bytes
+        0, # num_rdma_bytes
+        False, # low_latency_mode
+        False, # explicit_destroy
+        False, # enable_shrink
+        False, # use fabric
+    )
 
-    def deepep_impl():
-        return buffer.get_dispatch_layout(topk_idx, num_experts, None, False, False)
+    ref_num_tokens_per_rank, _, ref_num_tokens_per_expert, ref_is_token_in_rank, _ = buffer.get_dispatch_layout(topk_idx, num_experts, None, False, False)
 
-    ref_num_tokens_per_rank, _, ref_num_tokens_per_expert, ref_is_token_in_rank, _ = deepep_impl()
+    num_tokens_per_rank, _, num_tokens_per_expert, is_token_in_rank = get_dispatch_layout(topk_idx, num_experts, num_ranks)
 
-    def tl_impl():
-        return get_dispatch_layout(topk_idx, num_experts, num_ranks)
-
-    num_tokens_per_rank, _, num_tokens_per_expert, is_token_in_rank = tl_impl()
-
-    assert torch.allclose(num_tokens_per_expert, ref_num_tokens_per_expert), \
+    assert torch.equal(num_tokens_per_expert, ref_num_tokens_per_expert), \
         f"num_tokens_per_expert mismatch, max err: {(num_tokens_per_expert - ref_num_tokens_per_expert).abs().max()}"
 
     assert torch.equal(is_token_in_rank, ref_is_token_in_rank), \
@@ -221,13 +198,13 @@ def test_get_dispatch_layout(
     assert torch.equal(num_tokens_per_rank, ref_num_tokens_per_rank), \
         f"num_tokens_per_rank mismatch, max err: {(num_tokens_per_rank - ref_num_tokens_per_rank).abs().max()}"
 
-    print("All checks passed.✅")
+    print("All checks passed for TileScale get_dispatch_layout.✅")
 
     # Benchmark
-    t1 = do_bench(deepep_impl)
-    t2 = do_bench(tl_impl)
+    t1 = do_bench(lambda: buffer.get_dispatch_layout(topk_idx, num_experts, None, False, False))
+    t2 = do_bench(lambda: get_dispatch_layout(topk_idx, num_experts, num_ranks))
     print(f"DeepEP: {t1:.3f} ms")
-    print(f"TileLang: {t2:.3f} ms")
+    print(f"TileScale: {t2:.3f} ms")
     print(f"Speedup: {t1 / t2:.2f}x")
 
 

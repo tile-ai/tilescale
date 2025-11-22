@@ -546,12 +546,29 @@ TVM_DLL const Op &atomicadd_elem_op();
 TVM_DLL const Op &atom_add();
 
 /*!
- * \brief tilelang intrinsic for atomic store with semantic.
- *
- *  This op is used to represent an atomic store operation with semantic in
- * tilelang.
+ * \brief tilelang intrinsic for warp reduction sum.
  */
-TVM_DLL const Op &st();
+TVM_DLL const Op &warp_reduce_sum();
+
+/*!
+ * \brief tilelang intrinsic for warp reduction max.
+ */
+TVM_DLL const Op &warp_reduce_max();
+
+/*!
+ * \brief tilelang intrinsic for warp reduction min.
+ */
+TVM_DLL const Op &warp_reduce_min();
+
+/*!
+ * \brief tilelang intrinsic for warp reduction bitand.
+ */
+TVM_DLL const Op &warp_reduce_bitand();
+
+/*!
+ * \brief tilelang intrinsic for warp reduction bitor.
+ */
+TVM_DLL const Op &warp_reduce_bitor();
 
 } // namespace tl
 } // namespace tvm

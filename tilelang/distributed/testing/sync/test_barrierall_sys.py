@@ -33,14 +33,14 @@ def get_test_barrierall_sys_kernel(num_ranks: int, blocks: int, threads: int):
             val[0] = 1
             T.atomic_add(A[tid], val[0])
 
-            T.barrier_all_blocks_sys(barrier)
+            T.barrier_blocks(barrier)
 
             if tid < 32:
                 T.put_warp(
                     src=T.address_of(A),
                     dst=T.address_of(B[bid, 0]),
                     size=threads,
-                    src_pe=rank[0] ^ 1,
+                    dst_pe=rank[0] ^ 1,
                     unroll_factor=4)
 
     return main

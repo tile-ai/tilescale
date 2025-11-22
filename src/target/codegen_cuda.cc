@@ -1522,12 +1522,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                             op->args[3].as<StringImmNode>()->value;
     os << func_name << "(" << this->PrintExpr(op->args[0]) << ", "
        << this->PrintExpr(op->args[1]) << ")";
-  } else if (op->op.same_as(tl::st())) {
-    this->PrintIndent();
-    std::string func_name = "tl::st_" + op->args[2].as<StringImmNode>()->value +
-                            "_" + op->args[3].as<StringImmNode>()->value;
-    this->stream << func_name << "(" << this->PrintExpr(op->args[0]) << ", "
-                 << this->PrintExpr(op->args[1]) << ");\n";
   } else if (op->op.same_as(tl::get_clock())) {
     os << "get_clock()";
   } else if (op->op.same_as(tl::loop_break())) {
@@ -1545,6 +1539,16 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     os << "tl::get_remote_base_ptr(" << pe_str << ")";
   } else if (op->op.same_as(tl::get_uintptr_t())) {
     os << "tl::get_uintptr_t(" << this->PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::warp_reduce_sum())) {
+    os << "tl::warp_reduce_sum(" << this->PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::warp_reduce_max())) {
+    os << "tl::warp_reduce_max(" << this->PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::warp_reduce_min())) {
+    os << "tl::warp_reduce_min(" << this->PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::warp_reduce_bitand())) {
+    os << "tl::warp_reduce_bitand(" << this->PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::warp_reduce_bitor())) {
+    os << "tl::warp_reduce_bitor(" << this->PrintExpr(op->args[0]) << ")";
   } else if (op->op.same_as(builtin::tvm_fill_fragment())) {
     need_mma_h_ = true;
     ICHECK_EQ(op->args.size(), 6U);

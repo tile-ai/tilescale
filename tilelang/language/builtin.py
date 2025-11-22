@@ -622,14 +622,23 @@ def sync_grid(barrier: PrimExpr):
     return tir.call_intrin("handle", tir.op.Op.get("tl.sync_grid"), address_of(barrier))
 
 
-def barrier_all_blocks_sys(barrier: PrimExpr):
+def barrier_blocks(barrier: PrimExpr):
+    """Barrier all blocks at a system-level barrier.
+    Compare to sync_blocks, barrier_blocks have an extra system-level fence effect
+
+    Args:
+        barrier: The barrier to synchronize at, should be [num_ranks] of int32
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.barrier_blocks"), address_of(barrier), 1)  # whether need fence
+
+
+def sync_blocks(barrier: PrimExpr):
     """Synchronize all blocks at a system-level barrier.
 
     Args:
         barrier: The barrier to synchronize at, should be [num_ranks] of int32
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.barrier_all_blocks_sys"),
-                           address_of(barrier))
+    return tir.call_intrin("handle", tir.op.Op.get("tl.barrier_blocks"), address_of(barrier), 0)  # whether need fence
 
 
 def fence_cta():
@@ -737,18 +746,26 @@ def atom_add(barrier: PrimExpr, value: PrimExpr, scope: str = "gpu", sem: str = 
                            scope)
 
 
-def st(barrier: PrimExpr, value: PrimExpr, scope: str = "gpu", sem: str = "relaxed"):
-    """Store a value to a given address with specified scope and semantic.
+def st(
+    dst: PrimExpr, 
+    value: PrimExpr, 
+    scope: str = "gpu", 
+    sem: str = "relaxed",
+    dst_pe: tir.PrimExpr | tir.IntImm | None = -1, 
+):
+    """Store a value to a given address with specified scope, semantic, and optional destination PE.
 
     Args:
-        address: The address to store the value to
-        value: The value to store
-        scope: The memory scope (default is "gpu")
-        semantic: The memory semantic (default is "relaxed")
+        dst: The destination to store the value to.
+        value: The value to store.
+        scope: The memory scope, either "gpu" (default) or "sys".
+        sem: The memory semantic, either "relaxed" (default) or "release".
+        dst_pe: The destination processing element (PE) identifier. 
+                Use -1 (default) for local PE, or a non-negative integer to target a remote PE.
 
     Returns:
-        tir.Call: A handle to the store operation
+        tir.Call: A handle to the store operation.
     """
     assert scope in ["gpu", "sys"], "Scope must be one of 'gpu', or 'sys'."
     assert sem in ["relaxed", "release"], "Semantic must be one of 'relaxed', or 'release'."
-    return tir.call_intrin("handle", tir.op.Op.get("tl.st"), address_of(barrier), value, sem, scope)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.st"), address_of(dst), value, sem, scope, dst_pe)
