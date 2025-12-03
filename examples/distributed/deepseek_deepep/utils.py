@@ -127,7 +127,7 @@ def unpack_bias(bias: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]):
 
 # Check: DeepEP/tests/test_intranode.py:test_main
 def gen_inputs(num_tokens: int, hidden: int, num_topk: int, num_experts: int, num_ranks: int):
-    """Generate random inputs for testing purpose.
+    """Generate random inputs for intranode testing purpose.
     Args:
         num_tokens: the number of tokens.
         hidden: the hidden dimension.
@@ -158,12 +158,55 @@ def gen_inputs(num_tokens: int, hidden: int, num_topk: int, num_experts: int, nu
     return x, topk_idx, topk_weights, rank_idx
 
 
+def gen_internode_inputs(num_tokens: int, hidden: int, num_topk_groups: int, num_topk: int, num_experts: int, num_ranks: int, num_nodes: int):
+    """
+    Generate random inputs with group restriction (native in DeepSeek MoE) for internode testing purpose.
+    Args:
+        num_tokens: the number of tokens.
+        hidden: the hidden dimension.
+        num_topk_groups: the number of top-k groups.
+        num_topk: the number of top-k experts to select for each token.
+        num_experts: the number of experts.
+        num_ranks: the number of total ranks.
+        num_nodes: the number of nodes.
+
+    Returns:
+        x: `[num_tokens, hidden]` with `torch.bfloat16`, the input to MoE layer.
+        topk_idx: `[num_tokens, num_topk]` with `torch.int64`, the expert indices selected by each token,
+            `-1` means no selections.
+        topk_weights: `[num_tokens, num_topk]` with `torch.float32`, the weights corresponding to 
+            each selected expert for each token.
+        rank_idx: `[num_tokens, num_topk]` with `torch.int32`, the rank indices corresponding to 
+            each selected expert, `-1` means no selections.
+        rdma_rank_idx: `[num_tokens, num_topk]` with `torch.int32`, the RDMA rank indices corresponding to 
+            each selected expert, `-1` means no selections.
+    """
+    assert num_topk <= num_experts, "num_topk must be less than or equal to num_experts"
+    assert num_experts % num_ranks == 0, "num_experts must be divisible by num_ranks"
+    
+    x = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
+    scores = torch.randn((num_tokens, num_experts), dtype=torch.float32, device='cuda').abs() + 1
+    group_scores = scores.view(num_tokens, num_nodes, -1).amax(dim=-1)
+    group_idx = torch.topk(group_scores, k=num_topk_groups, dim=-1, sorted=False).indices
+    masked_scores = create_grouped_scores(scores, group_idx, num_nodes)
+    topk_idx = torch.topk(masked_scores, num_topk, dim=-1, largest=True, sorted=False)[1]
+    topk_weights = torch.randn((num_tokens, num_topk), dtype=torch.float32, device='cuda')
+    rank_idx = topk_idx // (num_experts // num_ranks)
+    rank_idx.masked_fill_(topk_idx == -1, -1)
+    inplace_unique(rank_idx, num_ranks)
+    num_local_ranks = num_ranks // num_nodes
+    rdma_rank_idx = rank_idx // num_local_ranks
+    rdma_rank_idx.masked_fill_(rank_idx == -1, -1)
+    inplace_unique(rdma_rank_idx, num_nodes)
+    return x, topk_idx, topk_weights, rank_idx, rdma_rank_idx
+
+
 def inplace_unique(x: torch.Tensor, num_slots: int):
     """
     Keep at most `num_slots` different values in each row of `x`, 
     and fill `x` with -1 in other positions.
     """
-    assert x.dim() == 2 and num_slots <= x.size(-1)
+    assert x.dim() == 2
     mask = x < 0
     x_padded = x.masked_fill(mask, num_slots)
     bin_count = torch.zeros((x.size(0), num_slots + 1), dtype=x.dtype, device=x.device)
@@ -175,6 +218,14 @@ def inplace_unique(x: torch.Tensor, num_slots: int):
     x[:, :].fill_(-1)
     valid_len = min(num_slots, x.size(1))
     x[:, :valid_len] = sorted_bin_idx[:, :valid_len]
+
+
+def create_grouped_scores(scores: torch.Tensor, group_idx: torch.Tensor, num_groups: int):
+    num_tokens, num_experts = scores.shape
+    scores = scores.view(num_tokens, num_groups, -1)
+    mask = torch.zeros((num_tokens, num_groups), dtype=torch.bool, device=scores.device)
+    mask = mask.scatter_(1, group_idx, True).unsqueeze(-1).expand_as(scores)
+    return (scores * mask).view(num_tokens, num_experts)
 
 
 # Check: csrc/deep_ep.cpp:Buffer::Buffer
