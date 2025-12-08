@@ -299,6 +299,10 @@ std::string CodeGenTileLangCUDA::Finish() {
     decl_stream << "#include <nvshmemx.h>\n";
   }
 
+  if (use_ibgda_) {
+    decl_stream << "#include <tl_templates/cuda/ibgda_device.cuh>\n";
+  }
+
   if (need_cooperative_groups_) {
     decl_stream << "#include <cooperative_groups.h>\n";
   }
@@ -2890,6 +2894,23 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->use_distributed_ = true;
     std::string ptr_str = this->PrintExpr(op->args[0]);
     os << "tl::get_uintptr_t(" << ptr_str << ")";
+    os << "__all_sync(" << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::ibgda_get_qps_per_rdma_rank())) {
+    this->use_ibgda_ = true;
+    os << "ibgda_get_qps_per_rdma_rank()";
+  } else if (op->op.same_as(tl::ibgda_quiet())) {
+    this->use_ibgda_ = true;
+    os << "ibgda_quiet(" << PrintExpr(op->args[0]) << ", " << PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::ibgda_put_nbi_warp())) {
+    this->use_ibgda_ = true;
+    int always_do_post_send = Downcast<IntImm>(op->args[7])->value;
+    std::string always_do_post_send_str = always_do_post_send ? "true" : "false";
+    os << "ibgda_put_nbi_warp<" << always_do_post_send_str << ">(" << PrintExpr(op->args[0]) << ", " << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2]) << ", " << PrintExpr(op->args[3]) << ", " << PrintExpr(op->args[4]) << ", " << PrintExpr(op->args[5]) << ", " << PrintExpr(op->args[6]) << ")";
+  } else if (op->op.same_as(tl::ibgda_amo_nonfetch_add())) {
+    this->use_ibgda_ = true;
+    int is_local_copy = Downcast<IntImm>(op->args[4])->value;
+    std::string is_local_copy_str = is_local_copy ? "true" : "false";
+    os << "ibgda_amo_nonfetch_add<" << is_local_copy_str << ">(" << PrintExpr(op->args[0]) << ", " << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2]) << ", " << PrintExpr(op->args[3]) << ", " << PrintExpr(op->args[4]) << ")";
   } else {
     // Note: tl.put, tl.get, tl.wait are TileOperators handled through
     // remote_copy.cc They are lowered to call_extern with

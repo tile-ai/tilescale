@@ -637,7 +637,25 @@ TVM_DLL const Op &warp_any();
  */
 TVM_DLL const Op &warp_all();
 
-// Note: ld and st are TileOperators defined in remote_copy.h, not builtins
+/*!
+ * \brief tilelang intrinsic for getting the number of QPs per RDMA rank.
+ */
+TVM_DLL const Op &ibgda_get_qps_per_rdma_rank();
+
+/*!
+ * \brief tilelang intrinsic for quieting a QP.
+ */
+TVM_DLL const Op &ibgda_quiet();
+
+/*!
+ * \brief tilelang intrinsic for putting a NBI warp.
+ */
+TVM_DLL const Op &ibgda_put_nbi_warp();
+
+/*!
+ * \brief tilelang intrinsic for AMO non-fetch add.
+ */
+TVM_DLL const Op &ibgda_amo_nonfetch_add();
 
 } // namespace tl
 } // namespace tvm

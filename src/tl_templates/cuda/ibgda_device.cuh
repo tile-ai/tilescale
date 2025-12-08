@@ -123,6 +123,10 @@ TL_DEVICE nvshmemi_ibgda_device_qp_t* ibgda_get_rc(int pe, int id) {
                 .rcs[pe * num_rc_per_pe * state->num_devices_initialized + id % (num_rc_per_pe * state->num_devices_initialized)];
 }
 
+TL_DEVICE int ibgda_get_qps_per_rdma_rank() {
+    return ibgda_get_state()->num_rc_per_pe * ibgda_get_state()->num_devices_initialized;
+}
+
 TL_DEVICE void ibgda_lock_acquire(int* lock) {
     while (atomicCAS(lock, 0, 1) == 1)
         ;
