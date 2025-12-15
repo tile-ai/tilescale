@@ -824,7 +824,8 @@ def warp_any(value, mask = -1):
     Returns:
         result (int): The result of the vote.
     """
-    return tir.call_intrin("int32", tir.op.Op.get("tl.warp_any"), value, mask)
+    # FIXME: use bool
+    return tir.call_intrin("bool", tir.op.Op.get("tl.warp_any"), value, mask)
 
 
 def warp_all(value, mask = -1):
@@ -837,4 +838,104 @@ def warp_all(value, mask = -1):
     Returns:
         result (int): The result of the vote.
     """
-    return tir.call_intrin("int32", tir.op.Op.get("tl.warp_all"), value, mask)
+    # FIXME: use bool
+    return tir.call_intrin("bool", tir.op.Op.get("tl.warp_all"), value, mask)
+
+def fence_barrier_init():
+    return tir.call_intrin("handle", tir.op.Op.get("tl.fence_barrier_init"))
+
+def bar_sync(id, count):
+    return tir.call_intrin("handle", tir.op.Op.get("tl.bar_sync"), id, count)
+
+def warp_shfl(mask, value, srcLane, width = 32):
+    return tir.call_intrin(value.dtype, tir.op.Op.get("tl.warp_shfl"), mask, value, srcLane, width)
+
+def nvshmemi_ibgda_amo_nonfetch_add(
+    buffer,
+    value,
+    pe,
+    qp_id,
+    is_local_copy=False,
+):
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.nvshmemi_ibgda_amo_nonfetch_add"),
+        address_of(buffer),
+        value,
+        pe,
+        qp_id,
+        is_local_copy,
+    )
+
+def nanosleep(ns):
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.nanosleep"),
+        ns,
+    )
+
+def nvshmemi_ibgda_put_nbi_warp(
+    req_rptr,
+    req_lptr,
+    bytes,
+    dst_pe,
+    qp_id,
+    lane_id,
+    message_idx,
+    kAlwaysDoPostSend = False,
+):
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.nvshmemi_ibgda_put_nbi_warp"),
+        kAlwaysDoPostSend,
+        req_rptr,
+        req_lptr,
+        bytes,
+        dst_pe,
+        qp_id,
+        lane_id,
+        message_idx,
+    )
+
+def mbarrier_init(
+    smem_ptr,
+    count,
+):
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.mbarrier_init"),
+        smem_ptr,
+        count,
+    )
+
+
+def nvshmem_sync_all():
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.nvshmem_sync_all"),
+    )
+
+def nvshmemi_ibgda_quiet(
+    dst_pe,
+    qp_id,
+):
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.nvshmemi_ibgda_quiet"),
+        dst_pe,
+        qp_id,
+    )
+
+def device_assert(condition,):
+    """
+    TODO:
+    """
+    ...
+
+def ibgda_get_state(field: str, dtype: str = "int32"):
+    # FIXME: 
+    return tir.call_intrin(
+        dtype,
+        tir.op.Op.get("tl.ibgda_get_state"),
+        field
+    )

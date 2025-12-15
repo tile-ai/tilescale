@@ -237,4 +237,8 @@ TL_DEVICE void wait_lt(P ptr, T val) {
   while (ld_volatile_global(flag_ptr) >= val);
 }
 
+TL_DEVICE void fence_barrier_init() {
+    asm volatile("fence.mbarrier_init.release.cluster; \n" ::);
+}
+
 } // namespace tl

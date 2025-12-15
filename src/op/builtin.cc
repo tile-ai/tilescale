@@ -294,8 +294,9 @@ TIR_DEFINE_TL_BUILTIN(tl_shuffle_elect)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kPure));
 
+// Note: get_clock reads a state, not a pure function.
 TIR_DEFINE_TL_BUILTIN(get_clock).set_num_inputs(0).set_attr<TCallEffectKind>(
-    "TCallEffectKind", Integer(CallEffectKind::kPure));
+    "TCallEffectKind", Integer(CallEffectKind::kReadState));
 
 TIR_DEFINE_TL_BUILTIN(initialize_descriptor)
     .set_num_inputs(5)
