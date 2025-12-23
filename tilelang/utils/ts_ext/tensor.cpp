@@ -8,6 +8,7 @@
 #include <torch/extension.h>
 #include <vector>
 
+#include "exception.h"
 #include "ts_ext_ops.h"
 
 static int64_t safe_mul_int64(int64_t a, int64_t b) {
@@ -34,7 +35,7 @@ static at::ScalarType dtype_from_string(const std::string &s) {
     return at::kUInt64;
   if (s == "int32" || s == "int")
     return at::kInt;
-  if (s == "int64" || s == "long")
+  if (s == "int64" || s == "long" || s == "long int")
     return at::kLong;
   if (s == "uint8" || s == "byte")
     return at::kByte;
@@ -42,7 +43,7 @@ static at::ScalarType dtype_from_string(const std::string &s) {
     return at::kChar;
   if (s == "bool")
     return at::kBool;
-  throw std::runtime_error("Unsupported dtype string: " + s);
+  throw std::runtime_error("Unsupported dtype string: '" + s + "'");
 }
 
 torch::Tensor tensor_from_ptr(uint64_t ptr_val, std::vector<int64_t> shape,
@@ -83,4 +84,30 @@ torch::Tensor tensor_from_ptr(uint64_t ptr_val, std::vector<int64_t> shape,
   } else {
     return at::from_blob(data_ptr, shape, deleter, options);
   }
+}
+
+std::pair<torch::Tensor, torch::Tensor>
+create_host_device_tensor(const std::vector<int64_t> &shape,
+                          c10::ScalarType dtype) {
+  size_t elem_size = at::elementSize(dtype);
+  int64_t numel = 1;
+  for (int64_t s : shape)
+    numel *= s;
+
+  size_t bytes = numel * elem_size;
+
+  void *host_ptr = nullptr;
+  CUDA_CHECK(cudaHostAlloc(&host_ptr, bytes, cudaHostAllocMapped));
+
+  void *device_ptr = nullptr;
+  CUDA_CHECK(cudaHostGetDevicePointer(&device_ptr, host_ptr, 0));
+
+  auto host_tensor = torch::from_blob(
+      host_ptr, shape, torch::TensorOptions().dtype(dtype).device(torch::kCPU));
+
+  auto device_tensor = torch::from_blob(
+      device_ptr, shape,
+      torch::TensorOptions().dtype(dtype).device(torch::kCUDA));
+
+  return std::make_pair(host_tensor, device_tensor);
 }

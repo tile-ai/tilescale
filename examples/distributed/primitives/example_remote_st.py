@@ -15,31 +15,23 @@ def kernel_(M, num_rank, block_M, threads):
 
     @T.prim_func
     def main(
-            dst: T.Tensor((M), "bfloat16"),
-            src: T.Tensor((M), "bfloat16"),
+            dst: T.Tensor((M), "float32"),
+            src: T.Tensor((M), "float32"),
     ):
         with T.Kernel(T.ceildiv(M, block_M), threads=threads) as (bx):
             rank = T.alloc_local([1], "uint64")
             num_rank = T.alloc_local([1], "uint64")
             rank[0] = T.get_rank()
             num_rank[0] = T.get_num_ranks()
-            warp_idx = T.get_thread_binding(0) // 32
-            warp_copy_size = T.ceildiv(block_M, threads // 32)
-            warp_start = bx * block_M + warp_copy_size * warp_idx
-            T.put_warp(
-                src=T.address_of(src[warp_start]),
-                dst=T.address_of(dst[warp_start]),
-                size=warp_copy_size,
-                dst_pe=rank[0] ^ 1,
-                unroll_factor=4)
+            tx = T.get_thread_binding()
+            T.st(dst[bx * block_M + tx], src[bx * block_M + tx], dst_pe=1 - rank[0])
 
     return main
 
 
 def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
-    M = args.M if args else 65536
-    BLOCK_M = 4096
-    threads = 128
+    M = args.M
+    BLOCK_M = threads = 128
     assert num_local_ranks == 2, "this example only supports 2 ranks copying to each other"
 
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
@@ -55,8 +47,8 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     if local_rank == 0:
         print(kernel.get_kernel_source())
 
-    src = tilelang.tensor(shape=(M), dtype=torch.bfloat16, allocator=allocator).normal_()
-    dst = tilelang.tensor(shape=(M), dtype=torch.bfloat16, allocator=allocator)
+    src = tilelang.tensor((M), torch.float32, allocator=allocator).normal_()
+    dst = tilelang.tensor((M), torch.float32, allocator=allocator)
 
     torch.cuda.synchronize()
     torch.distributed.barrier(group)
@@ -82,7 +74,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         '--num-processes', type=int, default=2, help='Number of processes to spawn (default: 2)')
-    parser.add_argument('--M', type=int, default=65536, help='M dimension')
+    parser.add_argument('--M', type=int, default=1024, help='M dimension')
     args = parser.parse_args()
     num_processes = args.num_processes
 

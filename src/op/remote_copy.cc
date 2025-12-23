@@ -78,9 +78,14 @@ PutOp::PutOp(Array<PrimExpr> args, BufferMap vmap) {
   node->dst_pe = args[3];
   node->unroll_factor = args[4].as<IntImm>().value()->value;
   node->scope = args[5].as<StringImm>().value()->value;
-  node->is_symmetric = node->dst_pe.defined();
+  node->enable_aggressive_vectorize = bool(args[6].as<IntImm>().value()->value);
   data_ = std::move(node);
   (void)vmap;
+}
+
+bool PutOpNode::is_distributed() const {
+  return !(dst_pe->IsInstance<IntImmNode>() &&
+           dst_pe.as<IntImmNode>()->value == -1);
 }
 
 Stmt PutOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
@@ -88,7 +93,8 @@ Stmt PutOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   Array<PrimExpr> new_args;
   std::stringstream ss;
   if (scope == "warp") {
-    ss << "tl::cp_warp<" << copy_size << ", " << unroll_factor << ">";
+    ss << "tl::cp_warp<" << copy_size << ", " << unroll_factor << ", "
+       << (enable_aggressive_vectorize ? "true" : "false") << ">";
   } else if (scope == "block") {
     ss << "tl::cp_block<" << copy_size << ">";
   } else {
@@ -96,7 +102,7 @@ Stmt PutOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   }
 
   new_args.push_back(StringImm(ss.str()));
-  if (is_symmetric) {
+  if (is_distributed()) {
     PrimExpr dst_addr_expr = MakeRemappedAddress(T, dst_buffer, dst_indices);
     PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
     PrimExpr local_base_ptr =
@@ -182,9 +188,14 @@ GetOp::GetOp(Array<PrimExpr> args, BufferMap vmap) {
   node->src_pe = args[3];
   node->unroll_factor = args[4].as<IntImm>().value()->value;
   node->scope = args[5].as<StringImm>().value()->value;
-  node->is_symmetric = node->src_pe.defined();
+  node->enable_aggressive_vectorize = bool(args[6].as<IntImm>().value()->value);
   data_ = std::move(node);
   (void)vmap;
+}
+
+bool GetOpNode::is_distributed() const {
+  return !(src_pe->IsInstance<IntImmNode>() &&
+           src_pe.as<IntImmNode>()->value == -1);
 }
 
 Stmt GetOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
@@ -192,7 +203,8 @@ Stmt GetOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   Array<PrimExpr> new_args;
   std::stringstream ss;
   if (scope == "warp") {
-    ss << "tl::cp_warp<" << copy_size << ", " << unroll_factor << ">";
+    ss << "tl::cp_warp<" << copy_size << ", " << unroll_factor << ", "
+       << (enable_aggressive_vectorize ? "true" : "false") << ">";
   } else if (scope == "block") {
     ss << "tl::cp_block<" << copy_size << ">";
   } else {
@@ -202,7 +214,7 @@ Stmt GetOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   new_args.push_back(StringImm(ss.str()));
   PrimExpr dst_addr_expr = MakeRemappedAddress(T, dst_buffer, dst_indices);
   new_args.push_back(dst_addr_expr); // Always dst first in tl_templates
-  if (is_symmetric) {
+  if (is_distributed()) {
     PrimExpr src_addr_expr = MakeRemappedAddress(T, src_buffer, src_indices);
     PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
     PrimExpr local_base_ptr =
@@ -233,18 +245,163 @@ TileOperator GetOpNode::Clone() const {
   return GetOp(node);
 }
 
+StOp::StOp(Array<PrimExpr> args, BufferMap vmap) {
+  ObjectPtr<StOpNode> node = make_object<StOpNode>();
+  node->dst = args[0];
+  ICHECK(node->dst.as<CallNode>()) << "dst must be a call node";
+  ICHECK(node->dst.as<CallNode>()->op.same_as(builtin::address_of()))
+      << "dst must be address_of op";
+
+  node->value = args[1];
+  node->sem = args[2].as<IntImm>().value()->value;
+  node->scope = args[3].as<IntImm>().value()->value;
+  node->na = args[4].as<IntImm>().value()->value;
+  node->dst_pe = args[5];
+  data_ = std::move(node);
+  (void)vmap;
+}
+
+bool StOpNode::is_distributed() const {
+  return !(dst_pe->IsInstance<IntImmNode>() &&
+           dst_pe.as<IntImmNode>()->value == -1);
+}
+
+Stmt StOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+  (void)analyzer;
+  (void)T;
+  Array<PrimExpr> new_args;
+  std::stringstream ss;
+
+  // Map integers to enum literal strings
+  const char *sem_str[] = {"Semantic::WEAK", "Semantic::VOLATILE",
+                           "Semantic::ACQUIRE", "Semantic::RELEASE",
+                           "Semantic::RELAXED"};
+  const char *scope_str[] = {"Scope::CTA", "Scope::GPU", "Scope::SYS"};
+
+  // Build function name: tl::st<Semantic::X, Scope::Y, bool>
+  ss << "tl::st<" << sem_str[sem] << ", " << scope_str[scope] << ", "
+     << (na ? "true" : "false") << ">";
+
+  new_args.push_back(StringImm(ss.str()));
+  if (is_distributed()) {
+    PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
+    PrimExpr local_base_ptr =
+        Call(DataType::Handle(), tl::get_remote_base_ptr(), {local_rank});
+    PrimExpr offset_to_base = Sub(
+        Call(DataType::Handle(), tl::get_uintptr_t(), {dst}), local_base_ptr);
+    new_args.push_back(
+        Call(DataType::Handle(), tl::get_remote_base_ptr(), {dst_pe}) +
+        offset_to_base);
+  } else {
+    new_args.push_back(dst);
+  }
+  new_args.push_back(value);
+
+  auto st = Call(DataType::Handle(), builtin::call_extern(), new_args);
+  return Evaluate(st);
+}
+
+LayoutMap StOpNode::InferLayout(const LayoutInferArgs &T,
+                                InferLevel level) const {
+  (void)T;
+  (void)level;
+  return {};
+}
+
+TileOperator StOpNode::Clone() const {
+  auto node = make_object<StOpNode>(*this);
+  return StOp(node);
+}
+
+LdOp::LdOp(Array<PrimExpr> args, BufferMap vmap) {
+  ObjectPtr<LdOpNode> node = make_object<LdOpNode>();
+  node->src = args[0];
+  ICHECK(node->src.as<CallNode>()) << "src must be a call node";
+  ICHECK(node->src.as<CallNode>()->op.same_as(builtin::address_of()))
+      << "src must be address_of op";
+
+  node->value = args[1];
+  node->sem = args[2].as<IntImm>().value()->value;
+  node->scope = args[3].as<IntImm>().value()->value;
+  node->na = args[4].as<IntImm>().value()->value;
+  node->nc = args[5].as<IntImm>().value()->value;
+  node->src_pe = args[6];
+  data_ = std::move(node);
+  (void)vmap;
+}
+
+bool LdOpNode::is_distributed() const {
+  return !(src_pe->IsInstance<IntImmNode>() &&
+           src_pe.as<IntImmNode>()->value == -1);
+}
+
+Stmt LdOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+  (void)analyzer;
+  (void)T;
+  Array<PrimExpr> new_args;
+  std::stringstream ss;
+
+  // Map integers to enum literal strings
+  const char *sem_str[] = {"Semantic::WEAK", "Semantic::VOLATILE",
+                           "Semantic::ACQUIRE", "Semantic::RELEASE",
+                           "Semantic::RELAXED"};
+  const char *scope_str[] = {"Scope::CTA", "Scope::GPU", "Scope::SYS"};
+
+  // Build function name: tl::ld<Semantic::X, Scope::Y, bool, bool>
+  ss << "tl::ld<" << sem_str[sem] << ", " << scope_str[scope] << ", "
+     << (nc ? "true" : "false") << ", " << (na ? "true" : "false") << ">";
+
+  new_args.push_back(StringImm(ss.str()));
+  if (is_distributed()) {
+    PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
+    PrimExpr local_base_ptr =
+        Call(DataType::Handle(), tl::get_remote_base_ptr(), {local_rank});
+    PrimExpr offset_to_base = Sub(
+        Call(DataType::Handle(), tl::get_uintptr_t(), {src}), local_base_ptr);
+    new_args.push_back(
+        Call(DataType::Handle(), tl::get_remote_base_ptr(), {src_pe}) +
+        offset_to_base);
+  } else {
+    new_args.push_back(src);
+  }
+  new_args.push_back(value);
+
+  auto ld = Call(DataType::Handle(), builtin::call_extern(), new_args);
+  return Evaluate(ld);
+}
+
+LayoutMap LdOpNode::InferLayout(const LayoutInferArgs &T,
+                                InferLevel level) const {
+  (void)T;
+  (void)level;
+  return {};
+}
+
+TileOperator LdOpNode::Clone() const {
+  auto node = make_object<LdOpNode>(*this);
+  return LdOp(node);
+}
+
 TIR_REGISTER_TL_OP(PutOp, put)
-    .set_num_inputs(6)
+    .set_num_inputs(7)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
 TIR_REGISTER_TL_OP(GetOp, get)
-    .set_num_inputs(6)
+    .set_num_inputs(7)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+TIR_REGISTER_TL_OP(StOp, st).set_num_inputs(6).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
+
+TIR_REGISTER_TL_OP(LdOp, ld).set_num_inputs(7).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
+
 TVM_FFI_STATIC_INIT_BLOCK({ PutOpNode::RegisterReflection(); });
 TVM_FFI_STATIC_INIT_BLOCK({ GetOpNode::RegisterReflection(); });
+TVM_FFI_STATIC_INIT_BLOCK({ StOpNode::RegisterReflection(); });
+TVM_FFI_STATIC_INIT_BLOCK({ LdOpNode::RegisterReflection(); });
 
 } // namespace tl
 } // namespace tvm

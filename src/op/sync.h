@@ -40,10 +40,69 @@ TVM_DLL const Op &wait_barrier_gpu();
 
 /*!
  * \brief Wait until *addr == expected* for GPU-level synchronization
- * void wait_eq(barrier, expected)
+ * void wait_eq(addr, expected)
  */
 
 TVM_DLL const Op &wait_eq();
+
+/*!
+ * \brief TileOperatorNode for wait operation.
+ *
+ * WaitOpNode represents a wait primitive,
+ * which waits until a condition on a memory address is met.
+ */
+class WaitOpNode : public TileOperatorNode {
+public:
+  PrimExpr addr;     ///< The address to watch.
+  PrimExpr expected; ///< The expected value to compare against.
+  PrimExpr peer;     ///< The peer to compare against.
+  int relation;      ///< The relation to compare against.
+
+  bool is_distributed() const;
+
+  static constexpr const char *_type_key = "tl.WaitOp";
+  TVM_DECLARE_FINAL_OBJECT_INFO(WaitOpNode, TileOperatorNode);
+
+  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
+  LayoutMap InferLayout(const LayoutInferArgs &T,
+                        InferLevel level) const override;
+  static const Op &Get();
+  TileOperator Clone() const override;
+
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<WaitOpNode>()
+        .def_ro("addr", &WaitOpNode::addr)
+        .def_ro("expected", &WaitOpNode::expected)
+        .def_ro("peer", &WaitOpNode::peer)
+        .def_ro("relation", &WaitOpNode::relation);
+  }
+
+  bool SEqualReduce(const WaitOpNode *other, SEqualReducer equal) const {
+    return equal(addr, other->addr) && equal(expected, other->expected) &&
+           equal(peer, other->peer) && equal(relation, other->relation);
+  }
+
+  void SHashReduce(SHashReducer hash_reduce) const {
+    hash_reduce(addr);
+    hash_reduce(expected);
+    hash_reduce(peer);
+    hash_reduce(relation);
+  }
+
+  static constexpr bool _type_has_method_sequal_reduce = true;
+  static constexpr bool _type_has_method_shash_reduce = true;
+};
+
+/*!
+ * \brief Wrapper for the WaitOp operator.
+ */
+class WaitOp : public TileOperator {
+public:
+  TVM_DEFINE_OBJECT_REF_METHODS(WaitOp, TileOperator, WaitOpNode);
+  TVM_DLL WaitOp(Array<PrimExpr> args, BufferMap vmap);
+  static const Op &Get();
+};
 
 /*!
  * \brief Synchronize at a barrier for GPU-level synchronization
@@ -63,18 +122,19 @@ TVM_DLL const Op &sync_grid();
 /*!
  * \brief Synchronize all blocks at a system-level barrier
  *
- * void barrier_all_blocks_sys(barrier, rank, num_ranks)
+ * void barrier_blocks(barrier, rank, num_ranks)
  *
  */
-class BarrierAllBlocksSysOpNode : public TileOperatorNode {
+class BarrierBlocksOpNode : public TileOperatorNode {
 public:
   PrimExpr local_bar_addr;       ///< Address expression for the local barrier
   PrimExpr offset;               ///< Byte offset within the barrier buffer
   Buffer local_bar;              ///< Local barrier buffer reference
   Array<PrimExpr> local_indices; ///< Indices used to access the barrier buffer
+  bool need_fence;               ///< Whether need sys-level fence
 
-  static constexpr const char *_type_key = "tl.BarrierAllBlocksSysOp";
-  TVM_DECLARE_FINAL_OBJECT_INFO(BarrierAllBlocksSysOpNode, TileOperatorNode);
+  static constexpr const char *_type_key = "tl.BarrierBlocksOp";
+  TVM_DECLARE_FINAL_OBJECT_INFO(BarrierBlocksOpNode, TileOperatorNode);
 
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
   LayoutMap InferLayout(const LayoutInferArgs &T,
@@ -84,14 +144,14 @@ public:
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
-    refl::ObjectDef<BarrierAllBlocksSysOpNode>()
-        .def_ro("local_bar_addr", &BarrierAllBlocksSysOpNode::local_bar_addr)
-        .def_ro("offset", &BarrierAllBlocksSysOpNode::offset)
-        .def_ro("local_bar", &BarrierAllBlocksSysOpNode::local_bar)
-        .def_ro("local_indices", &BarrierAllBlocksSysOpNode::local_indices);
+    refl::ObjectDef<BarrierBlocksOpNode>()
+        .def_ro("local_bar_addr", &BarrierBlocksOpNode::local_bar_addr)
+        .def_ro("offset", &BarrierBlocksOpNode::offset)
+        .def_ro("local_bar", &BarrierBlocksOpNode::local_bar)
+        .def_ro("local_indices", &BarrierBlocksOpNode::local_indices);
   }
 
-  bool SEqualReduce(const BarrierAllBlocksSysOpNode *other,
+  bool SEqualReduce(const BarrierBlocksOpNode *other,
                     SEqualReducer equal) const {
     return equal(local_bar_addr, other->local_bar_addr) &&
            equal(offset, other->offset) && equal(local_bar, other->local_bar) &&
@@ -115,13 +175,13 @@ private:
 };
 
 /*!
- * \brief Wrapper for the BarrierAllBlocksSys operator
+ * \brief Wrapper for the BarrierBlocks operator
  */
-class BarrierAllBlocksSysOp : public TileOperator {
+class BarrierBlocksOp : public TileOperator {
 public:
-  TVM_DEFINE_OBJECT_REF_METHODS(BarrierAllBlocksSysOp, TileOperator,
-                                BarrierAllBlocksSysOpNode);
-  TVM_DLL BarrierAllBlocksSysOp(Array<PrimExpr> args, BufferMap vmap);
+  TVM_DEFINE_OBJECT_REF_METHODS(BarrierBlocksOp, TileOperator,
+                                BarrierBlocksOpNode);
+  TVM_DLL BarrierBlocksOp(Array<PrimExpr> args, BufferMap vmap);
   static const Op &Get();
 };
 

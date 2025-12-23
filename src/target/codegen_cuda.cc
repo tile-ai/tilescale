@@ -290,12 +290,7 @@ std::string CodeGenTileLangCUDA::Finish() {
   if (use_distributed_) {
     decl_stream << "#include <tl_templates/cuda/distributed.h>\n";
     decl_stream << "#include <tl_templates/cuda/sync.h>\n";
-  }
-  decl_stream << "#ifdef ENABLE_BF16\n";
-  decl_stream << "#include <tl_templates/cuda/cuda_bf16_fallbacks.cuh>\n";
-  decl_stream << "#endif\n";
-
-  if (use_distributed_) {
+    decl_stream << "#include <tl_templates/cuda/ldst.h>\n";
     decl_stream << "uint64_t __constant__ meta_data[1024];\n";
   }
   decl_stream << "#ifdef ENABLE_BF16\n";
@@ -822,13 +817,13 @@ void CodeGenTileLangCUDA::PrintStorageSync(const CallNode *op) {
     if (args.size() == 1) {
       this->stream << "__syncthreads();\n";
     } else if (args.size() == 2) {
-      auto barrier_id = args[1].as<IntImmNode>()->value;
-      this->stream << "tl::__sync_thread_partial<" << barrier_id << ">();\n";
+      std::string barrier_id = PrintExpr(args[1]);
+      this->stream << "tl::__sync_thread_partial(" << barrier_id << ");\n";
     } else if (args.size() == 3) {
-      auto barrier_id = args[1].as<IntImmNode>()->value;
-      auto thread_count = args[2].as<IntImmNode>()->value;
-      this->stream << "tl::__sync_thread_partial<" << barrier_id << ", "
-                   << thread_count << ">();\n";
+      std::string barrier_id = PrintExpr(args[1]);
+      std::string thread_count = PrintExpr(args[2]);
+      this->stream << "tl::__sync_thread_partial(" << barrier_id << ", "
+                   << thread_count << ");\n";
     } else {
       LOG(FATAL) << "Invalid number of arguments for storage sync: "
                  << args.size();
@@ -1522,12 +1517,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                             op->args[3].as<StringImmNode>()->value;
     os << func_name << "(" << this->PrintExpr(op->args[0]) << ", "
        << this->PrintExpr(op->args[1]) << ")";
-  } else if (op->op.same_as(tl::st())) {
-    this->PrintIndent();
-    std::string func_name = "tl::st_" + op->args[2].as<StringImmNode>()->value +
-                            "_" + op->args[3].as<StringImmNode>()->value;
-    this->stream << func_name << "(" << this->PrintExpr(op->args[0]) << ", "
-                 << this->PrintExpr(op->args[1]) << ");\n";
   } else if (op->op.same_as(tl::get_clock())) {
     os << "get_clock()";
   } else if (op->op.same_as(tl::loop_break())) {
@@ -1545,6 +1534,16 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     os << "tl::get_remote_base_ptr(" << pe_str << ")";
   } else if (op->op.same_as(tl::get_uintptr_t())) {
     os << "tl::get_uintptr_t(" << this->PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::warp_reduce_sum())) {
+    os << "tl::warp_reduce_sum(" << this->PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::warp_reduce_max())) {
+    os << "tl::warp_reduce_max(" << this->PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::warp_reduce_min())) {
+    os << "tl::warp_reduce_min(" << this->PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::warp_reduce_bitand())) {
+    os << "tl::warp_reduce_bitand(" << this->PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::warp_reduce_bitor())) {
+    os << "tl::warp_reduce_bitor(" << this->PrintExpr(op->args[0]) << ")";
   } else if (op->op.same_as(builtin::tvm_fill_fragment())) {
     need_mma_h_ = true;
     ICHECK_EQ(op->args.size(), 6U);
@@ -2359,6 +2358,18 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string func_name = math_func(op->dtype, "fdiv", rounding_mode);
     os << func_name << "(" << PrintExpr(op->args[0]) << ", "
        << PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::elect_one_sync())) {
+    os << "cute::elect_one_sync()";
+  } else if (op->op.same_as(tl::sync_warp())) {
+    os << "__syncwarp()";
+  } else if (op->op.same_as(tl::loop_continue())) {
+    os << "continue";
+  } else if (op->op.same_as(tl::warp_any())) {
+    os << "__any_sync(" << PrintExpr(op->args[1]) << ", "
+       << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::warp_all())) {
+    os << "__all_sync(" << PrintExpr(op->args[1]) << ", "
+       << PrintExpr(op->args[0]) << ")";
   } else {
     CodeGenC::VisitExpr_(op, os);
   }

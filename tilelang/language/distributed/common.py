@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from tvm import tir
-from tvm.tir import PrimExpr
+from tvm.tir import address_of
+from tvm.tir import PrimExpr, IntImm
+from enum import Enum
 
 
 def get_rank():
@@ -20,8 +22,9 @@ def get_num_ranks():
 def put_warp(src: PrimExpr,
              dst: PrimExpr,
              size: PrimExpr,
-             dst_pe: PrimExpr | None = None,
-             unroll_factor: int = 4):
+             dst_pe: PrimExpr | IntImm | None = -1,
+             unroll_factor: int = 4,
+             enable_aggressive_vectorize: bool = False):
     """Put to a remote buffer with unrolled loop.
 
     Args:
@@ -33,20 +36,23 @@ def put_warp(src: PrimExpr,
             The size of the put in elements.
         dst_pe: PrimExpr | None
             The PE index of the destination.
-            If provided, the dst is a symmetric address, otherwise it is a UVA address.
-            If not provided, the dst is a UVA address and dst_pe is None.
+            -1 by default, which means local copy.
         unroll_factor: int
             The unroll factor
+        enable_aggressive_vectorize: bool
+            Whether to enable aggressive vectorization.
+            If True, the compiler with try to vectorize the copy via int4.
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.put"), src, dst, size, dst_pe, unroll_factor,
-                           "warp")
+                           "warp", enable_aggressive_vectorize)
 
 
 def get_warp(src: PrimExpr,
              dst: PrimExpr,
              size: PrimExpr,
-             src_pe: PrimExpr | None = None,
-             unroll_factor: int = 4):
+             src_pe: PrimExpr | IntImm | None = -1,
+             unroll_factor: int = 4,
+             enable_aggressive_vectorize: bool = False):
     """Get from a remote buffer with unrolled loop.
 
     Args:
@@ -58,16 +64,18 @@ def get_warp(src: PrimExpr,
             The size of the get in elements.
         src_pe: PrimExpr | None
             The PE index of the source.
-            If provided, the src is a symmetric address, otherwise it is a UVA address.
-            If not provided, the src is a UVA address and src_pe is None.
+            -1 by default, which means local copy.
         unroll_factor: int
             The unroll factor
+        enable_aggressive_vectorize: bool
+            Whether to enable aggressive vectorization.
+            If True, the compiler with try to vectorize the copy via int4.
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.get"), src, dst, size, src_pe, unroll_factor,
-                           "warp")
+                           "warp", enable_aggressive_vectorize)
 
 
-def put_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, dst_pe: PrimExpr | None = None):
+def put_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, dst_pe: PrimExpr | IntImm | None = -1):
     """Put to a remote buffer.
 
     Args:
@@ -79,15 +87,14 @@ def put_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, dst_pe: PrimExpr | N
             The size of the put in elements.
         dst_pe: PrimExpr | None
             The PE index of the destination.
-            If provided, the dst is a symmetric address, otherwise it is a UVA address.
-            If not provided, the dst is a UVA address and dst_pe is None.
+            -1 by default, which means local copy.
     """
     return tir.call_intrin(
-        "handle", tir.op.Op.get("tl.put"), src, dst, size, dst_pe, 0, "block"
-    )  # NOTE(wt): unroll_factor is not needed because currently we implement block-level comm based on NVSHMEM-style copy
+        "handle", tir.op.Op.get("tl.put"), src, dst, size, dst_pe, 0, "block", True
+    )  # NOTE: unroll_factor is not needed because currently we implement block-level comm based on NVSHMEM-style copy
 
 
-def get_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, src_pe: PrimExpr | None = None):
+def get_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, src_pe: PrimExpr | IntImm | None = -1):
     """Get from a remote buffer.
 
     Args:
@@ -99,9 +106,57 @@ def get_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, src_pe: PrimExpr | N
             The size of the get in elements.
         src_pe: PrimExpr | None
             The PE index of the source.
-            If provided, the src is a symmetric address, otherwise it is a UVA address.
-            If not provided, the src is a UVA address and src_pe is None.
+            -1 by default, which means local copy.
     """
     return tir.call_intrin(
-        "handle", tir.op.Op.get("tl.get"), src, dst, size, src_pe, 0, "block"
-    )  # NOTE(wt): unroll_factor is not needed because currently we implement block-level comm based on NVSHMEM-style copy
+        "handle", tir.op.Op.get("tl.get"), src, dst, size, src_pe, 0, "block", True
+    )  # NOTE: unroll_factor is not needed because currently we implement block-level comm based on NVSHMEM-style copy
+
+
+class BinaryRelation(Enum):
+    EQ = 0
+    NE = 1
+    GE = 2
+    LE = 3
+    GT = 4
+    LT = 5
+
+
+def wait_eq(barrier: PrimExpr, expected: PrimExpr):
+    """Wait until *barrier == expected* for GPU-level synchronization.
+    # todo: have different semantic compared to 3 fns below currently
+    Args:
+        barrier: The barrier to wait at
+        expected: The expected value to wait for
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.wait_eq"), address_of(barrier), expected)
+
+
+def wait_ne(ptr: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1):
+    """Wait until *ptr != expected"""
+    return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.NE.value,
+                           address_of(ptr), expected, peer)
+
+
+def wait_ge(ptr: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1):
+    """Wait until *ptr >= expected"""
+    return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.GE.value,
+                           address_of(ptr), expected, peer)
+
+
+def wait_le(ptr: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1):
+    """Wait until *ptr <= expected"""
+    return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.LE.value,
+                           address_of(ptr), expected, peer)
+
+
+def wait_gt(ptr: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1):
+    """Wait until *ptr > expected"""
+    return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.GT.value,
+                           address_of(ptr), expected, peer)
+
+
+def wait_lt(ptr: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1):
+    """Wait until *ptr < expected"""
+    return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.LT.value,
+                           address_of(ptr), expected, peer)

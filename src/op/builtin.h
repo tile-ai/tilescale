@@ -546,12 +546,57 @@ TVM_DLL const Op &atomicadd_elem_op();
 TVM_DLL const Op &atom_add();
 
 /*!
- * \brief tilelang intrinsic for atomic store with semantic.
- *
- *  This op is used to represent an atomic store operation with semantic in
- * tilelang.
+ * \brief tilelang intrinsic for warp reduction sum.
  */
-TVM_DLL const Op &st();
+TVM_DLL const Op &warp_reduce_sum();
+
+/*!
+ * \brief tilelang intrinsic for warp reduction max.
+ */
+TVM_DLL const Op &warp_reduce_max();
+
+/*!
+ * \brief tilelang intrinsic for warp reduction min.
+ */
+TVM_DLL const Op &warp_reduce_min();
+
+/*!
+ * \brief tilelang intrinsic for warp reduction bitand.
+ */
+TVM_DLL const Op &warp_reduce_bitand();
+
+/*!
+ * \brief tilelang intrinsic for warp reduction bitor.
+ */
+TVM_DLL const Op &warp_reduce_bitor();
+
+/*!
+ * \brief tilelang intrinsic for electing exactly one lane within a logical
+ * thread group.
+ */
+TVM_DLL const Op &elect_one_sync();
+
+/*!
+ * \brief tilelang intrinsic for synchronizing all threads in a warp.
+ */
+TVM_DLL const Op &sync_warp();
+
+/*!
+ * \brief tilelang intrinsic for continuing the innermost loop.
+ */
+TVM_DLL const Op &loop_continue();
+
+/*!
+ * \brief tilelang intrinsic for checking if any lane in the warp has a true
+ * value.
+ */
+TVM_DLL const Op &warp_any();
+
+/*!
+ * \brief tilelang intrinsic for checking if all lanes in the warp have a true
+ * value.
+ */
+TVM_DLL const Op &warp_all();
 
 } // namespace tl
 } // namespace tvm

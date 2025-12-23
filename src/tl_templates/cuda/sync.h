@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common.h"
+#include "ldst.h"
 
 #define IS_MASTER_THREAD()                                                     \
   (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0)
@@ -55,7 +56,7 @@ TL_DEVICE int atomic_load_acquire_sys_s32(const int *ptr) {
   return ret;
 }
 
-TL_DEVICE int ld_volatile_global_s32(const int *ptr) {
+TL_DEVICE int ld_volatile_global(const int *ptr) {
   int ret;
   asm volatile("ld.volatile.global.s32 %0, [%1];\n" : "=r"(ret) : "l"(ptr));
   return ret;
@@ -149,26 +150,30 @@ TL_DEVICE void sync_grid(uint32_t *barrier) {
   sync_grids_wait(token, barrier);
 }
 
-// Synchronize all blocks at a system-level barrier
-// TODO(wt): Add sync-only option and timeout handling
+// Sync blocks at a system-level barrier with an optinal fence
+// TODO(wt): Add timeout handling
 
-TL_DEVICE void barrier_all_blocks_sys(int offset, int rank, int num_ranks) {
+template <bool need_fence = true>
+TL_DEVICE void barrier_blocks(int offset, int rank, int num_ranks) {
 // Macro to compute the barrier pointer for a given target rank
 #define BARRIER_PTR(tgt_rank)                                                  \
   (reinterpret_cast<int32_t *>(get_remote_base_ptr(tgt_rank) + offset))
+#define FINISHED_SUM_TAG (1024)
 
-  memory_fence_sys();
-  __syncthreads();
+  if constexpr (need_fence) {
+    memory_fence_sys();
+    __syncthreads();
+  }
 
   int tid = threadIdx.x;
   if (tid < num_ranks) {
-    atomicAdd_system(BARRIER_PTR(rank) + tid, 1);
-    atomicAdd_system(BARRIER_PTR(tid) + rank, -1);
+    atomicAdd_system(BARRIER_PTR(rank) + tid, FINISHED_SUM_TAG);
+    atomicSub_system(BARRIER_PTR(tid) + rank, FINISHED_SUM_TAG);
   }
 
   while (true) {
     int value =
-        tid < num_ranks ? ld_volatile_global_s32(BARRIER_PTR(rank) + tid) : 0;
+        tid < num_ranks ? ld_volatile_global(BARRIER_PTR(rank) + tid) : 0;
     if (__all_sync(0xffffffff, value <= 0)) {
       break;
     }
@@ -176,42 +181,65 @@ TL_DEVICE void barrier_all_blocks_sys(int offset, int rank, int num_ranks) {
   __syncthreads();
 
 #undef BARRIER_PTR
+#undef FINISHED_SUM_TAG
 }
 
-template <typename T> TL_DEVICE void wait_eq(void *barrier, T val = 1) {
-  T *flag_ptr = reinterpret_cast<T *>(barrier);
+template <typename T> TL_DEVICE void wait_eq(void *ptr, T val) {
+  T *flag_ptr = reinterpret_cast<T *>(ptr);
 // Spin-loop
 #pragma unroll 1
-  while (ld_acquire(flag_ptr) != val) {
-  }
+  while (ld_acquire(flag_ptr) != val)
+    ;
 }
 
-TL_DEVICE void st_release_gpu(uint32_t *ptr, uint32_t value) {
-  asm volatile("st.release.gpu.global.b32 [%0], %1;"
-               :
-               : "l"(ptr), "r"(value)
-               : "memory");
+template <typename P, typename T> TL_DEVICE void wait_ne(P ptr, T val) {
+  static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
+                "P must be a pointer or uint64_t");
+  T *flag_ptr = reinterpret_cast<T *>(ptr);
+// Spin-loop
+#pragma unroll 1
+  while (ld_volatile_global(flag_ptr) == val)
+    ;
 }
 
-TL_DEVICE void st_relaxed_gpu(uint32_t *ptr, uint32_t value) {
-  asm volatile("st.relaxed.gpu.global.b32 [%0], %1;"
-               :
-               : "l"(ptr), "r"(value)
-               : "memory");
+template <typename P, typename T> TL_DEVICE void wait_ge(P ptr, T val) {
+  static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
+                "P must be a pointer or uint64_t");
+  T *flag_ptr = reinterpret_cast<T *>(ptr);
+// Spin-loop
+#pragma unroll 1
+  while (ld_volatile_global(flag_ptr) < val)
+    ;
 }
 
-TL_DEVICE void st_release_sys(uint32_t *ptr, uint32_t value) {
-  asm volatile("st.release.sys.global.b32 [%0], %1;"
-               :
-               : "l"(ptr), "r"(value)
-               : "memory");
+template <typename P, typename T> TL_DEVICE void wait_le(P ptr, T val) {
+  static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
+                "P must be a pointer or uint64_t");
+  T *flag_ptr = reinterpret_cast<T *>(ptr);
+// Spin-loop
+#pragma unroll 1
+  while (ld_volatile_global(flag_ptr) > val)
+    ;
 }
 
-TL_DEVICE void st_relaxed_sys(uint32_t *ptr, uint32_t value) {
-  asm volatile("st.relaxed.sys.global.b32 [%0], %1;"
-               :
-               : "l"(ptr), "r"(value)
-               : "memory");
+template <typename P, typename T> TL_DEVICE void wait_gt(P ptr, T val) {
+  static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
+                "P must be a pointer or uint64_t");
+  T *flag_ptr = reinterpret_cast<T *>(ptr);
+// Spin-loop
+#pragma unroll 1
+  while (ld_volatile_global(flag_ptr) <= val)
+    ;
+}
+
+template <typename P, typename T> TL_DEVICE void wait_lt(P ptr, T val) {
+  static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
+                "P must be a pointer or uint64_t");
+  T *flag_ptr = reinterpret_cast<T *>(ptr);
+// Spin-loop
+#pragma unroll 1
+  while (ld_volatile_global(flag_ptr) >= val)
+    ;
 }
 
 } // namespace tl

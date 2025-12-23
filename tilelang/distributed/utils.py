@@ -19,7 +19,7 @@ else:
     from cuda import cuda, cudart
 
 import ctypes
-from tilescale_ext import _create_tensor, _create_ipc_handle, _sync_ipc_handles
+from tilescale_ext import _create_tensor, _create_ipc_handle, _sync_ipc_handles, create_host_device_tensor
 import functools
 from functools import lru_cache
 from threading import Lock
@@ -228,7 +228,7 @@ def dist_print(*args, **kwargs):
             print(*args, **kwargs)
 
 
-def perf_fn(fn, rep, warmup):
+def perf_fn(fn, warmup, rep):
     start_event = torch.cuda.Event(enable_timing=True)
     stop_event = torch.cuda.Event(enable_timing=True)
     for n in range(rep + warmup):
@@ -399,3 +399,7 @@ def has_fullmesh_nvlink():
                 stacklevel=2,
             )
         return _has_fullmesh_nvlink
+
+
+def create_mapped_tensor(shape: list[int], dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
+    return create_host_device_tensor(shape, dtype)

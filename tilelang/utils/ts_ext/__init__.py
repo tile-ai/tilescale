@@ -6,5 +6,13 @@ tensor_from_ptr = _C.tensor_from_ptr
 _create_tensor = _C._create_tensor
 _create_ipc_handle = _C._create_ipc_handle
 _sync_ipc_handles = _C._sync_ipc_handles
+create_host_device_tensor = _C.create_host_device_tensor
 
-__all__ = ["tensor_from_ptr", "_create_tensor", "_create_ipc_handle", "_sync_ipc_handles", "_C"]
+__all__ = [
+    "tensor_from_ptr",
+    "_create_tensor",
+    "_create_ipc_handle",
+    "_sync_ipc_handles",
+    "create_host_device_tensor",
+    "_C",
+]
