@@ -140,8 +140,20 @@ def putmem_signal_nbi(*args):
     return tir.call_intrin("handle", tir.op.Op.get("tl.PutmemSignalNbi"), *args)
 
 
-def putmem_signal_block(*args):
-    return tir.call_intrin("handle", tir.op.Op.get("tl.PutmemSignalBlock"), *args)
+def putmem_signal_block(dest, src, nelems, sig_addr, signal, sig_op, pe):
+    """Put data from local memory to remote memory at block granularity,
+    and update a remote flag on delivery.
+    Args:
+        dest: Symmetric address of the destination data object.
+        src: Symmetric address of the object containing the data to be copied.
+        nelems: Number of elements to be transferred (in bytes).
+        sig_addr: Symmetric address of the remote flag to be updated.
+        signal: The value used for updating the remote signal data object.
+        sig_op: The type of update to be performed on the remote signal data object.
+        pe: The PE ID of the destination PE.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.PutmemSignalBlock"), dest, src, nelems,
+                           sig_addr, signal, sig_op, pe)
 
 
 def putmem_signal_nbi_block(dest, src, nelems, sig_addr, signal, sig_op, pe):
