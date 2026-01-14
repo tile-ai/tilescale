@@ -18,6 +18,7 @@ COMPOSABLE_KERNEL_NOT_FOUND_MESSAGE = (
 TL_TEMPLATE_NOT_FOUND_MESSAGE = ("TileLang is not installed or found in the expected path")
 ", which may lead to compilation bugs when utilize tilelang backend."
 TVM_LIBRARY_NOT_FOUND_MESSAGE = ("TVM is not installed or found in the expected path")
+NVSHMEM_USE_DEFAULT_WHEEL_MESSAGE = ("NVSHMEM_SRC is not set, using the default NVSHMEM wheel: %s")
 
 TL_ROOT = os.path.dirname(os.path.abspath(__file__))
 TL_LIBS = [TL_ROOT, os.path.join(TL_ROOT, 'lib')]
@@ -253,12 +254,21 @@ class Environment:
     USE_NVSHMEM = EnvVar("TILELANG_USE_NVSHMEM", "0").get().lower() in ("1", "true", "on")
     if USE_DISTRIBUTED:
         if EnvVar("NVSHMEM_SRC", None).get() is not None:
+            # built from source
             NVSHMEM_SRC = EnvVar("NVSHMEM_SRC", None).get()
+            NVSHMEM_INCLUDE_DIR: str = NVSHMEM_SRC + "/build/src/include"
+            NVSHMEM_LIB_PATH: str = NVSHMEM_SRC + "/build/src/lib"
         else:
-            NVSHMEM_SRC = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "..", "3rdparty", "nvshmem_src")
-        NVSHMEM_INCLUDE_DIR: str = NVSHMEM_SRC + "/build/src/include"
-        NVSHMEM_LIB_PATH: str = NVSHMEM_SRC + "/build/src/lib"
+            # installed from wheel
+            from importlib.metadata import distribution
+
+            root = pathlib.Path(distribution("nvidia-nvshmem-cu12").locate_file(""))
+            nvshmem_wheel_path = root / "nvidia" / "nvshmem"
+            logger.warning(NVSHMEM_USE_DEFAULT_WHEEL_MESSAGE % nvshmem_wheel_path)
+            assert nvshmem_wheel_path.exists(), f"NVSHMEM wheel path does not exist"
+            NVSHMEM_SRC = str(nvshmem_wheel_path)
+            NVSHMEM_INCLUDE_DIR = str(nvshmem_wheel_path / "include")
+            NVSHMEM_LIB_PATH = str(nvshmem_wheel_path / "lib")
     else:
         NVSHMEM_INCLUDE_DIR = None
         NVSHMEM_LIB_PATH = None

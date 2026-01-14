@@ -67,9 +67,9 @@ def tilelang_callback_cuda_compile(code, target):
     else:
         cutlass_path = osp.abspath(osp.join(project_root, "3rdparty/cutlass/include"))
     if env.USE_DISTRIBUTED:
-        if os.environ.get("NVSHMEM_SRC", None) is not None:
-            nvshmem_include_path = os.environ["NVSHMEM_SRC"] + "/build/src/include"
-            nvshmem_lib_path = os.environ["NVSHMEM_SRC"] + "/build/src/lib"
+        if env.NVSHMEM_SRC:
+            nvshmem_include_path = env.NVSHMEM_INCLUDE_DIR
+            nvshmem_lib_path = env.NVSHMEM_LIB_PATH
         else:
             raise ValueError("NVSHMEM_SRC is not set")
     target_arch = nvcc.get_target_arch(nvcc.get_target_compute_version(target))
@@ -87,7 +87,7 @@ def tilelang_callback_cuda_compile(code, target):
         "-I" + cutlass_path,
     ]
     if env.USE_DISTRIBUTED:
-        if os.environ.get("NVSHMEM_SRC", None) is not None:
+        if env.NVSHMEM_SRC:
             options += [
                 "-I" + nvshmem_include_path,
                 "-L" + nvshmem_lib_path,

@@ -44,7 +44,17 @@ if(TORCH_CXX_FLAGS)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
 endif()
 
-find_package(NVSHMEM REQUIRED)
+# find NVSHMEM from tilelang.env
+execute_process(
+  COMMAND ${PYTHON_EXECUTABLE} "-c"
+          "from tilelang.env import env; print(env.NVSHMEM_INCLUDE_DIR); print(env.NVSHMEM_LIB_PATH)"
+  OUTPUT_VARIABLE NVSHMEM_PATHS)
+string(REGEX REPLACE "\n" ";" NVSHMEM_PATHS "${NVSHMEM_PATHS}")
+list(GET NVSHMEM_PATHS 0 NVSHMEM_INCLUDE_DIR)
+list(GET NVSHMEM_PATHS 1 NVSHMEM_LIB_DIR)
+set(NVSHMEM_INCLUDE_DIRS ${NVSHMEM_INCLUDE_DIR})
+find_library(NVSHMEM_HOST_LIBRARY nvshmem_host PATHS ${NVSHMEM_LIB_DIR} NO_DEFAULT_PATH REQUIRED)
+find_library(NVSHMEM_DEVICE_LIBRARY nvshmem_device PATHS ${NVSHMEM_LIB_DIR} NO_DEFAULT_PATH REQUIRED)
 
 if(NOT CMAKE_CUDA_ARCHITECTURES)
   set(CMAKE_CUDA_ARCHITECTURES native)
@@ -57,9 +67,10 @@ message(STATUS "CUDA include directories: ${CUDA_INCLUDE_DIRS}")
 
 set_target_properties(pynvshmem PROPERTIES CXX_STANDARD 17
                                            CUDA_RESOLVE_DEVICE_SYMBOLS ON)
-target_link_libraries(pynvshmem PRIVATE nvshmem::nvshmem_host
-                                        nvshmem::nvshmem_device
+target_link_libraries(pynvshmem PRIVATE ${NVSHMEM_HOST_LIBRARY}
+                                        ${NVSHMEM_DEVICE_LIBRARY}
                                         torch
                                         ${TORCH_PYTHON_LIBRARY})
 target_include_directories(pynvshmem PRIVATE ${NVSHMEM_INCLUDE_DIRS} ${TORCH_INCLUDE_DIRS})
+target_link_directories(pynvshmem PRIVATE ${NVSHMEM_LIB_DIR})
 target_compile_options(pynvshmem PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-rdc=true>)
