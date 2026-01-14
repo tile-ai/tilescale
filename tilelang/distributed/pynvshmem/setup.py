@@ -9,6 +9,8 @@ from pathlib import Path
 import setuptools
 from torch.utils.cpp_extension import BuildExtension
 
+from tilelang.env import env
+
 # Project directory root
 root_path: Path = Path(__file__).resolve().parent
 PACKAGE_NAME = "pynvshmem"
@@ -60,11 +62,57 @@ def pathlib_wrapper(func):
     return wrapper
 
 
+def ensure_nvshmem_symlinks():
+    """
+    Ensure symbolic links exist for NVSHMEM libraries.
+
+    The nvidia-nvshmem-cu12 wheel provides versioned libraries (e.g., libnvshmem_host.so.3),
+    but the linker expects unversioned names (e.g., libnvshmem_host.so).
+    This function creates the necessary symlinks automatically during build.
+    """
+    if env.NVSHMEM_LIB_PATH is None:
+        return
+
+    lib_path = Path(env.NVSHMEM_LIB_PATH)
+    if not lib_path.exists():
+        return
+
+    # Map of expected symlink name to the versioned library file pattern
+    symlink_map = {
+        "libnvshmem_host.so": "libnvshmem_host.so.*",
+        "libnvshmem_device.a": "libnvshmem_device.a",  # This one might already be correct
+    }
+
+    for symlink_name, pattern in symlink_map.items():
+        symlink_path = lib_path / symlink_name
+
+        # Skip if symlink already exists and is valid
+        if symlink_path.exists() or symlink_path.is_symlink():
+            continue
+
+        # Find the versioned library file
+        versioned_libs = list(lib_path.glob(pattern))
+        if not versioned_libs:
+            continue
+
+        # Use the first match (or latest if multiple)
+        target = versioned_libs[0].name
+
+        try:
+            # Create the symlink
+            symlink_path.symlink_to(target)
+            print(f"Created symlink: {symlink_path} -> {target}")
+        except Exception as e:
+            print(f"Warning: Could not create symlink {symlink_path}: {e}")
+
+
 @pathlib_wrapper
 def nvshmem_deps():
-    nvshmem_home = Path(os.environ.get("NVSHMEM_SRC", root_path / "../../../3rdparty/nvshmem_src"))
-    include_dirs = [nvshmem_home / "build/src/include"]
-    library_dirs = [nvshmem_home / "build/src/lib"]
+    # Ensure symlinks exist before returning dependencies
+    ensure_nvshmem_symlinks()
+
+    include_dirs = [env.NVSHMEM_INCLUDE_DIR]
+    library_dirs = [env.NVSHMEM_LIB_PATH]
     libraries = ["nvshmem_host", "nvshmem_device"]
     return include_dirs, library_dirs, libraries
 

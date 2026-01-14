@@ -58,14 +58,14 @@ TILELANG_USE_DISTRIBUTED=1 python examples/distributed/example_allgather_gemm_ov
 
 ## To use NVSHMEM APIs
 
-Before running the examples using NVSHMEM APIs (e.g., [example_allgather.py](../../examples/distributed/example_allgather.py)), you need to build NVSHMEM library for device-side code generation.
+Before running the examples using NVSHMEM APIs (e.g., [example_allgather.py](../../examples/distributed/example_allgather.py)), you need to install NVSHMEM dependencies.
+You can set environment variable `NVSHMEM_SRC` to force using NVSHMEM built from source.
 
 ```bash 
-pip install mpich  # building NVSHMEM needs MPI
-export NVSHMEM_SRC="your_custom_nvshmem_dir" # default to 3rdparty/nvshmem_src
-cd tilelang/distributed
-source build_nvshmem.sh
+export NVSHMEM_SRC="your_custom_nvshmem_dir"
 ```
+
+You can also skip this and use the default pre-installed NVSHMEM wheel.
 You also need to install the `pynvshmem` package, which provides wrapped host-side Python API for NVSHMEM.
 
 ```bash
