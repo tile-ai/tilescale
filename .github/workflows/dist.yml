@@ -177,17 +177,9 @@ jobs:
     # Not PR to save artifact storage, as artifacts are only needed for releases.
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]')
     runs-on: ubuntu-latest
-    needs: [build-sdist, build-wheels]
+    needs: [build-wheels]
     timeout-minutes: 15
     steps:
-      - name: Download built SDist
-        uses: actions/download-artifact@v7
-        with:
-          # unpacks default artifact into dist/
-          # if `name: artifact` is omitted, the action will create extra parent dir
-          name: sdist
-          path: dist
-
       - name: Download built wheels
         uses: actions/download-artifact@v7
         with:
