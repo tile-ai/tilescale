@@ -98,6 +98,7 @@ class BaseAllocator:
         # total size: 16 + 8 * num_local_ranks
         self._table = None
         self._buffer_ptrs = None
+        self._device_ids = None
         self._initialized = False
         if self._is_distributed:
             assert self._group is not None, "group must be provided when is_distributed is True"
@@ -141,6 +142,7 @@ class BaseAllocator:
         ] * self._group.size()
         local_device_id = self._local_rank
         dist.all_gather_object(device_ids, local_device_id, self._group)
+        self._device_ids = device_ids
 
         # Synchronize IPC handles
         ipc_handles = [
@@ -203,7 +205,8 @@ class BaseAllocator:
                     peer_ts.append(t)
                 else:
                     peer_ptr_val = int(self._buffer_ptrs[i]) + current_offset
-                    peer_t = tensor_from_ptr(peer_ptr_val, shape, dtype_str, self._device, False)
+                    peer_device = self._device_ids[i]
+                    peer_t = tensor_from_ptr(peer_ptr_val, shape, dtype_str, peer_device, False)
                     peer_ts.append(peer_t)
 
         if take_ownership:
