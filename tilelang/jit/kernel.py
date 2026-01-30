@@ -470,14 +470,28 @@ class JITKernel(Generic[_P, _T]):
         """Initialize base addr table for TileScale kernels."""
 
         assert allocator.initialized(), "Allocator is not initialized"
-        result = self.adapter.lib.init_table(
-            ctypes.c_void_p(allocator.table.data_ptr()),
-            allocator.table_size,
-            ctypes.c_void_p(stream) if stream is not None else ctypes.c_void_p(0),
-        )
-        if result != 0:
-            error_msg = self.adapter.lib.get_last_error().decode("utf-8")
-            raise RuntimeError(f"Initialization failed: {error_msg}")
+
+        stream_val = stream if stream is not None else 0
+
+        if self.execution_backend == "tvm_ffi":
+            # TVM FFI adapter: call init_table method directly
+            result = self.adapter.init_table(
+                allocator.table.data_ptr(),
+                allocator.table_size,
+                # tvm-ffi doesn't support stream val
+            )
+            if result != 0:
+                raise RuntimeError("Initialization failed for TVM FFI adapter")
+        else:
+            # Cython/NVRTC adapter: use ctypes lib interface
+            result = self.adapter.lib.init_table(
+                ctypes.c_void_p(allocator.table.data_ptr()),
+                allocator.table_size,
+                ctypes.c_void_p(stream_val),
+            )
+            if result != 0:
+                error_msg = self.adapter.lib.get_last_error().decode("utf-8")
+                raise RuntimeError(f"Initialization failed: {error_msg}")
 
     def run_once(self, func: Callable | None = None) -> None:
         return self.get_profiler().run_once(func)

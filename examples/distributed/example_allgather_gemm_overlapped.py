@@ -182,7 +182,7 @@ def ag_gemm_op(
     ag_stream,
 ):
     with torch.cuda.stream(gemm_stream):
-        set_signal_kernel(signal_buffer[local_rank], stream=gemm_stream.cuda_stream)
+        set_signal_kernel(signal_buffer[local_rank])
 
     ag_stream.wait_stream(gemm_stream)
 
@@ -191,7 +191,7 @@ def ag_gemm_op(
     )
 
     with torch.cuda.stream(gemm_stream):
-        gemm_kernel(ag_buffer[local_rank], B, signal_buffer[local_rank], C, stream=gemm_stream.cuda_stream)
+        gemm_kernel(ag_buffer[local_rank], B, signal_buffer[local_rank], C)
 
     gemm_stream.wait_stream(ag_stream)
     current_stream = torch.cuda.current_stream()

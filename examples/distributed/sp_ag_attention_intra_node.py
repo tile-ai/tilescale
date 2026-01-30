@@ -655,7 +655,8 @@ def create_sp_ag_attention_context_intra_node(
 
 def barrier_all_on_stream(barrier: torch.Tensor, stream: torch.cuda.Stream, world_size: int):
     barrier_all_blocks_sys_func = barrier_all_blocks_sys_kernel(world_size)
-    barrier_all_blocks_sys_func(barrier, stream=stream.cuda_stream)
+    with torch.cuda.stream(stream):
+        barrier_all_blocks_sys_func(barrier)
 
 
 def cp_engine_producer_kv_all_gather(
@@ -814,7 +815,8 @@ def fused_sp_ag_attn_intra_node(
         if rank == 0 and print_source:
             print(kernel.get_kernel_source())
 
-        kernel(q_shard, ag_k, ag_v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, output, stream=compute_stream.cuda_stream)
+        with torch.cuda.stream(compute_stream):
+            kernel(q_shard, ag_k, ag_v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, output)
 
     compute_stream.wait_stream(ctx.ag_stream)
     barrier_all_on_stream(ctx.barrier, compute_stream, world_size)

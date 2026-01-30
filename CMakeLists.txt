@@ -213,6 +213,7 @@ elseif(USE_CUDA)
 
   file(GLOB TILE_LANG_CUDA_SRCS
     src/runtime/runtime.cc
+    src/runtime/tilescale_cuda_module.cc
     src/target/ptx.cc
     src/target/codegen_cuda.cc
     src/target/codegen_py.cc

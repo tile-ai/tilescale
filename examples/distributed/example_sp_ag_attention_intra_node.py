@@ -380,7 +380,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num-processes", type=int, default=1, help="Number of processes to spawn (default: 2)")
+    parser.add_argument("--num-processes", type=int, default=2, help="Number of processes to spawn (default: 2)")
     parser.add_argument("--batch_size", type=int, default=2, help="batch size")
     parser.add_argument("--q_head", type=int, default=32, help="num q heads")
     parser.add_argument("--kv_head", type=int, default=8, help="num kv heads")

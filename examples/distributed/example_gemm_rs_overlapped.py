@@ -81,7 +81,8 @@ def gemm_rs_op(A, B, C, output, ctx, gemm_kernel, gemm_stream, rs_stream, local_
     current_stream = torch.cuda.current_stream()
     rs_stream.wait_stream(gemm_stream)
 
-    gemm_kernel(A, B, ctx.scatter_signal_bufs[local_rank], ctx.counter_bufs[local_rank], C, stream=gemm_stream.cuda_stream)
+    with torch.cuda.stream(gemm_stream):
+        gemm_kernel(A, B, ctx.scatter_signal_bufs[local_rank], ctx.counter_bufs[local_rank], C)
 
     if print_source and local_rank == 1:
         print(gemm_kernel.get_kernel_source())

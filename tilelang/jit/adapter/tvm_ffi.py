@@ -318,3 +318,33 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
     def prim_func(self) -> tir.PrimFunc:
         """Returns the primary TIR function from the IR module."""
         return retrieve_func_from_module(self.ir_module)
+
+    def init_table(self, host_table_ptr: int, table_size: int, stream: int = 0) -> int:
+        """Initialize distributed table by copying host data to device meta_data symbol.
+
+        This method is used for TileScale distributed kernels to initialize the
+        meta_data constant memory with rank information and remote base pointers.
+
+        Args:
+            host_table_ptr: Pointer to host table data (as int)
+            table_size: Number of uint64_t elements in the table
+            stream: CUDA stream pointer (as int), default 0 for default stream
+
+        Returns:
+            0 on success, non-zero on failure
+
+        Raises:
+            RuntimeError: If rt_mod is not available or init_table function not found
+        """
+        if self.rt_mod is None:
+            raise RuntimeError("rt_mod is not available for init_table")
+
+        # Get the init_table function from the TileScale CUDA module
+        # rt_mod is the host module, CUDA module is imported into it
+        cuda_mod = self.rt_mod.imports[0]
+        init_table_func = cuda_mod.get_function("__tilescale_init_table")
+        if init_table_func is None:
+            raise RuntimeError("__tilescale_init_table function not found in module")
+
+        # Call the TVM FFI function
+        return init_table_func(host_table_ptr, table_size, stream)
