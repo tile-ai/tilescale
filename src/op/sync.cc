@@ -192,7 +192,7 @@ TileOperator WaitOpNode::Clone() const {
 }
 
 TIR_REGISTER_TL_OP(BarrierBlocksOp, barrier_blocks)
-    .set_num_inputs(1)
+    .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 

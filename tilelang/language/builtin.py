@@ -612,15 +612,16 @@ def sync_grid(barrier: PrimExpr):
     return tir.call_intrin("handle", tir.op.Op.get("tl.sync_grid"), address_of(barrier))
 
 
-def barrier_blocks(barrier: PrimExpr):
+def barrier_blocks(barrier: PrimExpr, need_fence: bool = True):
     """Barrier all blocks at a system-level barrier.
     Compare to sync_blocks, barrier_blocks have an extra system-level fence effect
 
     Args:
         barrier: The barrier to synchronize at, should be [num_ranks] of int32
+        need_fence: Whether need fence. Default to True
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.barrier_blocks"), address_of(barrier),
-                           1)  # whether need fence
+                           need_fence)  # whether need fence
 
 
 def sync_blocks(barrier: PrimExpr):
