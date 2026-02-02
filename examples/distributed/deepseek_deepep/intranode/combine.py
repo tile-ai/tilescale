@@ -80,13 +80,12 @@ def cached_notify_combine(
     channel_tail_idx: torch.Tensor,
     barrier_signal: torch.Tensor,
     allocator,
-    comm_stream=None,
 ):
     kernel = cached_notify_combine_kernel(num_ranks, num_sms)
-    kernel.initialize(allocator=allocator, stream=comm_stream.cuda_stream)
+    kernel.initialize(allocator=allocator)
 
     kernel(
-        send_head, channel_head_idx, channel_tail_idx, barrier_signal, stream=comm_stream.cuda_stream, skip_tensor_validation=True
+        send_head, channel_head_idx, channel_tail_idx, barrier_signal
     )  # reduce runtime overhead
 
 
@@ -379,9 +378,10 @@ def intranode_combine(rank: int, allocator, symm_buffers, x, config, handle, top
     num_recv_tokens = send_head.shape[0]
 
     # notify combine
-    cached_notify_combine(
-        num_ranks, config.num_sms, send_head, channel_head_idx, channel_tail_idx, barrier_signal, allocator, comm_stream=comm_stream
-    )
+    with torch.cuda.stream(comm_stream):
+        cached_notify_combine(
+            num_ranks, config.num_sms, send_head, channel_head_idx, channel_tail_idx, barrier_signal, allocator
+        )
 
     # combine
     recv_x = torch.empty((num_recv_tokens, hidden), dtype=x.dtype, device="cuda")
@@ -396,25 +396,24 @@ def intranode_combine(rank: int, allocator, symm_buffers, x, config, handle, top
         config.num_sms,
         dtype="bfloat16",
     )
-    kernel.initialize(allocator=allocator, stream=comm_stream.cuda_stream)
-    kernel(
-        rank,
-        x,
-        topk_weights,
-        recv_src_idx,
-        recv_x,
-        recv_topk_weights,
-        rank_prefix_matrix,
-        recv_channel_prefix_matrix,
-        send_head,
-        channel_head_idx,
-        channel_tail_idx,
-        channel_x_buffers,
-        channel_src_idx_buffers,
-        channel_topk_weights_buffers,
-        stream=comm_stream.cuda_stream,
-        skip_tensor_validation=True,
-    )  # reduce runtime overhead
+    with torch.cuda.stream(comm_stream):
+        kernel.initialize(allocator=allocator)
+        kernel(
+            rank,
+            x,
+            topk_weights,
+            recv_src_idx,
+            recv_x,
+            recv_topk_weights,
+            rank_prefix_matrix,
+            recv_channel_prefix_matrix,
+            send_head,
+            channel_head_idx,
+            channel_tail_idx,
+            channel_x_buffers,
+            channel_src_idx_buffers,
+            channel_topk_weights_buffers,
+        )  # reduce runtime overhead
     compute_stream = torch.cuda.current_stream()
     compute_stream.wait_stream(comm_stream)
     return recv_x, recv_topk_weights

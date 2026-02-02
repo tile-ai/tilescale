@@ -78,7 +78,7 @@ class TileScaleCUDAModuleNode : public ffi::ModuleObj {
     }
   }
 
-  const char* kind() const final { return "cuda"; }
+  const char* kind() const final { return "tilescale_cuda"; }
 
   int GetPropertyMask() const final {
     return ffi::Module::kBinarySerializable | ffi::Module::kRunnable;
@@ -186,12 +186,6 @@ void TileScaleInitDistributedTable::operator()(const ffi::PackedArgs& args, ffi:
   std::ostringstream oss;
   int rank;
   CUDA_CALL(cudaGetDevice(&rank));
-  oss << "Rank: " << rank << ", ";
-  oss << "Host Table first 10 entries: ";
-  for (int i = 0; i < 10; ++i) {
-    oss << table_ptr[i] << " ";
-  }
-  LOG(INFO) << oss.str();
   CUstream stream = reinterpret_cast<CUstream>(stream_ptr);
 
   int device_id;
@@ -200,18 +194,13 @@ void TileScaleInitDistributedTable::operator()(const ffi::PackedArgs& args, ffi:
   // Get the device pointer for meta_data symbol (lazy initialization)
   if (pcache_[device_id] == 0) {
     pcache_[device_id] = m_->GetGlobal(device_id, "meta_data", kMetaDataSize);
-    std::printf("GetGlobal meta_data %llu rank=%d\n", pcache_[device_id], device_id);
   }
 
-  // Copy data from host to device
+  // Copy data from host to device constant memory.
+  // Note: must use Driver API (cuMemcpyHtoD) instead of cudaMemcpyToSymbol,
+  // because the symbol lives in a dynamically loaded CUmodule.
   size_t bytes = static_cast<size_t>(table_size) * sizeof(uint64_t);
-  std::printf("Copying %zu bytes from host to device rank=%d\n", bytes, device_id);
-  void* device_table = reinterpret_cast<void*>(pcache_[device_id]);
-  CUDA_CALL(cudaMemcpy(device_table, host_table, bytes, cudaMemcpyHostToDevice));
-  std::vector<uint64_t> verify(table_size);                                             
-  CUDA_DRIVER_CALL(cuMemcpyDtoH(verify.data(), pcache_[device_id], bytes));
-  std::printf("[DEBUG] Verify after copy: %llu %llu %llu\n",                            
-    verify[0], verify[1], verify[2]);
+  CUDA_DRIVER_CALL(cuMemcpyHtoD(pcache_[device_id], host_table, bytes));
 
   // Return success
   *rv = 0;
@@ -352,6 +341,37 @@ ffi::Module TileScaleCUDAModuleCreate(std::string data, std::string fmt,
                                       std::string cuda_source) {
   auto n = ffi::make_object<TileScaleCUDAModuleNode>(data, fmt, fmap, cuda_source);
   return ffi::Module(n);
+}
+
+// Load TileScale CUDA module from serialized bytes (deserialization).
+ffi::Module TileScaleCUDAModuleLoadFromBytes(const ffi::Bytes& bytes) {
+  dmlc::MemoryFixedSizeStream ms(const_cast<char*>(bytes.data()), bytes.size());
+  dmlc::Stream* stream = &ms;
+  std::string fmt;
+  std::unordered_map<std::string, FunctionInfo> fmap;
+  std::string data;
+  stream->Read(&fmt);
+  stream->Read(&fmap);
+  stream->Read(&data);
+  return TileScaleCUDAModuleCreate(data, fmt, fmap, std::string());
+}
+
+// Load TileScale CUDA module from file.
+ffi::Module TileScaleCUDAModuleLoadFile(const std::string& file_name, const ffi::String& format) {
+  std::string data;
+  std::unordered_map<std::string, FunctionInfo> fmap;
+  std::string fmt = GetFileFormat(file_name, format);
+  std::string meta_file = GetMetaFilePath(file_name);
+  LoadBinaryFromFile(file_name, &data);
+  LoadMetaDataFromFile(meta_file, &fmap);
+  return TileScaleCUDAModuleCreate(data, fmt, fmap, std::string());
+}
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef()
+      .def("ffi.Module.load_from_bytes.tilescale_cuda", TileScaleCUDAModuleLoadFromBytes)
+      .def("ffi.Module.load_from_file.tilescale_cuda", TileScaleCUDAModuleLoadFile);
 }
 
 }  // namespace runtime

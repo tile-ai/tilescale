@@ -336,13 +336,20 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         Raises:
             RuntimeError: If rt_mod is not available or init_table function not found
         """
-        if self.rt_mod is None:
-            raise RuntimeError("rt_mod is not available for init_table")
+        # Must use the jitted module (the same one the kernel will run from)
+        # to ensure we write to the same CUmodule's meta_data that the kernel reads.
+        if self.executable is None:
+            if self.rt_mod is None:
+                raise RuntimeError("rt_mod is not available for init_table")
+            self.executable = runtime.Executable(self.rt_mod)
 
-        # Get the init_table function from the TileScale CUDA module
-        # rt_mod is the host module, CUDA module is imported into it
-        cuda_mod = self.rt_mod.imports[0]
-        init_table_func = cuda_mod.get_function("__tilescale_init_table")
+        if isinstance(self.executable, runtime.Executable):
+            jitted_mod = self.executable.jit()
+        else:
+            # from_database path: executable is already a loaded Module
+            jitted_mod = self.executable
+
+        init_table_func = jitted_mod.get_function("__tilescale_init_table", query_imports=True)
         if init_table_func is None:
             raise RuntimeError("__tilescale_init_table function not found in module")
 

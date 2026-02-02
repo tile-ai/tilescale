@@ -2,7 +2,7 @@
 
 #include "common.h"
 
-extern "C" extern __device__ uint64_t meta_data[1024];
+extern "C" extern __constant__ uint64_t meta_data[1024];
 namespace tl {
 
 TL_DEVICE uint64_t get_rank() { return meta_data[0]; }

@@ -11,6 +11,7 @@ import tilelang
 import tilelang.language as T
 from typing import Optional, Tuple
 from deepep_utils import Config, ep_ext  # noqa: F403
+import tvm_ffi
 
 # tilelang.disable_cache()
 os.environ["NCCL_DEBUG"] = "WARN"  # silence NCCL log
@@ -54,9 +55,6 @@ def notify_dispatch_kernel(
         with T.Kernel(num_ranks + 1, threads=threads) as bx:
             tx = T.get_thread_binding()
             lane_id, warp_id = tx % 32, tx // 32
-
-            if bx == 0 and tx == 0:
-                T.call_extern("handle", "print_table")
 
             if bx == 0:
                 # Barrier first
@@ -184,7 +182,6 @@ def notify_dispatch(
         channel_tail_idx,
     )
     num_recv_tokens, num_recv_tokens_per_expert_list = ep_ext.wait_for_counters_ready(moe_recv_counter, moe_recv_expert_counter)
-    print(f"rank {rank} num_recv_tokens: {num_recv_tokens}, num_recv_tokens_per_expert_list: {num_recv_tokens_per_expert_list}")
     return num_recv_tokens, num_recv_tokens_per_expert_list, rank_prefix_matrix, channel_prefix_matrix
 
 
