@@ -327,7 +327,7 @@ std::string CodeGenTileLangCUDA::Finish() {
     decl_stream << "#include <tl_templates/cuda/distributed.h>\n";
     decl_stream << "#include <tl_templates/cuda/sync.h>\n";
     decl_stream << "#include <tl_templates/cuda/ldst.h>\n";
-    decl_stream << "uint64_t __constant__ meta_data[1024];\n";
+    decl_stream << "extern \"C\" __device__ uint64_t meta_data[1024];\n";
   }
   decl_stream << "#ifdef ENABLE_BF16\n";
   decl_stream << "#include <tl_templates/cuda/cuda_bf16_fallbacks.cuh>\n";

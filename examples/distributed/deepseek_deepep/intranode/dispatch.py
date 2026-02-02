@@ -55,6 +55,9 @@ def notify_dispatch_kernel(
             tx = T.get_thread_binding()
             lane_id, warp_id = tx % 32, tx // 32
 
+            if bx == 0 and tx == 0:
+                T.call_extern("handle", "print_table")
+
             if bx == 0:
                 # Barrier first
                 T.sync_blocks(barrier_signal)
@@ -146,7 +149,7 @@ def notify_dispatch(
     channel_tail_idx: torch.Tensor,
     # allocator
     allocator,
-    comm_stream=None,
+    comm_stream: torch.cuda.Stream = None,
 ):
     kernel = notify_dispatch_kernel(
         num_ranks,
@@ -179,11 +182,9 @@ def notify_dispatch(
         channel_end_offset,
         channel_head_idx,
         channel_tail_idx,
-        stream=comm_stream.cuda_stream,
-        skip_tensor_validation=True,  # reduce runtime overhead
     )
-
     num_recv_tokens, num_recv_tokens_per_expert_list = ep_ext.wait_for_counters_ready(moe_recv_counter, moe_recv_expert_counter)
+    print(f"rank {rank} num_recv_tokens: {num_recv_tokens}, num_recv_tokens_per_expert_list: {num_recv_tokens_per_expert_list}")
     return num_recv_tokens, num_recv_tokens_per_expert_list, rank_prefix_matrix, channel_prefix_matrix
 
 
@@ -227,16 +228,15 @@ def cached_notify_dispatch(
     comm_stream=None,
 ):
     kernel = cached_notify_dispatch_kernel(num_ranks, num_channels)
-    kernel.initialize(allocator=allocator, stream=comm_stream.cuda_stream)  # we still comm on barrier_signal
-    kernel(
-        barrier_signal,
-        channel_start_offset,
-        channel_end_offset,
-        channel_head_idx,
-        channel_tail_idx,
-        stream=comm_stream.cuda_stream,
-        skip_tensor_validation=True,
-    )  # reduce runtime overhead
+    kernel.initialize(allocator=allocator, stream=comm_stream.cuda_stream)
+    with torch.cuda.stream(comm_stream):
+        kernel(
+            barrier_signal,
+            channel_start_offset,
+            channel_end_offset,
+            channel_head_idx,
+            channel_tail_idx,
+        )
 
 
 @tilelang.jit(
@@ -855,32 +855,31 @@ def intranode_dispatch(
             config.num_sms,
             "bfloat16",
         )
-        kernel.initialize(allocator=allocator)
-        kernel(
-            rank,
-            recv_x,
-            recv_src_idx,
-            recv_topk_idx,
-            recv_topk_weights,
-            recv_channel_prefix_matrix,
-            send_head,
-            x,
-            topk_idx,
-            topk_weights,
-            is_token_in_rank,
-            rank_prefix_matrix,
-            channel_prefix_matrix,
-            channel_start_offset,
-            channel_end_offset,
-            channel_head_idx,
-            channel_tail_idx,
-            channel_x_buffers,
-            channel_src_idx_buffers,
-            channel_topk_idx_buffers,
-            channel_topk_weights_buffers,
-            stream=comm_stream.cuda_stream,
-            skip_tensor_validation=True,
-        )  # reduce runtime overhead
+        kernel.initialize(allocator=allocator, stream=comm_stream.cuda_stream)
+        with tvm_ffi.use_torch_stream(torch.cuda.stream(comm_stream)):
+            kernel(
+                rank,
+                recv_x,
+                recv_src_idx,
+                recv_topk_idx,
+                recv_topk_weights,
+                recv_channel_prefix_matrix,
+                send_head,
+                x,
+                topk_idx,
+                topk_weights,
+                is_token_in_rank,
+                rank_prefix_matrix,
+                channel_prefix_matrix,
+                channel_start_offset,
+                channel_end_offset,
+                channel_head_idx,
+                channel_tail_idx,
+                channel_x_buffers,
+                channel_src_idx_buffers,
+                channel_topk_idx_buffers,
+                channel_topk_weights_buffers,
+            )
         handle = (rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, is_token_in_rank, send_head)
         return recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle
     else:
@@ -894,23 +893,22 @@ def intranode_dispatch(
             "bfloat16",
         )
         kernel.initialize(allocator=allocator, stream=comm_stream.cuda_stream)
-        kernel(
-            rank,
-            recv_x,
-            recv_src_idx,
-            recv_channel_prefix_matrix,
-            send_head,
-            x,
-            is_token_in_rank,
-            rank_prefix_matrix,
-            channel_prefix_matrix,
-            channel_start_offset,
-            channel_end_offset,
-            channel_head_idx,
-            channel_tail_idx,
-            channel_x_buffers,
-            channel_src_idx_buffers,
-            stream=comm_stream.cuda_stream,
-            skip_tensor_validation=True,
-        )  # reduce runtime overhead
+        with torch.cuda.stream(comm_stream):
+            kernel(
+                rank,
+                recv_x,
+                recv_src_idx,
+                recv_channel_prefix_matrix,
+                send_head,
+                x,
+                is_token_in_rank,
+                rank_prefix_matrix,
+                channel_prefix_matrix,
+                channel_start_offset,
+                channel_end_offset,
+                channel_head_idx,
+                channel_tail_idx,
+                channel_x_buffers,
+                channel_src_idx_buffers,
+            )
         return recv_x

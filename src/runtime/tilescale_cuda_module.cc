@@ -181,6 +181,17 @@ void TileScaleInitDistributedTable::operator()(const ffi::PackedArgs& args, ffi:
   int64_t stream_ptr = args[2].cast<int64_t>();
 
   void* host_table = reinterpret_cast<void*>(host_table_ptr);
+  // 打印host table前8个entry
+  auto* table_ptr = reinterpret_cast<const uint64_t*>(host_table);
+  std::ostringstream oss;
+  int rank;
+  CUDA_CALL(cudaGetDevice(&rank));
+  oss << "Rank: " << rank << ", ";
+  oss << "Host Table first 10 entries: ";
+  for (int i = 0; i < 10; ++i) {
+    oss << table_ptr[i] << " ";
+  }
+  LOG(INFO) << oss.str();
   CUstream stream = reinterpret_cast<CUstream>(stream_ptr);
 
   int device_id;
@@ -189,11 +200,18 @@ void TileScaleInitDistributedTable::operator()(const ffi::PackedArgs& args, ffi:
   // Get the device pointer for meta_data symbol (lazy initialization)
   if (pcache_[device_id] == 0) {
     pcache_[device_id] = m_->GetGlobal(device_id, "meta_data", kMetaDataSize);
+    std::printf("GetGlobal meta_data %llu rank=%d\n", pcache_[device_id], device_id);
   }
 
   // Copy data from host to device
   size_t bytes = static_cast<size_t>(table_size) * sizeof(uint64_t);
-  CUDA_DRIVER_CALL(cuMemcpyHtoDAsync(pcache_[device_id], host_table, bytes, stream));
+  std::printf("Copying %zu bytes from host to device rank=%d\n", bytes, device_id);
+  void* device_table = reinterpret_cast<void*>(pcache_[device_id]);
+  CUDA_CALL(cudaMemcpy(device_table, host_table, bytes, cudaMemcpyHostToDevice));
+  std::vector<uint64_t> verify(table_size);                                             
+  CUDA_DRIVER_CALL(cuMemcpyDtoH(verify.data(), pcache_[device_id], bytes));
+  std::printf("[DEBUG] Verify after copy: %llu %llu %llu\n",                            
+    verify[0], verify[1], verify[2]);
 
   // Return success
   *rv = 0;

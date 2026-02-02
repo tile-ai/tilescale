@@ -465,7 +465,7 @@ class JITKernel(Generic[_P, _T]):
     def initialize(
         self,
         allocator: BaseAllocator,
-        stream: int = None,
+        stream: int | None = None,
     ):
         """Initialize base addr table for TileScale kernels."""
 
@@ -475,10 +475,11 @@ class JITKernel(Generic[_P, _T]):
 
         if self.execution_backend == "tvm_ffi":
             # TVM FFI adapter: call init_table method directly
+            # Note: TVM FFI expects plain int pointers, not ctypes objects
             result = self.adapter.init_table(
                 allocator.table.data_ptr(),
                 allocator.table_size,
-                # tvm-ffi doesn't support stream val
+                stream_val,
             )
             if result != 0:
                 raise RuntimeError("Initialization failed for TVM FFI adapter")
