@@ -1,6 +1,7 @@
 /*!
  * \file tilescale_cuda_module.h
- * \brief TileScale extended CUDA module with distributed table initialization support.
+ * \brief TileScale extended CUDA module with distributed table initialization
+ * support.
  */
 #ifndef TILESCALE_RUNTIME_TILESCALE_CUDA_MODULE_H_
 #define TILESCALE_RUNTIME_TILESCALE_CUDA_MODULE_H_
@@ -27,11 +28,12 @@ namespace runtime {
  * \param fmap The map function information map of each function.
  * \param cuda_source Optional, cuda source file
  */
-ffi::Module TileScaleCUDAModuleCreate(std::string data, std::string fmt,
-                                      std::unordered_map<std::string, FunctionInfo> fmap,
-                                      std::string cuda_source);
+ffi::Module
+TileScaleCUDAModuleCreate(std::string data, std::string fmt,
+                          std::unordered_map<std::string, FunctionInfo> fmap,
+                          std::string cuda_source);
 
-}  // namespace runtime
-}  // namespace tvm
+} // namespace runtime
+} // namespace tvm
 
-#endif  // TILESCALE_RUNTIME_TILESCALE_CUDA_MODULE_H_
+#endif // TILESCALE_RUNTIME_TILESCALE_CUDA_MODULE_H_

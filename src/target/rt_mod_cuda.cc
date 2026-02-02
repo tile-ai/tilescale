@@ -1,5 +1,5 @@
-#include "codegen_cuda.h"
 #include "../runtime/tilescale_cuda_module.h"
+#include "codegen_cuda.h"
 #include "runtime/pack_args.h"
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/transform.h>
@@ -76,7 +76,8 @@ ffi::Module BuildTileLangCUDA(IRModule mod, Target target) {
   } else {
     ICHECK(0);
   }
-  return runtime::TileScaleCUDAModuleCreate(ptx, fmt, ExtractFuncInfo(mod), code);
+  return runtime::TileScaleCUDAModuleCreate(ptx, fmt, ExtractFuncInfo(mod),
+                                            code);
 }
 
 ffi::Module BuildTileLangCUDAWithoutCompile(IRModule mod, Target target) {
@@ -99,7 +100,8 @@ ffi::Module BuildTileLangCUDAWithoutCompile(IRModule mod, Target target) {
           ffi::Function::GetGlobal("tilelang_callback_cuda_postproc")) {
     code = (*f)(code, target).cast<std::string>();
   }
-  return runtime::TileScaleCUDAModuleCreate("ptx", "ptx", ExtractFuncInfo(mod), code);
+  return runtime::TileScaleCUDAModuleCreate("ptx", "ptx", ExtractFuncInfo(mod),
+                                            code);
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

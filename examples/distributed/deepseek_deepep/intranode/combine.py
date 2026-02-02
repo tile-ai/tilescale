@@ -84,9 +84,7 @@ def cached_notify_combine(
     kernel = cached_notify_combine_kernel(num_ranks, num_sms)
     kernel.initialize(allocator=allocator)
 
-    kernel(
-        send_head, channel_head_idx, channel_tail_idx, barrier_signal
-    )  # reduce runtime overhead
+    kernel(send_head, channel_head_idx, channel_tail_idx, barrier_signal)  # reduce runtime overhead
 
 
 @tilelang.jit(
@@ -379,9 +377,7 @@ def intranode_combine(rank: int, allocator, symm_buffers, x, config, handle, top
 
     # notify combine
     with torch.cuda.stream(comm_stream):
-        cached_notify_combine(
-            num_ranks, config.num_sms, send_head, channel_head_idx, channel_tail_idx, barrier_signal, allocator
-        )
+        cached_notify_combine(num_ranks, config.num_sms, send_head, channel_head_idx, channel_tail_idx, barrier_signal, allocator)
 
     # combine
     recv_x = torch.empty((num_recv_tokens, hidden), dtype=x.dtype, device="cuda")
