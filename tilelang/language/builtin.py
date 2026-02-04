@@ -809,6 +809,55 @@ def st(
                            dst_pe)
 
 
+def atom_add_remote(
+    dst: PrimExpr,
+    value: PrimExpr,
+    scope: Literal["gpu", "sys"] = "sys",
+    sem: Literal["relaxed", "acquire", "release", "acq_rel"] = "relaxed",
+    dst_pe: tir.PrimExpr | tir.IntImm | None = -1,
+):
+    """Perform a remote atomic add operation with return value support
+
+    Args:
+        dst: The destination address to store the value to.
+        value: The value to store.
+        scope: The memory scope.
+        sem: The memory semantic.
+        dst_pe: The destination processing element (PE) identifier.
+                Use -1 (default) for local PE, or a non-negative integer to target a remote PE.
+
+    Returns:
+        tir.Call: Returns the old value before the atomic add (uint32).
+    """
+    assert scope in ["gpu", "sys"], "Scope must be one of 'gpu', or 'sys'."
+    assert sem in ["relaxed", "acquire", "release", "acq_rel"
+                  ], "Semantic must be one of 'relaxed', 'acquire', 'release', or 'acq_rel'."
+    
+    # Build the intrinsic function name
+    func_name = f"tl::ptx_atom_add_{sem}_{scope}"
+    
+    # If dst_pe is specified and not -1, compute remote address
+    is_remote = not (isinstance(dst_pe, tir.IntImm) and dst_pe.value == -1)
+    
+    if is_remote:
+        # Compute remote address: remote_base_ptr(dst_pe) + (address_of(dst) - remote_base_ptr(get_rank()))
+        local_rank = tir.Call("int64", tir.op.Op.get("tl.get_rank"), [])
+        local_base_ptr = tir.Call("handle", tir.op.Op.get("tl.get_remote_base_ptr"), [local_rank])
+        offset_to_base = tir.Sub(
+            tir.Call("handle", tir.op.Op.get("tl.get_uintptr_t"), [address_of(dst)]),
+            local_base_ptr
+        )
+        remote_ptr = tir.Add(
+            tir.Call("handle", tir.op.Op.get("tl.get_remote_base_ptr"), [dst_pe]),
+            offset_to_base
+        )
+        # Call the PTX intrinsic directly with remote address
+        return tir.call_extern("uint32", func_name, remote_ptr, value)
+    else:
+        # Local atomic add
+        return tir.call_extern("uint32", func_name, address_of(dst), value)
+
+
 def elect_one_sync():
     """Efficiently elect exactly one lane within a warp."""
     return tir.call_intrin("bool", tir.op.Op.get("tl.elect_one_sync"))

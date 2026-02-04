@@ -68,6 +68,12 @@ TL_DEVICE int ld_acquire(const int *ptr) {
   return ret;
 }
 
+TL_DEVICE int ld_acquire_sys(const int *ptr) {
+  int ret = 0;
+  asm volatile("ld.global.acquire.sys.b32 %0, [%1];\n" : "=r"(ret) : "l"(ptr));
+  return ret;
+}
+
 // Initialize a GPU barrier
 template <const uint32_t kExpected>
 TL_DEVICE void init_barrier_gpu(uint32_t *barrier) {
@@ -120,7 +126,7 @@ TL_DEVICE unsigned int sync_grids_arrive(uint32_t *barrier) {
     unsigned int expected = gridDim.x * gridDim.y * gridDim.z;
     unsigned int nb = 1;
     if (IS_MASTER_BLOCK()) {
-      nb = 0x80000000 - (expected - 1);
+      nb = BARRIER_MAGIC - (expected - 1);
     }
     asm volatile("atom.add.release.gpu.u32 %0,[%1],%2;"
                  : "=r"(oldArrive)
@@ -140,7 +146,7 @@ TL_DEVICE void sync_grids_wait(unsigned int oldArrive, uint32_t *barrier) {
                    : "=r"(current_arrive)
                    : "l"((unsigned int *)barrier)
                    : "memory");
-    } while (!(((oldArrive ^ current_arrive) & 0x80000000) != 0));
+    } while (!(((oldArrive ^ current_arrive) & BARRIER_MAGIC) != 0));
   }
   __syncthreads();
 }
@@ -150,7 +156,7 @@ TL_DEVICE void sync_grid(uint32_t *barrier) {
   sync_grids_wait(token, barrier);
 }
 
-// Sync blocks at a system-level barrier with an optinal fence
+// Sync blocks at a system-level barrier with an optional fence
 // TODO(wt): Add timeout handling
 
 template <bool need_fence = true>
@@ -184,6 +190,61 @@ TL_DEVICE void barrier_blocks(int offset, int rank, int num_ranks) {
 #undef FINISHED_SUM_TAG
 }
 
+// Memory scope for wait operations
+enum class WaitScope {
+  GPU = 0,    // Use ld.volatile.global - suitable for same-GPU synchronization
+  SYSTEM = 1  // Use ld.acquire.sys - required for cross-PE/NUMA synchronization
+};
+
+// Load with volatile semantics (GPU scope, faster but no cross-PE guarantees)
+template <typename T>
+TL_DEVICE T ld_wait_gpu(const T *ptr) {
+  if constexpr (std::is_same_v<T, int>) {
+    return ld_volatile_global(ptr);
+  } else if constexpr (std::is_same_v<T, unsigned int> || std::is_same_v<T, uint32_t>) {
+    // Cast to int* for ld_volatile_global, then cast back
+    const int *int_ptr = reinterpret_cast<const int *>(ptr);
+    return static_cast<T>(ld_volatile_global(int_ptr));
+  } else {
+    return *reinterpret_cast<const volatile T*>(ptr);
+  }
+}
+
+// Load with acquire.sys semantics (SYSTEM scope, required for proper cross-PE sync)
+template <typename T>
+TL_DEVICE T ld_wait_sys(const T *ptr) {
+  if constexpr (std::is_same_v<T, int> || std::is_same_v<T, unsigned int> || 
+                std::is_same_v<T, uint32_t>) {
+    unsigned int ret = 0;
+    asm volatile("ld.global.acquire.sys.b32 %0, [%1];\n" : "=r"(ret) : "l"(ptr));
+    return static_cast<T>(ret);
+  } else {
+    // Fallback to volatile for other types
+    return *reinterpret_cast<const volatile T*>(ptr);
+  }
+}
+
+// Generic load dispatcher based on scope (runtime)
+// Note: When scope is a compile-time constant, compiler should optimize away the branch
+template <typename T>
+ TL_DEVICE T ld_wait_generic(const T *ptr, WaitScope scope) {
+  if (scope == WaitScope::SYSTEM) {
+    return ld_wait_sys(ptr);
+  } else {
+    return ld_wait_gpu(ptr);
+  }
+}
+
+// Compile-time scope selection (better performance when scope is known at compile time)
+template <WaitScope scope, typename T>
+ TL_DEVICE T ld_wait_static(const T *ptr) {
+  if constexpr (scope == WaitScope::SYSTEM) {
+    return ld_wait_sys(ptr);
+  } else {
+    return ld_wait_gpu(ptr);
+  }
+}
+
 template <typename T> TL_DEVICE void wait_eq(void *ptr, T val) {
   T *flag_ptr = reinterpret_cast<T *>(ptr);
 // Spin-loop
@@ -192,53 +253,58 @@ template <typename T> TL_DEVICE void wait_eq(void *ptr, T val) {
     ;
 }
 
-template <typename P, typename T> TL_DEVICE void wait_ne(P ptr, T val) {
+template <typename P, typename T> 
+TL_DEVICE void wait_ne(P ptr, T val, WaitScope scope = WaitScope::SYSTEM) {
   static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
                 "P must be a pointer or uint64_t");
   T *flag_ptr = reinterpret_cast<T *>(ptr);
-// Spin-loop
+// Spin-loop: use SYSTEM scope (acquire.sys) for cross-PE sync, GPU scope (volatile) for same-GPU
 #pragma unroll 1
-  while (ld_volatile_global(flag_ptr) == val)
+  while (ld_wait_generic(flag_ptr, scope) == val)
     ;
 }
 
-template <typename P, typename T> TL_DEVICE void wait_ge(P ptr, T val) {
+template <typename P, typename T> 
+TL_DEVICE void wait_ge(P ptr, T val, WaitScope scope = WaitScope::SYSTEM) {
   static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
                 "P must be a pointer or uint64_t");
   T *flag_ptr = reinterpret_cast<T *>(ptr);
-// Spin-loop
+// Spin-loop: use SYSTEM scope (acquire.sys) for cross-PE sync, GPU scope (volatile) for same-GPU
 #pragma unroll 1
-  while (ld_volatile_global(flag_ptr) < val)
+  while (ld_wait_generic(flag_ptr, scope) < val)
     ;
 }
 
-template <typename P, typename T> TL_DEVICE void wait_le(P ptr, T val) {
+template <typename P, typename T> 
+TL_DEVICE void wait_le(P ptr, T val, WaitScope scope = WaitScope::SYSTEM) {
   static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
                 "P must be a pointer or uint64_t");
   T *flag_ptr = reinterpret_cast<T *>(ptr);
-// Spin-loop
+// Spin-loop: use SYSTEM scope (acquire.sys) for cross-PE sync, GPU scope (volatile) for same-GPU
 #pragma unroll 1
-  while (ld_volatile_global(flag_ptr) > val)
+  while (ld_wait_generic(flag_ptr, scope) > val)
     ;
 }
 
-template <typename P, typename T> TL_DEVICE void wait_gt(P ptr, T val) {
+template <typename P, typename T> 
+TL_DEVICE void wait_gt(P ptr, T val, WaitScope scope = WaitScope::SYSTEM) {
   static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
                 "P must be a pointer or uint64_t");
   T *flag_ptr = reinterpret_cast<T *>(ptr);
-// Spin-loop
+// Spin-loop: use SYSTEM scope (acquire.sys) for cross-PE sync, GPU scope (volatile) for same-GPU
 #pragma unroll 1
-  while (ld_volatile_global(flag_ptr) <= val)
+  while (ld_wait_generic(flag_ptr, scope) <= val)
     ;
 }
 
-template <typename P, typename T> TL_DEVICE void wait_lt(P ptr, T val) {
+template <typename P, typename T> 
+TL_DEVICE void wait_lt(P ptr, T val, WaitScope scope = WaitScope::SYSTEM) {
   static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
                 "P must be a pointer or uint64_t");
   T *flag_ptr = reinterpret_cast<T *>(ptr);
-// Spin-loop
+// Spin-loop: use SYSTEM scope (acquire.sys) for cross-PE sync, GPU scope (volatile) for same-GPU
 #pragma unroll 1
-  while (ld_volatile_global(flag_ptr) >= val)
+  while (ld_wait_generic(flag_ptr, scope) >= val)
     ;
 }
 

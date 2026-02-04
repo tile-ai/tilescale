@@ -141,6 +141,8 @@ WaitOp::WaitOp(Array<PrimExpr> args, BufferMap vmap) {
   node->addr = args[1];
   node->expected = args[2];
   node->peer = args[3];
+  // scope parameter is optional, default to SYSTEM (1) for safety
+  node->scope = (args.size() > 4) ? args[4].as<IntImmNode>()->value : 1;
   data_ = std::move(node);
   (void)vmap;
 }
@@ -174,6 +176,8 @@ Stmt WaitOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     new_args.push_back(addr);
   }
   new_args.push_back(expected);
+  // Pass scope: 0=GPU (volatile), 1=SYSTEM (acquire.sys)
+  new_args.push_back(IntImm(DataType::Int(32), scope));
 
   auto wait = Call(DataType::Handle(), builtin::call_extern(), new_args);
   return Evaluate(wait);
@@ -197,7 +201,7 @@ TIR_REGISTER_TL_OP(BarrierBlocksOp, barrier_blocks)
                                Integer(CallEffectKind::kOpaque));
 
 TIR_REGISTER_TL_OP(WaitOp, wait)
-    .set_num_inputs(4)
+    .set_num_inputs(5)  // relation, addr, expected, peer, scope (scope is optional, default=1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 

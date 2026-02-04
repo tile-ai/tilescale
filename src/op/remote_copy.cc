@@ -382,6 +382,70 @@ TileOperator LdOpNode::Clone() const {
   return LdOp(node);
 }
 
+AtomAddRemoteOp::AtomAddRemoteOp(Array<PrimExpr> args, BufferMap vmap) {
+  ObjectPtr<AtomAddRemoteOpNode> node = make_object<AtomAddRemoteOpNode>();
+  node->dst = args[0];
+  ICHECK(node->dst.as<CallNode>()) << "dst must be a call node";
+  ICHECK(node->dst.as<CallNode>()->op.same_as(builtin::address_of()))
+      << "dst must be address_of op";
+
+  node->value = args[1];
+  node->sem = args[2].as<IntImm>().value()->value;
+  node->scope = args[3].as<IntImm>().value()->value;
+  node->dst_pe = args[4];
+  data_ = std::move(node);
+  (void)vmap;
+}
+
+bool AtomAddRemoteOpNode::is_distributed() const {
+  return !(dst_pe->IsInstance<IntImmNode>() &&
+           dst_pe.as<IntImmNode>()->value == -1);
+}
+
+Stmt AtomAddRemoteOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+  (void)analyzer;
+  (void)T;
+  Array<PrimExpr> new_args;
+  std::stringstream ss;
+
+  // Map integers to semantic literal strings for PTX atom instruction
+  const char *sem_str[] = {"relaxed", "acquire", "release", "acq_rel"};
+  const char *scope_str[] = {"gpu", "sys"};
+
+  // Build function name: tl::ptx_atom_add_<sem>_<scope>
+  ss << "tl::ptx_atom_add_" << sem_str[sem] << "_" << scope_str[scope];
+
+  new_args.push_back(StringImm(ss.str()));
+  if (is_distributed()) {
+    PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
+    PrimExpr local_base_ptr =
+        Call(DataType::Handle(), tl::get_remote_base_ptr(), {local_rank});
+    PrimExpr offset_to_base = Sub(
+        Call(DataType::Handle(), tl::get_uintptr_t(), {dst}), local_base_ptr);
+    new_args.push_back(
+        Call(DataType::Handle(), tl::get_remote_base_ptr(), {dst_pe}) +
+        offset_to_base);
+  } else {
+    new_args.push_back(dst);
+  }
+  new_args.push_back(value);
+
+  auto atom_add = Call(DataType::UInt(32), builtin::call_extern(), new_args);
+  return Evaluate(atom_add);
+}
+
+LayoutMap AtomAddRemoteOpNode::InferLayout(const LayoutInferArgs &T,
+                                           InferLevel level) const {
+  (void)T;
+  (void)level;
+  return {};
+}
+
+TileOperator AtomAddRemoteOpNode::Clone() const {
+  auto node = make_object<AtomAddRemoteOpNode>(*this);
+  return AtomAddRemoteOp(node);
+}
+
 TIR_REGISTER_TL_OP(PutOp, put)
     .set_num_inputs(7)
     .set_attr<TCallEffectKind>("TCallEffectKind",
@@ -398,10 +462,15 @@ TIR_REGISTER_TL_OP(StOp, st).set_num_inputs(6).set_attr<TCallEffectKind>(
 TIR_REGISTER_TL_OP(LdOp, ld).set_num_inputs(7).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
+TIR_REGISTER_TL_OP(AtomAddRemoteOp, atom_add_remote).set_num_inputs(5).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
+
 TVM_FFI_STATIC_INIT_BLOCK({ PutOpNode::RegisterReflection(); });
 TVM_FFI_STATIC_INIT_BLOCK({ GetOpNode::RegisterReflection(); });
 TVM_FFI_STATIC_INIT_BLOCK({ StOpNode::RegisterReflection(); });
 TVM_FFI_STATIC_INIT_BLOCK({ LdOpNode::RegisterReflection(); });
+TVM_FFI_STATIC_INIT_BLOCK({ AtomAddRemoteOpNode::RegisterReflection(); });
+
 
 } // namespace tl
 } // namespace tvm

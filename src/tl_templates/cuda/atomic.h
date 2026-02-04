@@ -241,36 +241,40 @@ TL_DEVICE uint32_t ptx_atom_add_acq_rel_gpu(const uint32_t *ptr,
   return ret;
 }
 
-TL_DEVICE uint32_t ptx_atom_add_relaxed_sys(const uint32_t *ptr,
+TL_DEVICE uint32_t ptx_atom_add_relaxed_sys(unsigned long addr,
                                             uint32_t value) {
   uint32_t ret;
+  const uint32_t *ptr = reinterpret_cast<const uint32_t *>(addr);
   asm volatile("atom.add.relaxed.sys.global.u32 %0, [%1], %2;\n"
                : "=r"(ret)
                : "l"(ptr), "r"(value));
   return ret;
 }
 
-TL_DEVICE uint32_t ptx_atom_add_acquire_sys(const uint32_t *ptr,
+TL_DEVICE uint32_t ptx_atom_add_acquire_sys(unsigned long addr,
                                             uint32_t value) {
   uint32_t ret;
+  const uint32_t *ptr = reinterpret_cast<const uint32_t *>(addr);
   asm volatile("atom.add.acquire.sys.global.u32 %0, [%1], %2;\n"
                : "=r"(ret)
                : "l"(ptr), "r"(value));
   return ret;
 }
 
-TL_DEVICE uint32_t ptx_atom_add_release_sys(const uint32_t *ptr,
+TL_DEVICE uint32_t ptx_atom_add_release_sys(unsigned long addr,
                                             uint32_t value) {
   uint32_t ret;
+  const uint32_t *ptr = reinterpret_cast<const uint32_t *>(addr);
   asm volatile("atom.add.release.sys.global.u32 %0, [%1], %2;\n"
                : "=r"(ret)
                : "l"(ptr), "r"(value));
   return ret;
 }
 
-TL_DEVICE uint32_t ptx_atom_add_acq_rel_sys(const uint32_t *ptr,
+TL_DEVICE uint32_t ptx_atom_add_acq_rel_sys(unsigned long addr,
                                             uint32_t value) {
   uint32_t ret;
+  const uint32_t *ptr = reinterpret_cast<const uint32_t *>(addr);
   asm volatile("atom.add.acq_rel.sys.global.u32 %0, [%1], %2;\n"
                : "=r"(ret)
                : "l"(ptr), "r"(value));

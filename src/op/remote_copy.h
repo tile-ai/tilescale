@@ -319,6 +319,60 @@ public:
   static const Op &Get();
 };
 
+class AtomAddRemoteOpNode : public TileOperatorNode {
+public:
+  PrimExpr dst;    ///< Destination address
+  PrimExpr value;  ///< Value to atomically add
+  PrimExpr dst_pe; ///< Destination processing element (optional)
+  int scope;       ///< Memory scope (0: GPU, 1: SYS)
+  int sem;         ///< Memory semantic (0: relaxed, 1: acquire, 2: release, 3: acq_rel)
+
+  bool is_distributed() const;
+
+  static constexpr const char *_type_key = "tl.AtomAddRemoteOp";
+  TVM_DECLARE_FINAL_OBJECT_INFO(AtomAddRemoteOpNode, TileOperatorNode);
+
+  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
+  LayoutMap InferLayout(const LayoutInferArgs &T,
+                        InferLevel level) const override;
+  static const Op &Get();
+  TileOperator Clone() const override;
+
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<AtomAddRemoteOpNode>()
+        .def_ro("dst", &AtomAddRemoteOpNode::dst)
+        .def_ro("value", &AtomAddRemoteOpNode::value)
+        .def_ro("dst_pe", &AtomAddRemoteOpNode::dst_pe)
+        .def_ro("scope", &AtomAddRemoteOpNode::scope)
+        .def_ro("sem", &AtomAddRemoteOpNode::sem);
+  }
+
+  bool SEqualReduce(const AtomAddRemoteOpNode *other, SEqualReducer equal) const {
+    return equal(dst, other->dst) && equal(value, other->value) &&
+           equal(dst_pe, other->dst_pe) && scope == other->scope &&
+           sem == other->sem;
+  }
+
+  void SHashReduce(SHashReducer hash_reduce) const {
+    hash_reduce(dst);
+    hash_reduce(value);
+    hash_reduce(dst_pe);
+    hash_reduce(scope);
+    hash_reduce(sem);
+  }
+
+  static constexpr bool _type_has_method_sequal_reduce = true;
+  static constexpr bool _type_has_method_shash_reduce = true;
+};
+
+class AtomAddRemoteOp : public TileOperator {
+public:
+  TVM_DEFINE_OBJECT_REF_METHODS(AtomAddRemoteOp, TileOperator, AtomAddRemoteOpNode);
+  TVM_DLL AtomAddRemoteOp(Array<PrimExpr> args, BufferMap vmap);
+  static const Op &Get();
+};
+
 } // namespace tl
 } // namespace tvm
 

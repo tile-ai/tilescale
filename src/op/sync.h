@@ -57,6 +57,7 @@ public:
   PrimExpr expected; ///< The expected value to compare against.
   PrimExpr peer;     ///< The peer to compare against.
   int relation;      ///< The relation to compare against.
+  int scope;         ///< Memory scope: 0=GPU (volatile), 1=SYSTEM (acquire.sys)
 
   bool is_distributed() const;
 
@@ -75,12 +76,14 @@ public:
         .def_ro("addr", &WaitOpNode::addr)
         .def_ro("expected", &WaitOpNode::expected)
         .def_ro("peer", &WaitOpNode::peer)
-        .def_ro("relation", &WaitOpNode::relation);
+        .def_ro("relation", &WaitOpNode::relation)
+        .def_ro("scope", &WaitOpNode::scope);
   }
 
   bool SEqualReduce(const WaitOpNode *other, SEqualReducer equal) const {
     return equal(addr, other->addr) && equal(expected, other->expected) &&
-           equal(peer, other->peer) && equal(relation, other->relation);
+           equal(peer, other->peer) && relation == other->relation &&
+           scope == other->scope;
   }
 
   void SHashReduce(SHashReducer hash_reduce) const {
@@ -88,6 +91,7 @@ public:
     hash_reduce(expected);
     hash_reduce(peer);
     hash_reduce(relation);
+    hash_reduce(scope);
   }
 
   static constexpr bool _type_has_method_sequal_reduce = true;
