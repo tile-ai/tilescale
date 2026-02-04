@@ -51,9 +51,6 @@ TIR_DEFINE_TL_BUILTIN(wait_barrier_gpu)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_DEFINE_TL_BUILTIN(wait_eq).set_num_inputs(2).set_attr<TCallEffectKind>(
-    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
-
 TIR_DEFINE_TL_BUILTIN(sync_barrier_gpu)
     .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
@@ -137,12 +134,17 @@ PrimExpr BarrierBlocksOpNode::MakeLocalBarAddr(const LowerArgs &T) const {
 
 WaitOp::WaitOp(Array<PrimExpr> args, BufferMap vmap) {
   ObjectPtr<WaitOpNode> node = make_object<WaitOpNode>();
-  node->relation = args[0].as<IntImmNode>()->value;
+  ICHECK_GE(args.size(), 4);
+  const auto *relation_node = args[0].as<IntImmNode>();
+  ICHECK(relation_node) << "Wait relation must be an integer";
+  node->relation = relation_node->value;
   node->addr = args[1];
   node->expected = args[2];
   node->peer = args[3];
-  // scope parameter is optional, default to SYSTEM (1) for safety
-  node->scope = (args.size() > 4) ? args[4].as<IntImmNode>()->value : 1;
+  // scope parameter is optional, default to SYSTEM (3) for safety
+  node->scope = (args.size() > 4) ? args[4].as<IntImmNode>()->value : 3;
+  // semantic parameter is optional, default to ACQUIRE (3) for safety
+  node->semantic = (args.size() > 5) ? args[5].as<IntImmNode>()->value : 3;
   data_ = std::move(node);
   (void)vmap;
 }
@@ -176,8 +178,10 @@ Stmt WaitOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     new_args.push_back(addr);
   }
   new_args.push_back(expected);
-  // Pass scope: 0=GPU (volatile), 1=SYSTEM (acquire.sys)
+  // Pass scope: 0=CTA, 1=CLUSTER, 2=GPU, 3=SYSTEM
   new_args.push_back(IntImm(DataType::Int(32), scope));
+  // Pass semantic: 0=WEAK, 1=VOLATILE, 2=RELAXED, 3=ACQUIRE, 4=RELEASE, 5=ACQ_REL
+  new_args.push_back(IntImm(DataType::Int(32), semantic));
 
   auto wait = Call(DataType::Handle(), builtin::call_extern(), new_args);
   return Evaluate(wait);
@@ -201,7 +205,7 @@ TIR_REGISTER_TL_OP(BarrierBlocksOp, barrier_blocks)
                                Integer(CallEffectKind::kOpaque));
 
 TIR_REGISTER_TL_OP(WaitOp, wait)
-    .set_num_inputs(5)  // relation, addr, expected, peer, scope (scope is optional, default=1)
+    .set_num_inputs(6)  // relation, addr, expected, peer, scope, semantic
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 

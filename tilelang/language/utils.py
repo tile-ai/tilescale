@@ -4,7 +4,7 @@ from tilelang import tvm as tvm
 from tvm import tir
 from tvm.tir import PrimExpr, Buffer, BufferLoad, op
 from tilelang import language as T
-
+from enum import Enum
 
 def region(buffer: BufferLoad, access_type: str, *args: PrimExpr):
     """
@@ -158,3 +158,35 @@ def linear_index(*args: PrimExpr) -> PrimExpr:
     for idx, stride in zip(coords[1:], strides):
         linear = linear * stride + idx
     return linear
+
+
+class MemoryScope(Enum):
+    """Memory scope for wait operations.
+    
+    - CTA: Uses ld.volatile.cta (faster, suitable for same-CTA synchronization)
+    - CLUSTER: Uses ld.volatile.cluster (faster, suitable for same-cluster synchronization)
+    - GPU: Uses ld.volatile.gpu (faster, suitable for same-GPU synchronization)
+    - SYSTEM: Uses ld.acquire.sys (required for cross-PE/NUMA synchronization with st.release.sys)
+    """
+    CTA = 0
+    CLUSTER = 1
+    GPU = 2
+    SYSTEM = 3
+
+
+class MemorySemantic(Enum):
+    """Memory semantic for memory operations.
+    
+    - WEAK: Uses ld.weak (no synchronization)
+    - VOLATILE: Uses ld.volatile (faster, suitable for same-GPU synchronization)
+    - RELAXED: Uses ld.relaxed (faster, suitable for same-GPU synchronization)
+    - ACQUIRE: Uses ld.acquire (slower, suitable for cross-PE/NUMA synchronization with st.release)
+    - RELEASE: Uses ld.release (slower, suitable for cross-PE/NUMA synchronization with st.acquire)
+    - ACQ_REL: Uses ld.acq_rel (both acquire and release semantics)
+    """
+    WEAK = 0
+    VOLATILE = 1
+    RELAXED = 2
+    ACQUIRE = 3
+    RELEASE = 4
+    ACQ_REL = 5

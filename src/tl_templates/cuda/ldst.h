@@ -4,7 +4,7 @@
 
 // Memory semantic and scope enums
 enum class Semantic { WEAK, VOLATILE, ACQUIRE, RELEASE, RELAXED };
-enum class Scope { CTA, GPU, SYS };
+enum class Scope { CTA, CLUSTER, GPU, SYS };
 
 #ifndef TL_ALWAYS_FALSE_V_DEFINED
 #define TL_ALWAYS_FALSE_V_DEFINED

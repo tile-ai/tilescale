@@ -39,13 +39,6 @@ TVM_DLL const Op &arrive_barrier_gpu();
 TVM_DLL const Op &wait_barrier_gpu();
 
 /*!
- * \brief Wait until *addr == expected* for GPU-level synchronization
- * void wait_eq(addr, expected)
- */
-
-TVM_DLL const Op &wait_eq();
-
-/*!
  * \brief TileOperatorNode for wait operation.
  *
  * WaitOpNode represents a wait primitive,
@@ -57,7 +50,8 @@ public:
   PrimExpr expected; ///< The expected value to compare against.
   PrimExpr peer;     ///< The peer to compare against.
   int relation;      ///< The relation to compare against.
-  int scope;         ///< Memory scope: 0=GPU (volatile), 1=SYSTEM (acquire.sys)
+  int scope;         ///< Memory scope: 0=CTA, 1=CLUSTER, 2=GPU, 3=SYSTEM
+  int semantic;      ///< Memory semantic: 0=WEAK, 1=VOLATILE, 2=RELAXED, 3=ACQUIRE, 4=RELEASE, 5=ACQ_REL
 
   bool is_distributed() const;
 
@@ -77,13 +71,14 @@ public:
         .def_ro("expected", &WaitOpNode::expected)
         .def_ro("peer", &WaitOpNode::peer)
         .def_ro("relation", &WaitOpNode::relation)
-        .def_ro("scope", &WaitOpNode::scope);
+        .def_ro("scope", &WaitOpNode::scope)
+        .def_ro("semantic", &WaitOpNode::semantic);
   }
 
   bool SEqualReduce(const WaitOpNode *other, SEqualReducer equal) const {
     return equal(addr, other->addr) && equal(expected, other->expected) &&
            equal(peer, other->peer) && relation == other->relation &&
-           scope == other->scope;
+           scope == other->scope && semantic == other->semantic;
   }
 
   void SHashReduce(SHashReducer hash_reduce) const {
@@ -92,6 +87,7 @@ public:
     hash_reduce(peer);
     hash_reduce(relation);
     hash_reduce(scope);
+    hash_reduce(semantic);
   }
 
   static constexpr bool _type_has_method_sequal_reduce = true;

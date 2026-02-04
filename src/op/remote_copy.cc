@@ -273,10 +273,14 @@ Stmt StOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   std::stringstream ss;
 
   // Map integers to enum literal strings
+  // 0: WEAK, 1: VOLATILE, 2: RELAXED, 3: ACQUIRE, 4: RELEASE, 5: ACQ_REL
   const char *sem_str[] = {"Semantic::WEAK", "Semantic::VOLATILE",
-                           "Semantic::ACQUIRE", "Semantic::RELEASE",
-                           "Semantic::RELAXED"};
-  const char *scope_str[] = {"Scope::CTA", "Scope::GPU", "Scope::SYS"};
+                           "Semantic::RELAXED", "Semantic::ACQUIRE",
+                           "Semantic::RELEASE", "Semantic::ACQ_REL"};
+  const char *scope_str[] = {"Scope::CTA", "Scope::CLUSTER", "Scope::GPU", "Scope::SYS"};
+
+  ICHECK_LT(sem, 6);
+  ICHECK_LT(scope, 4);
 
   // Build function name: tl::st<Semantic::X, Scope::Y, bool>
   ss << "tl::st<" << sem_str[sem] << ", " << scope_str[scope] << ", "
@@ -342,10 +346,14 @@ Stmt LdOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   std::stringstream ss;
 
   // Map integers to enum literal strings
+  // 0: WEAK, 1: VOLATILE, 2: RELAXED, 3: ACQUIRE, 4: RELEASE, 5: ACQ_REL
   const char *sem_str[] = {"Semantic::WEAK", "Semantic::VOLATILE",
-                           "Semantic::ACQUIRE", "Semantic::RELEASE",
-                           "Semantic::RELAXED"};
-  const char *scope_str[] = {"Scope::CTA", "Scope::GPU", "Scope::SYS"};
+                           "Semantic::RELAXED", "Semantic::ACQUIRE",
+                           "Semantic::RELEASE", "Semantic::ACQ_REL"};
+  const char *scope_str[] = {"Scope::CTA", "Scope::CLUSTER", "Scope::GPU", "Scope::SYS"};
+
+  ICHECK_LT(sem, 6);
+  ICHECK_LT(scope, 4);
 
   // Build function name: tl::ld<Semantic::X, Scope::Y, bool, bool>
   ss << "tl::ld<" << sem_str[sem] << ", " << scope_str[scope] << ", "
@@ -409,8 +417,9 @@ Stmt AtomAddRemoteOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) c
   std::stringstream ss;
 
   // Map integers to semantic literal strings for PTX atom instruction
-  const char *sem_str[] = {"relaxed", "acquire", "release", "acq_rel"};
-  const char *scope_str[] = {"gpu", "sys"};
+  // Unified Mapping: 2: relaxed, 3: acquire, 4: release, 5: acq_rel
+  const char *sem_str[] = {"weak", "volatile", "relaxed", "acquire", "release", "acq_rel"};
+  const char *scope_str[] = {"cta", "cluster", "gpu", "sys"}; // Unified: 2: gpu, 3: system (mapped below)
 
   // Build function name: tl::ptx_atom_add_<sem>_<scope>
   ss << "tl::ptx_atom_add_" << sem_str[sem] << "_" << scope_str[scope];

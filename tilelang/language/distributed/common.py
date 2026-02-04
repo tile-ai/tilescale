@@ -5,6 +5,7 @@ from tvm import tir
 from tvm.tir import address_of
 from tvm.tir import PrimExpr, IntImm
 from enum import Enum
+from tilelang.language.utils import MemoryScope, MemorySemantic
 
 
 def get_rank():
@@ -122,27 +123,29 @@ class BinaryRelation(Enum):
     LT = 5
 
 
-class WaitScope(Enum):
-    """Memory scope for wait operations.
-    
-    - GPU: Uses ld.volatile.global (faster, suitable for same-GPU synchronization)
-    - SYSTEM: Uses ld.acquire.sys (required for cross-PE/NUMA synchronization with st.release.sys)
-    """
-    GPU = 0
-    SYSTEM = 1
-
-
-def wait_eq(barrier: PrimExpr, expected: PrimExpr):
+def wait_eq(barrier: PrimExpr,
+            expected: PrimExpr,
+            peer: PrimExpr | None = -1,
+            scope: MemoryScope = MemoryScope.SYSTEM,
+            semantic: MemorySemantic = MemorySemantic.ACQUIRE):
     """Wait until *barrier == expected* for GPU-level synchronization.
     # todo: have different semantic compared to 3 fns below currently
     Args:
         barrier: The barrier to wait at
         expected: The expected value to wait for
+        peer: The PE to wait on (-1 for local)
+        scope: Memory scope (GPU=volatile, SYSTEM=acquire.sys for cross-PE sync)
+        semantic: Memory semantic (WEAK, VOLATILE, RELAXED, ACQUIRE, RELEASE, ACQ_REL)
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.wait_eq"), address_of(barrier), expected)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.EQ.value,
+                           address_of(barrier), expected, peer, scope.value, semantic.value)
 
 
-def wait_ne(ptr: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1, scope: WaitScope = WaitScope.SYSTEM):
+def wait_ne(ptr: PrimExpr,
+            expected: PrimExpr,
+            peer: PrimExpr | None = -1,
+            scope: MemoryScope = MemoryScope.SYSTEM,
+            semantic: MemorySemantic = MemorySemantic.ACQUIRE):
     """Wait until *ptr != expected
     
     Args:
@@ -150,12 +153,17 @@ def wait_ne(ptr: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1, scope
         expected: The value to compare against
         peer: The PE to wait on (-1 for local)
         scope: Memory scope (GPU=volatile, SYSTEM=acquire.sys for cross-PE sync)
+        semantic: Memory semantic (WEAK, VOLATILE, RELAXED, ACQUIRE, RELEASE, ACQ_REL)
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.NE.value,
-                           address_of(ptr), expected, peer, scope.value)
+                           address_of(ptr), expected, peer, scope.value, semantic.value)
 
 
-def wait_ge(ptr: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1, scope: WaitScope = WaitScope.SYSTEM):
+def wait_ge(ptr: PrimExpr,
+            expected: PrimExpr,
+            peer: PrimExpr | None = -1,
+            scope: MemoryScope = MemoryScope.SYSTEM,
+            semantic: MemorySemantic = MemorySemantic.ACQUIRE):
     """Wait until *ptr >= expected
     
     Args:
@@ -163,12 +171,17 @@ def wait_ge(ptr: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1, scope
         expected: The value to compare against
         peer: The PE to wait on (-1 for local)
         scope: Memory scope (GPU=volatile, SYSTEM=acquire.sys for cross-PE sync)
+        semantic: Memory semantic (WEAK, VOLATILE, RELAXED, ACQUIRE, RELEASE, ACQ_REL)
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.GE.value,
-                           address_of(ptr), expected, peer, scope.value)
+                           address_of(ptr), expected, peer, scope.value, semantic.value)
 
 
-def wait_le(ptr: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1, scope: WaitScope = WaitScope.SYSTEM):
+def wait_le(ptr: PrimExpr,
+            expected: PrimExpr,
+            peer: PrimExpr | None = -1,
+            scope: MemoryScope = MemoryScope.SYSTEM,
+            semantic: MemorySemantic = MemorySemantic.ACQUIRE):
     """Wait until *ptr <= expected
     
     Args:
@@ -176,12 +189,17 @@ def wait_le(ptr: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1, scope
         expected: The value to compare against
         peer: The PE to wait on (-1 for local)
         scope: Memory scope (GPU=volatile, SYSTEM=acquire.sys for cross-PE sync)
+        semantic: Memory semantic (WEAK, VOLATILE, RELAXED, ACQUIRE, RELEASE, ACQ_REL)
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.LE.value,
-                           address_of(ptr), expected, peer, scope.value)
+                           address_of(ptr), expected, peer, scope.value, semantic.value)
 
 
-def wait_gt(ptr: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1, scope: WaitScope = WaitScope.SYSTEM):
+def wait_gt(ptr: PrimExpr,
+            expected: PrimExpr,
+            peer: PrimExpr | None = -1,
+            scope: MemoryScope = MemoryScope.SYSTEM,
+            semantic: MemorySemantic = MemorySemantic.ACQUIRE):
     """Wait until *ptr > expected
     
     Args:
@@ -189,12 +207,17 @@ def wait_gt(ptr: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1, scope
         expected: The value to compare against
         peer: The PE to wait on (-1 for local)
         scope: Memory scope (GPU=volatile, SYSTEM=acquire.sys for cross-PE sync)
+        semantic: Memory semantic (WEAK, VOLATILE, RELAXED, ACQUIRE, RELEASE, ACQ_REL)
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.GT.value,
-                           address_of(ptr), expected, peer, scope.value)
+                           address_of(ptr), expected, peer, scope.value, semantic.value)
 
 
-def wait_lt(ptr: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1, scope: WaitScope = WaitScope.SYSTEM):
+def wait_lt(ptr: PrimExpr,
+            expected: PrimExpr,
+            peer: PrimExpr | None = -1,
+            scope: MemoryScope = MemoryScope.SYSTEM,
+            semantic: MemorySemantic = MemorySemantic.ACQUIRE):
     """Wait until *ptr < expected
     
     Args:
@@ -202,6 +225,7 @@ def wait_lt(ptr: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1, scope
         expected: The value to compare against
         peer: The PE to wait on (-1 for local)
         scope: Memory scope (GPU=volatile, SYSTEM=acquire.sys for cross-PE sync)
+        semantic: Memory semantic (WEAK, VOLATILE, RELAXED, ACQUIRE, RELEASE, ACQ_REL)
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.LT.value,
-                           address_of(ptr), expected, peer, scope.value)
+                           address_of(ptr), expected, peer, scope.value, semantic.value)
