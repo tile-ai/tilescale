@@ -52,22 +52,11 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, block_M, block_N, threads):
             dst_rank = T.alloc_local([1], "uint32")
             old_local = T.alloc_local([1], "uint32")
             old_global = T.alloc_local([1], "uint32")
-            
-            # TODO maybe we do not need send/recv count, for each data to dst rank will pass current rank **at most** once 
-            # Counter for sending data in each direction (cumulative across hops)
-            send_count = T.alloc_local([4], "uint32")
-            
-            # Counter for receiving/waiting data from each direction
-            recv_count = T.alloc_local([4], "uint32")
 
             rank[0] = T.get_rank()
             rank_x[0] = T.floordiv(rank[0], Y)
             rank_y[0] = T.floormod(rank[0], Y)
             next_rank[0] = 0
-            
-            for i in T.serial(4):
-                send_count[i] = 0
-                recv_count[i] = 0
 
             dst_rank[0] = bx
             from_dir[0] = by
@@ -114,57 +103,33 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, block_M, block_N, threads):
             if dst_rank[0] != rank[0] and from_dir[0] == 0:
                 T.put_block(
                     T.address_of(src[dst_rank[0] * M, 0]),
-                    # T.address_of(buffer_direction[to_dir[0], send_count[to_dir[0]], dst_rank[0], 0, 0]),
                     T.address_of(buffer_direction[to_dir[0], 0, dst_rank[0], 0, 0]),
                     M * N,
                     next_rank[0],
                 )
                 if tx == 0:
                     T.st(
-                        signal_direction[to_dir[0], send_count[to_dir[0]], dst_rank[0]],
+                        signal_direction[to_dir[0], 0, dst_rank[0]],
                         1,
                         scope='sys',
                         sem="release",
                         dst_pe=next_rank[0]
                     )
                 T.sync_threads()
-                send_count[to_dir[0]] += 1
-                # if tx == 0 and rank[0] == 1:
-                #     T.print(to_dir[0], msg="to_dir")
-                #     T.print(send_count[to_dir[0]], msg="send_count")
 
             T.barrier_blocks(barrier)
             
             # Phase 2: Each block handles one final dst data in one direction buffer of current rank and check whether to transfer
             # Signal values: 0 = no signal, 1 = data ready, 2 = termination signal
             with T.While(global_finish[0] < PE_num):
-                # Check if already finished before waiting to avoid deadlock
-                # if global_finish[0] >= PE_num:
-                #     T.loop_break()
-                
-                # if tx == 0 and rank[0] == 0:
-                #     T.print(from_dir[0], msg="from_dir")
-                #     T.print(recv_count[from_dir[0]], msg="recv_count")
-                #     T.print(dst_rank[0], msg="wait signal for rank:")
-                    # T.print(signal_direction[from_dir[0], 0, dst_rank[0]], msg="wait signal for rank:")
                 if tx == 0:
-                    # T.wait_gt(signal_direction[from_dir[0], recv_count[from_dir[0]], dst_rank[0]], 0)
                     T.wait_gt(signal_direction[from_dir[0], 0, dst_rank[0]], 0, scope=T.WaitScope.SYSTEM)
                 T.sync_threads()
 
-                # if tx == 0 and rank[0] == 0:
-                #     T.print(rank[0], "rank")
-                #     T.print(dst_rank[0], "dst_rank")
-                #     T.print(from_dir[0], "from_dir")
-                #     T.print(to_dir[0], "to_dir")
-
-                # if signal_direction[from_dir[0], recv_count[from_dir[0]], dst_rank[0]] == 1:
                 if signal_direction[from_dir[0], 0, dst_rank[0]] == 1:
                     # Only handle the transfer signal
                     if to_dir[0] != Direction.SELF:
                         T.put_block(
-                            # T.address_of(buffer_direction[from_dir[0], recv_count[from_dir[0]], dst_rank[0], 0, 0]),
-                            # T.address_of(buffer_direction[to_dir[0], send_count[to_dir[0]], dst_rank[0], 0, 0]),
                             T.address_of(buffer_direction[from_dir[0], 0, dst_rank[0], 0, 0]),
                             T.address_of(buffer_direction[to_dir[0], 0, dst_rank[0], 0, 0]),
                             M * N,
@@ -172,35 +137,24 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, block_M, block_N, threads):
                         )
                         if tx == 0:
                             T.st(
-                                # signal_direction[to_dir[0], send_count[to_dir[0]], dst_rank[0]],
                                 signal_direction[to_dir[0], 0, dst_rank[0]],
                                 1,
                                 scope="sys",
                                 sem="release",
                                 dst_pe=next_rank[0],
                             )
-                        # if tx == 0 and rank[0] == 1:
-                        #     T.print(next_rank[0], msg="send signal to next_rank")
-                        #     T.print(to_dir[0], msg="to_dir")
-                        #     T.print(send_count[to_dir[0]], msg="send_count")
-                        #     T.print(dst_rank[0], msg="dst_rank")
                         T.sync_threads()
-                        send_count[to_dir[0]] += 1
                     else:
                         # Current rank is the real destination of this chunk of data, the real source rank is the buffer index
-                        # T.copy(buffer_direction[from_dir[0], recv_count[from_dir[0]], dst_rank[0], 0, 0], dst[dst_rank[0] * M, 0])
                         T.copy(buffer_direction[from_dir[0], 0, dst_rank[0], 0, 0], dst[dst_rank[0] * M, 0])
                         if tx == 0:
-                            # Use the OLD value returned by atom_add to ensure only ONE block executes the global notification
                             old_local[0] = T.atom_add(
                                 local_finish[0],
                                 1,
                                 scope="gpu",
                                 sem="release",
                             )
-                            # T.print(old_local[0], "old_local")
                             if old_local[0] + 2 == PE_num:
-                                # T.print(msg="Last chunk received, notifying all PEs")
                                 for i in T.serial(PE_num): 
                                     old_global[0] = T.atom_add_remote(
                                         global_finish[0],
@@ -209,9 +163,7 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, block_M, block_N, threads):
                                         sem="release",
                                         dst_pe=i,
                                     )
-                                # T.print(old_global[0], "old_global (from last PE)")
                                 if old_global[0] + 1 == PE_num:
-                                    # T.print(msg="This is the last PE! Sending termination signals to all PEs")
                                     # Send termination signals to wake up all waiting blocks on all PEs
                                     for remote_pe in T.serial(PE_num):
                                         for direction in T.serial(4):
@@ -224,10 +176,7 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, block_M, block_N, threads):
                                                         sem="release",
                                                         dst_pe=remote_pe,
                                                     )
-                                    # Fence to ensure all remote writes are visible to other PEs
-                                    # T.fence_sys()
                         T.sync_threads()
-                    recv_count[from_dir[0]] += 1
 
     return main
 
