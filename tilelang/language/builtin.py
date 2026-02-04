@@ -7,7 +7,7 @@ from tilelang.language.utils import MemoryScope, MemorySemantic
 from tilelang.language.kernel import get_thread_bindings, get_block_extents
 from tilelang.utils.target import check_hip_availability
 from tvm import tir
-from typing import Any, Literal
+from typing import Any
 import tilelang.language as T
 from tvm.tir import PrimExpr, Var, Call, Buffer, BufferLoad
 
@@ -730,13 +730,21 @@ def cp_async_barrier_noinc(barrier_id: int | PrimExpr | tir.Call):
     return tir.call_intrin("handle", tir.op.Op.get("tl.ptx_cp_async_barrier_noinc"), barrier_id)
 
 
-def atom_add(barrier: PrimExpr, value: PrimExpr, scope: MemoryScope = MemoryScope.GPU, sem: MemorySemantic = MemorySemantic.RELAXED):
+def atom_add(barrier: PrimExpr,
+             value: PrimExpr,
+             scope: MemoryScope = MemoryScope.GPU,
+             sem: MemorySemantic = MemorySemantic.RELAXED):
     """Perform a ptx async copy barrier using cp.async.mbarrier.arrive.noinc.
     """
     scope_str = {MemoryScope.GPU: "gpu", MemoryScope.SYSTEM: "sys"}[scope]
-    sem_str = {MemorySemantic.RELAXED: "relaxed", MemorySemantic.ACQUIRE: "acquire", MemorySemantic.RELEASE: "release", MemorySemantic.ACQ_REL: "acq_rel"}[sem]
-    return tir.call_intrin("uint32", tir.op.Op.get("tl.atom_add"), address_of(barrier), value, sem_str,
-                           scope_str)
+    sem_str = {
+        MemorySemantic.RELAXED: "relaxed",
+        MemorySemantic.ACQUIRE: "acquire",
+        MemorySemantic.RELEASE: "release",
+        MemorySemantic.ACQ_REL: "acq_rel"
+    }[sem]
+    return tir.call_intrin("uint32", tir.op.Op.get("tl.atom_add"), address_of(barrier), value,
+                           sem_str, scope_str)
 
 
 def ld(
@@ -765,8 +773,8 @@ def ld(
     """
     na = 1 if na else 0
     nc = 1 if nc else 0
-    return tir.call_intrin("handle", tir.op.Op.get("tl.ld"), address_of(src), value, sem.value, scope.value, na,
-                           nc, src_pe)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.ld"), address_of(src), value, sem.value,
+                           scope.value, na, nc, src_pe)
 
 
 def st(
@@ -792,8 +800,8 @@ def st(
         tir.Call: A handle to the store operation.
     """
     na = 1 if na else 0
-    return tir.call_intrin("handle", tir.op.Op.get("tl.st"), address_of(dst), value, sem.value, scope.value, na,
-                           dst_pe)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.st"), address_of(dst), value, sem.value,
+                           scope.value, na, dst_pe)
 
 
 def atom_add_remote(
@@ -817,26 +825,28 @@ def atom_add_remote(
         tir.Call: Returns the old value before the atomic add (uint32).
     """
     scope_str = {MemoryScope.GPU: "gpu", MemoryScope.SYSTEM: "sys"}[scope]
-    sem_str = {MemorySemantic.RELAXED: "relaxed", MemorySemantic.ACQUIRE: "acquire", MemorySemantic.RELEASE: "release", MemorySemantic.ACQ_REL: "acq_rel"}[sem]
-    
+    sem_str = {
+        MemorySemantic.RELAXED: "relaxed",
+        MemorySemantic.ACQUIRE: "acquire",
+        MemorySemantic.RELEASE: "release",
+        MemorySemantic.ACQ_REL: "acq_rel"
+    }[sem]
+
     # Build the intrinsic function name
     func_name = f"tl::ptx_atom_add_{sem_str}_{scope_str}"
-    
+
     # If dst_pe is specified and not -1, compute remote address
     is_remote = not (isinstance(dst_pe, tir.IntImm) and dst_pe.value == -1)
-    
+
     if is_remote:
         # Compute remote address: remote_base_ptr(dst_pe) + (address_of(dst) - remote_base_ptr(get_rank()))
         local_rank = tir.Call("int64", tir.op.Op.get("tl.get_rank"), [])
         local_base_ptr = tir.Call("handle", tir.op.Op.get("tl.get_remote_base_ptr"), [local_rank])
         offset_to_base = tir.Sub(
             tir.Call("handle", tir.op.Op.get("tl.get_uintptr_t"), [address_of(dst)]),
-            local_base_ptr
-        )
+            local_base_ptr)
         remote_ptr = tir.Add(
-            tir.Call("handle", tir.op.Op.get("tl.get_remote_base_ptr"), [dst_pe]),
-            offset_to_base
-        )
+            tir.Call("handle", tir.op.Op.get("tl.get_remote_base_ptr"), [dst_pe]), offset_to_base)
         # Call the PTX intrinsic directly with remote address
         return tir.call_extern("uint32", func_name, remote_ptr, value)
     else:

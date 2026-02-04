@@ -12,12 +12,7 @@
 
 namespace tl {
 
-enum class SyncScope {
-  CTA = 0,
-  CLUSTER = 1,
-  GPU = 2,
-  SYSTEM = 3
-};
+enum class SyncScope { CTA = 0, CLUSTER = 1, GPU = 2, SYSTEM = 3 };
 
 enum class SyncSemantic {
   WEAK = 0,
@@ -35,54 +30,54 @@ TL_DEVICE void trap() { asm("trap;\n"); }
 // CTA-level memory fence
 TL_DEVICE void memory_fence_cta(int sem) {
   switch (sem) {
-    case static_cast<int>(SyncSemantic::ACQUIRE):
-      asm volatile("fence.acquire.cta;\n" ::: "memory");
-      break;
-    case static_cast<int>(SyncSemantic::RELEASE):
-      asm volatile("fence.release.cta;\n" ::: "memory");
-      break;
-    case static_cast<int>(SyncSemantic::SC):
-      asm volatile("fence.sc.cta;\n" ::: "memory");
-      break;
-    default:
-      asm volatile("fence.acq_rel.cta;\n" ::: "memory");
-      break;
+  case static_cast<int>(SyncSemantic::ACQUIRE):
+    asm volatile("fence.acquire.cta;\n" ::: "memory");
+    break;
+  case static_cast<int>(SyncSemantic::RELEASE):
+    asm volatile("fence.release.cta;\n" ::: "memory");
+    break;
+  case static_cast<int>(SyncSemantic::SC):
+    asm volatile("fence.sc.cta;\n" ::: "memory");
+    break;
+  default:
+    asm volatile("fence.acq_rel.cta;\n" ::: "memory");
+    break;
   }
 }
 
 // GPU-level memory fence
 TL_DEVICE void memory_fence_gpu(int sem) {
   switch (sem) {
-    case static_cast<int>(SyncSemantic::ACQUIRE):
-      asm volatile("fence.acquire.gpu;\n" ::: "memory");
-      break;
-    case static_cast<int>(SyncSemantic::RELEASE):
-      asm volatile("fence.release.gpu;\n" ::: "memory");
-      break;
-    case static_cast<int>(SyncSemantic::SC):
-      asm volatile("fence.sc.gpu;\n" ::: "memory");
-      break;
-    default:
-      asm volatile("fence.acq_rel.gpu;\n" ::: "memory");
-      break;
+  case static_cast<int>(SyncSemantic::ACQUIRE):
+    asm volatile("fence.acquire.gpu;\n" ::: "memory");
+    break;
+  case static_cast<int>(SyncSemantic::RELEASE):
+    asm volatile("fence.release.gpu;\n" ::: "memory");
+    break;
+  case static_cast<int>(SyncSemantic::SC):
+    asm volatile("fence.sc.gpu;\n" ::: "memory");
+    break;
+  default:
+    asm volatile("fence.acq_rel.gpu;\n" ::: "memory");
+    break;
   }
 }
 
 // System-level memory fence
 TL_DEVICE void memory_fence_sys(int sem) {
   switch (sem) {
-    case static_cast<int>(SyncSemantic::ACQUIRE):
-      asm volatile("fence.acquire.sys;\n" ::: "memory");
-      break;
-    case static_cast<int>(SyncSemantic::RELEASE):
-      asm volatile("fence.release.sys;\n" ::: "memory");
-      break;
-    case static_cast<int>(SyncSemantic::SC):
-      asm volatile("fence.sc.sys;\n" ::: "memory");
-      break;
-    default:
-      asm volatile("fence.acq_rel.sys;\n" ::: "memory");
-      break;
+  case static_cast<int>(SyncSemantic::ACQUIRE):
+    asm volatile("fence.acquire.sys;\n" ::: "memory");
+    break;
+  case static_cast<int>(SyncSemantic::RELEASE):
+    asm volatile("fence.release.sys;\n" ::: "memory");
+    break;
+  case static_cast<int>(SyncSemantic::SC):
+    asm volatile("fence.sc.sys;\n" ::: "memory");
+    break;
+  default:
+    asm volatile("fence.acq_rel.sys;\n" ::: "memory");
+    break;
   }
 }
 
@@ -130,7 +125,8 @@ TL_DEVICE void init_barrier_gpu(uint32_t *barrier) {
   if (IS_MASTER_BLOCK() && IS_MASTER_THREAD()) {
     *barrier = BARRIER_MAGIC - kExpected;
   }
-  memory_fence_gpu(static_cast<int>(SyncSemantic::ACQ_REL)); // TODO: Is fence or sync needed here?
+  memory_fence_gpu(static_cast<int>(
+      SyncSemantic::ACQ_REL)); // TODO: Is fence or sync needed here?
 }
 
 // Arrive at a GPU barrier (atomic increment)
@@ -249,55 +245,76 @@ TL_DEVICE T ld_wait_gpu(const T *ptr, WaitSemantic semantic) {
   int ret = 0;
   if constexpr (std::is_same_v<T, int>) {
     if (semantic == WaitSemantic::RELAXED) {
-      asm volatile("ld.global.relaxed.gpu.s32 %0, [%1];\n" : "=r"(ret) : "l"(ptr));
+      asm volatile("ld.global.relaxed.gpu.s32 %0, [%1];\n"
+                   : "=r"(ret)
+                   : "l"(ptr));
     } else if (semantic == WaitSemantic::VOLATILE) {
-      asm volatile("ld.global.volatile.gpu.s32 %0, [%1];\n" : "=r"(ret) : "l"(ptr));
+      asm volatile("ld.global.volatile.gpu.s32 %0, [%1];\n"
+                   : "=r"(ret)
+                   : "l"(ptr));
     } else {
       // Default to acquire
-      asm volatile("ld.global.acquire.gpu.s32 %0, [%1];\n" : "=r"(ret) : "l"(ptr));
+      asm volatile("ld.global.acquire.gpu.s32 %0, [%1];\n"
+                   : "=r"(ret)
+                   : "l"(ptr));
     }
     return ret;
-  } else if constexpr (std::is_same_v<T, unsigned int> || std::is_same_v<T, uint32_t>) {
+  } else if constexpr (std::is_same_v<T, unsigned int> ||
+                       std::is_same_v<T, uint32_t>) {
     // Cast to int* for ld_volatile_global, then cast back
     const int *int_ptr = reinterpret_cast<const int *>(ptr);
     if (semantic == WaitSemantic::RELAXED) {
-      asm volatile("ld.global.relaxed.gpu.u32 %0, [%1];\n" : "=r"(ret) : "l"(int_ptr));
+      asm volatile("ld.global.relaxed.gpu.u32 %0, [%1];\n"
+                   : "=r"(ret)
+                   : "l"(int_ptr));
     } else if (semantic == WaitSemantic::VOLATILE) {
-      asm volatile("ld.global.volatile.gpu.u32 %0, [%1];\n" : "=r"(ret) : "l"(int_ptr));
+      asm volatile("ld.global.volatile.gpu.u32 %0, [%1];\n"
+                   : "=r"(ret)
+                   : "l"(int_ptr));
     } else {
       // Default to acquire
-      asm volatile("ld.global.acquire.gpu.u32 %0, [%1];\n" : "=r"(ret) : "l"(int_ptr));
+      asm volatile("ld.global.acquire.gpu.u32 %0, [%1];\n"
+                   : "=r"(ret)
+                   : "l"(int_ptr));
     }
     return static_cast<T>(ret);
   } else {
-    return *reinterpret_cast<const volatile T*>(ptr);
+    return *reinterpret_cast<const volatile T *>(ptr);
   }
 }
 
-// Load with acquire.sys semantics (SYSTEM scope, required for proper cross-PE sync)
+// Load with acquire.sys semantics (SYSTEM scope, required for proper cross-PE
+// sync)
 template <typename T>
 TL_DEVICE T ld_wait_sys(const T *ptr, WaitSemantic semantic) {
-  if constexpr (std::is_same_v<T, int> || std::is_same_v<T, unsigned int> || 
+  if constexpr (std::is_same_v<T, int> || std::is_same_v<T, unsigned int> ||
                 std::is_same_v<T, uint32_t>) {
     unsigned int ret = 0;
     if (semantic == WaitSemantic::RELAXED) {
-      asm volatile("ld.global.relaxed.sys.s32 %0, [%1];\n" : "=r"(ret) : "l"(ptr));
+      asm volatile("ld.global.relaxed.sys.s32 %0, [%1];\n"
+                   : "=r"(ret)
+                   : "l"(ptr));
     } else if (semantic == WaitSemantic::VOLATILE) {
-      asm volatile("ld.global.volatile.sys.s32 %0, [%1];\n" : "=r"(ret) : "l"(ptr));
+      asm volatile("ld.global.volatile.sys.s32 %0, [%1];\n"
+                   : "=r"(ret)
+                   : "l"(ptr));
     } else {
       // Default to acquire
-      asm volatile("ld.global.acquire.sys.s32 %0, [%1];\n" : "=r"(ret) : "l"(ptr));
+      asm volatile("ld.global.acquire.sys.s32 %0, [%1];\n"
+                   : "=r"(ret)
+                   : "l"(ptr));
     }
     return static_cast<T>(ret);
   } else {
     // Fallback to volatile for other types
-    return *reinterpret_cast<const volatile T*>(ptr);
+    return *reinterpret_cast<const volatile T *>(ptr);
   }
 }
 
 // Generic load dispatcher based on scope and semantic
 template <typename T>
-TL_DEVICE T ld_wait_generic(const T *ptr, WaitScope scope, WaitSemantic semantic = WaitSemantic::ACQUIRE) {
+TL_DEVICE T ld_wait_generic(const T *ptr, WaitScope scope,
+                            WaitSemantic semantic = WaitSemantic::ACQUIRE) {
   if (scope == WaitScope::SYSTEM) {
     return ld_wait_sys(ptr, semantic);
   } else {
@@ -306,68 +323,80 @@ TL_DEVICE T ld_wait_generic(const T *ptr, WaitScope scope, WaitSemantic semantic
 }
 
 template <typename P, typename T>
-TL_DEVICE void wait_eq(P ptr, T val, int scope = (int)WaitScope::SYSTEM, int semantic = (int)WaitSemantic::ACQUIRE) {
+TL_DEVICE void wait_eq(P ptr, T val, int scope = (int)WaitScope::SYSTEM,
+                       int semantic = (int)WaitSemantic::ACQUIRE) {
   static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
                 "P must be a pointer or uint64_t");
   T *flag_ptr = reinterpret_cast<T *>(ptr);
 // Spin-loop
 #pragma unroll 1
-  while (ld_wait_generic(flag_ptr, (WaitScope)scope, (WaitSemantic)semantic) != val)
+  while (ld_wait_generic(flag_ptr, (WaitScope)scope, (WaitSemantic)semantic) !=
+         val)
     ;
 }
 
-template <typename P, typename T> 
-TL_DEVICE void wait_ne(P ptr, T val, int scope = (int)WaitScope::SYSTEM, int semantic = (int)WaitSemantic::ACQUIRE) {
+template <typename P, typename T>
+TL_DEVICE void wait_ne(P ptr, T val, int scope = (int)WaitScope::SYSTEM,
+                       int semantic = (int)WaitSemantic::ACQUIRE) {
   static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
                 "P must be a pointer or uint64_t");
   T *flag_ptr = reinterpret_cast<T *>(ptr);
 // Spin-loop
 #pragma unroll 1
-  while (ld_wait_generic(flag_ptr, (WaitScope)scope, (WaitSemantic)semantic) == val)
+  while (ld_wait_generic(flag_ptr, (WaitScope)scope, (WaitSemantic)semantic) ==
+         val)
     ;
 }
 
-template <typename P, typename T> 
-TL_DEVICE void wait_ge(P ptr, T val, int scope = (int)WaitScope::SYSTEM, int semantic = (int)WaitSemantic::ACQUIRE) {
+template <typename P, typename T>
+TL_DEVICE void wait_ge(P ptr, T val, int scope = (int)WaitScope::SYSTEM,
+                       int semantic = (int)WaitSemantic::ACQUIRE) {
   static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
                 "P must be a pointer or uint64_t");
   T *flag_ptr = reinterpret_cast<T *>(ptr);
 // Spin-loop
 #pragma unroll 1
-  while (ld_wait_generic(flag_ptr, (WaitScope)scope, (WaitSemantic)semantic) < val)
+  while (ld_wait_generic(flag_ptr, (WaitScope)scope, (WaitSemantic)semantic) <
+         val)
     ;
 }
 
-template <typename P, typename T> 
-TL_DEVICE void wait_le(P ptr, T val, int scope = (int)WaitScope::SYSTEM, int semantic = (int)WaitSemantic::ACQUIRE) {
+template <typename P, typename T>
+TL_DEVICE void wait_le(P ptr, T val, int scope = (int)WaitScope::SYSTEM,
+                       int semantic = (int)WaitSemantic::ACQUIRE) {
   static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
                 "P must be a pointer or uint64_t");
   T *flag_ptr = reinterpret_cast<T *>(ptr);
 // Spin-loop
 #pragma unroll 1
-  while (ld_wait_generic(flag_ptr, (WaitScope)scope, (WaitSemantic)semantic) > val)
+  while (ld_wait_generic(flag_ptr, (WaitScope)scope, (WaitSemantic)semantic) >
+         val)
     ;
 }
 
-template <typename P, typename T> 
-TL_DEVICE void wait_gt(P ptr, T val, int scope = (int)WaitScope::SYSTEM, int semantic = (int)WaitSemantic::ACQUIRE) {
+template <typename P, typename T>
+TL_DEVICE void wait_gt(P ptr, T val, int scope = (int)WaitScope::SYSTEM,
+                       int semantic = (int)WaitSemantic::ACQUIRE) {
   static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
                 "P must be a pointer or uint64_t");
   T *flag_ptr = reinterpret_cast<T *>(ptr);
 // Spin-loop
 #pragma unroll 1
-  while (ld_wait_generic(flag_ptr, (WaitScope)scope, (WaitSemantic)semantic) <= val)
+  while (ld_wait_generic(flag_ptr, (WaitScope)scope, (WaitSemantic)semantic) <=
+         val)
     ;
 }
 
-template <typename P, typename T> 
-TL_DEVICE void wait_lt(P ptr, T val, int scope = (int)WaitScope::SYSTEM, int semantic = (int)WaitSemantic::ACQUIRE) {
+template <typename P, typename T>
+TL_DEVICE void wait_lt(P ptr, T val, int scope = (int)WaitScope::SYSTEM,
+                       int semantic = (int)WaitSemantic::ACQUIRE) {
   static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
                 "P must be a pointer or uint64_t");
   T *flag_ptr = reinterpret_cast<T *>(ptr);
 // Spin-loop
 #pragma unroll 1
-  while (ld_wait_generic(flag_ptr, (WaitScope)scope, (WaitSemantic)semantic) >= val)
+  while (ld_wait_generic(flag_ptr, (WaitScope)scope, (WaitSemantic)semantic) >=
+         val)
     ;
 }
 

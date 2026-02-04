@@ -180,7 +180,8 @@ Stmt WaitOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   new_args.push_back(expected);
   // Pass scope: 0=CTA, 1=CLUSTER, 2=GPU, 3=SYSTEM
   new_args.push_back(IntImm(DataType::Int(32), scope));
-  // Pass semantic: 0=WEAK, 1=VOLATILE, 2=RELAXED, 3=ACQUIRE, 4=RELEASE, 5=ACQ_REL
+  // Pass semantic: 0=WEAK, 1=VOLATILE, 2=RELAXED, 3=ACQUIRE, 4=RELEASE,
+  // 5=ACQ_REL
   new_args.push_back(IntImm(DataType::Int(32), semantic));
 
   auto wait = Call(DataType::Handle(), builtin::call_extern(), new_args);
@@ -205,7 +206,7 @@ TIR_REGISTER_TL_OP(BarrierBlocksOp, barrier_blocks)
                                Integer(CallEffectKind::kOpaque));
 
 TIR_REGISTER_TL_OP(WaitOp, wait)
-    .set_num_inputs(6)  // relation, addr, expected, peer, scope, semantic
+    .set_num_inputs(6) // relation, addr, expected, peer, scope, semantic
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 

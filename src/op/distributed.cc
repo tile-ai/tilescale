@@ -194,10 +194,8 @@ TIR_DEFINE_TL_BUILTIN(CpengineCpAsync)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_DEFINE_TL_BUILTIN(get_rank)
-    .set_num_inputs(0)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
+TIR_DEFINE_TL_BUILTIN(get_rank).set_num_inputs(0).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
 TIR_DEFINE_TL_BUILTIN(get_num_ranks)
     .set_num_inputs(0)

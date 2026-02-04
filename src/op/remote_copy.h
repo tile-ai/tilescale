@@ -325,7 +325,7 @@ public:
   PrimExpr value;  ///< Value to atomically add
   PrimExpr dst_pe; ///< Destination processing element (optional)
   int scope;       ///< Memory scope (0: GPU, 1: SYS)
-  int sem;         ///< Memory semantic (0: relaxed, 1: acquire, 2: release, 3: acq_rel)
+  int sem; ///< Memory semantic (0: relaxed, 1: acquire, 2: release, 3: acq_rel)
 
   bool is_distributed() const;
 
@@ -348,7 +348,8 @@ public:
         .def_ro("sem", &AtomAddRemoteOpNode::sem);
   }
 
-  bool SEqualReduce(const AtomAddRemoteOpNode *other, SEqualReducer equal) const {
+  bool SEqualReduce(const AtomAddRemoteOpNode *other,
+                    SEqualReducer equal) const {
     return equal(dst, other->dst) && equal(value, other->value) &&
            equal(dst_pe, other->dst_pe) && scope == other->scope &&
            sem == other->sem;
@@ -368,7 +369,8 @@ public:
 
 class AtomAddRemoteOp : public TileOperator {
 public:
-  TVM_DEFINE_OBJECT_REF_METHODS(AtomAddRemoteOp, TileOperator, AtomAddRemoteOpNode);
+  TVM_DEFINE_OBJECT_REF_METHODS(AtomAddRemoteOp, TileOperator,
+                                AtomAddRemoteOpNode);
   TVM_DLL AtomAddRemoteOp(Array<PrimExpr> args, BufferMap vmap);
   static const Op &Get();
 };

@@ -274,10 +274,11 @@ Stmt StOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   // Map integers to enum literal strings
   // 0: WEAK, 1: VOLATILE, 2: RELAXED, 3: ACQUIRE, 4: RELEASE, 5: ACQ_REL
-  const char *sem_str[] = {"Semantic::WEAK", "Semantic::VOLATILE",
+  const char *sem_str[] = {"Semantic::WEAK",    "Semantic::VOLATILE",
                            "Semantic::RELAXED", "Semantic::ACQUIRE",
                            "Semantic::RELEASE", "Semantic::ACQ_REL"};
-  const char *scope_str[] = {"Scope::CTA", "Scope::CLUSTER", "Scope::GPU", "Scope::SYS"};
+  const char *scope_str[] = {"Scope::CTA", "Scope::CLUSTER", "Scope::GPU",
+                             "Scope::SYS"};
 
   ICHECK_LT(sem, 6);
   ICHECK_LT(scope, 4);
@@ -347,10 +348,11 @@ Stmt LdOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   // Map integers to enum literal strings
   // 0: WEAK, 1: VOLATILE, 2: RELAXED, 3: ACQUIRE, 4: RELEASE, 5: ACQ_REL
-  const char *sem_str[] = {"Semantic::WEAK", "Semantic::VOLATILE",
+  const char *sem_str[] = {"Semantic::WEAK",    "Semantic::VOLATILE",
                            "Semantic::RELAXED", "Semantic::ACQUIRE",
                            "Semantic::RELEASE", "Semantic::ACQ_REL"};
-  const char *scope_str[] = {"Scope::CTA", "Scope::CLUSTER", "Scope::GPU", "Scope::SYS"};
+  const char *scope_str[] = {"Scope::CTA", "Scope::CLUSTER", "Scope::GPU",
+                             "Scope::SYS"};
 
   ICHECK_LT(sem, 6);
   ICHECK_LT(scope, 4);
@@ -410,7 +412,8 @@ bool AtomAddRemoteOpNode::is_distributed() const {
            dst_pe.as<IntImmNode>()->value == -1);
 }
 
-Stmt AtomAddRemoteOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+Stmt AtomAddRemoteOpNode::Lower(const LowerArgs &T,
+                                arith::Analyzer *analyzer) const {
   (void)analyzer;
   (void)T;
   Array<PrimExpr> new_args;
@@ -418,8 +421,11 @@ Stmt AtomAddRemoteOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) c
 
   // Map integers to semantic literal strings for PTX atom instruction
   // Unified Mapping: 2: relaxed, 3: acquire, 4: release, 5: acq_rel
-  const char *sem_str[] = {"weak", "volatile", "relaxed", "acquire", "release", "acq_rel"};
-  const char *scope_str[] = {"cta", "cluster", "gpu", "sys"}; // Unified: 2: gpu, 3: system (mapped below)
+  const char *sem_str[] = {"weak",    "volatile", "relaxed",
+                           "acquire", "release",  "acq_rel"};
+  const char *scope_str[] = {
+      "cta", "cluster", "gpu",
+      "sys"}; // Unified: 2: gpu, 3: system (mapped below)
 
   // Build function name: tl::ptx_atom_add_<sem>_<scope>
   ss << "tl::ptx_atom_add_" << sem_str[sem] << "_" << scope_str[scope];
@@ -471,15 +477,16 @@ TIR_REGISTER_TL_OP(StOp, st).set_num_inputs(6).set_attr<TCallEffectKind>(
 TIR_REGISTER_TL_OP(LdOp, ld).set_num_inputs(7).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
-TIR_REGISTER_TL_OP(AtomAddRemoteOp, atom_add_remote).set_num_inputs(5).set_attr<TCallEffectKind>(
-    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
+TIR_REGISTER_TL_OP(AtomAddRemoteOp, atom_add_remote)
+    .set_num_inputs(5)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
 
 TVM_FFI_STATIC_INIT_BLOCK({ PutOpNode::RegisterReflection(); });
 TVM_FFI_STATIC_INIT_BLOCK({ GetOpNode::RegisterReflection(); });
 TVM_FFI_STATIC_INIT_BLOCK({ StOpNode::RegisterReflection(); });
 TVM_FFI_STATIC_INIT_BLOCK({ LdOpNode::RegisterReflection(); });
 TVM_FFI_STATIC_INIT_BLOCK({ AtomAddRemoteOpNode::RegisterReflection(); });
-
 
 } // namespace tl
 } // namespace tvm

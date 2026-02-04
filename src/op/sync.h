@@ -51,7 +51,8 @@ public:
   PrimExpr peer;     ///< The peer to compare against.
   int relation;      ///< The relation to compare against.
   int scope;         ///< Memory scope: 0=CTA, 1=CLUSTER, 2=GPU, 3=SYSTEM
-  int semantic;      ///< Memory semantic: 0=WEAK, 1=VOLATILE, 2=RELAXED, 3=ACQUIRE, 4=RELEASE, 5=ACQ_REL
+  int semantic; ///< Memory semantic: 0=WEAK, 1=VOLATILE, 2=RELAXED, 3=ACQUIRE,
+                ///< 4=RELEASE, 5=ACQ_REL
 
   bool is_distributed() const;
 
