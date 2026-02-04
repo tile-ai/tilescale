@@ -147,7 +147,7 @@ def wait_ne(ptr: PrimExpr,
             scope: MemoryScope = MemoryScope.SYSTEM,
             semantic: MemorySemantic = MemorySemantic.ACQUIRE):
     """Wait until *ptr != expected
-    
+
     Args:
         ptr: The memory address to wait on
         expected: The value to compare against
@@ -165,7 +165,7 @@ def wait_ge(ptr: PrimExpr,
             scope: MemoryScope = MemoryScope.SYSTEM,
             semantic: MemorySemantic = MemorySemantic.ACQUIRE):
     """Wait until *ptr >= expected
-    
+
     Args:
         ptr: The memory address to wait on
         expected: The value to compare against
@@ -183,7 +183,7 @@ def wait_le(ptr: PrimExpr,
             scope: MemoryScope = MemoryScope.SYSTEM,
             semantic: MemorySemantic = MemorySemantic.ACQUIRE):
     """Wait until *ptr <= expected
-    
+
     Args:
         ptr: The memory address to wait on
         expected: The value to compare against
@@ -201,7 +201,7 @@ def wait_gt(ptr: PrimExpr,
             scope: MemoryScope = MemoryScope.SYSTEM,
             semantic: MemorySemantic = MemorySemantic.ACQUIRE):
     """Wait until *ptr > expected
-    
+
     Args:
         ptr: The memory address to wait on
         expected: The value to compare against
@@ -219,7 +219,7 @@ def wait_lt(ptr: PrimExpr,
             scope: MemoryScope = MemoryScope.SYSTEM,
             semantic: MemorySemantic = MemorySemantic.ACQUIRE):
     """Wait until *ptr < expected
-    
+
     Args:
         ptr: The memory address to wait on
         expected: The value to compare against
