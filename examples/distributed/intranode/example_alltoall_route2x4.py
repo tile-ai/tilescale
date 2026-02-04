@@ -20,9 +20,8 @@ class Direction(IntEnum):
 @tilelang.jit(pass_configs={
     tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
     tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-},debug_root_path="/home/zhengju.tang/tilescale/examples/distributed/debug/")
+})
 def torus_alltoall_xy(PE_num, X, Y, M, N, block_M, block_N, threads):
-    buffer_size = PE_num
 
     @T.prim_func
     def main(
@@ -30,9 +29,9 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, block_M, block_N, threads):
         src: T.Tensor((PE_num * M, N), "float16"),
         dst: T.Tensor((PE_num * M, N), "float16"),
         # buffer[dir, slot, rank, *, *]: This PE save some slots for transferring data chunks for the real destination rank
-        buffer_direction: T.Tensor((4, buffer_size, PE_num, M, N), "float16"),
+        buffer_direction: T.Tensor((4, PE_num, M, N), "float16"),
         # Signal for each buffer slot in each direction
-        signal_direction: T.Tensor((4, buffer_size, PE_num), "uint32"),
+        signal_direction: T.Tensor((4, PE_num), "uint32"),
         # Signal for finish
         local_finish: T.Tensor((1), "uint32"),
         global_finish: T.Tensor((1), "uint32"),
@@ -103,13 +102,13 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, block_M, block_N, threads):
             if dst_rank[0] != rank[0] and from_dir[0] == 0:
                 T.put_block(
                     T.address_of(src[dst_rank[0] * M, 0]),
-                    T.address_of(buffer_direction[to_dir[0], 0, dst_rank[0], 0, 0]),
+                    T.address_of(buffer_direction[to_dir[0], dst_rank[0], 0, 0]),
                     M * N,
                     next_rank[0],
                 )
                 if tx == 0:
                     T.st(
-                        signal_direction[to_dir[0], 0, dst_rank[0]],
+                        signal_direction[to_dir[0], dst_rank[0]],
                         1,
                         scope='sys',
                         sem="release",
@@ -123,21 +122,21 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, block_M, block_N, threads):
             # Signal values: 0 = no signal, 1 = data ready, 2 = termination signal
             with T.While(global_finish[0] < PE_num):
                 if tx == 0:
-                    T.wait_gt(signal_direction[from_dir[0], 0, dst_rank[0]], 0, scope=T.WaitScope.SYSTEM)
+                    T.wait_gt(signal_direction[from_dir[0], dst_rank[0]], 0, scope=T.WaitScope.SYSTEM)
                 T.sync_threads()
 
-                if signal_direction[from_dir[0], 0, dst_rank[0]] == 1:
+                if signal_direction[from_dir[0], dst_rank[0]] == 1:
                     # Only handle the transfer signal
                     if to_dir[0] != Direction.SELF:
                         T.put_block(
-                            T.address_of(buffer_direction[from_dir[0], 0, dst_rank[0], 0, 0]),
-                            T.address_of(buffer_direction[to_dir[0], 0, dst_rank[0], 0, 0]),
+                            T.address_of(buffer_direction[from_dir[0], dst_rank[0], 0, 0]),
+                            T.address_of(buffer_direction[to_dir[0], dst_rank[0], 0, 0]),
                             M * N,
                             next_rank[0],
                         )
                         if tx == 0:
                             T.st(
-                                signal_direction[to_dir[0], 0, dst_rank[0]],
+                                signal_direction[to_dir[0], dst_rank[0]],
                                 1,
                                 scope="sys",
                                 sem="release",
@@ -146,7 +145,7 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, block_M, block_N, threads):
                         T.sync_threads()
                     else:
                         # Current rank is the real destination of this chunk of data, the real source rank is the buffer index
-                        T.copy(buffer_direction[from_dir[0], 0, dst_rank[0], 0, 0], dst[dst_rank[0] * M, 0])
+                        T.copy(buffer_direction[from_dir[0], dst_rank[0], 0, 0], dst[dst_rank[0] * M, 0])
                         if tx == 0:
                             old_local[0] = T.atom_add(
                                 local_finish[0],
@@ -167,15 +166,14 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, block_M, block_N, threads):
                                     # Send termination signals to wake up all waiting blocks on all PEs
                                     for remote_pe in T.serial(PE_num):
                                         for direction in T.serial(4):
-                                            for slot in T.serial(buffer_size):
-                                                for dst_r in T.serial(PE_num):
-                                                    T.st(
-                                                        signal_direction[direction, slot, dst_r],
-                                                        2,
-                                                        scope="sys",
-                                                        sem="release",
-                                                        dst_pe=remote_pe,
-                                                    )
+                                            for dst_r in T.serial(PE_num):
+                                                T.st(
+                                                    signal_direction[direction, dst_r],
+                                                    2,
+                                                    scope="sys",
+                                                    sem="release",
+                                                    dst_pe=remote_pe,
+                                                )
                         T.sync_threads()
 
     return main
@@ -203,11 +201,10 @@ def run_torus_alltoall(local_rank, num_ranks, args):
     src = tilelang.tensor((PE_num * M, N), torch.float16, allocator=allocator).random_(0, 1)
     dst = tilelang.tensor((PE_num * M, N), torch.float16, allocator=allocator).zero_()
     
-    buffer_size = PE_num
-    buffer_direction = tilelang.tensor((4, buffer_size, PE_num, M, N), torch.float16, allocator=allocator).zero_()
+    buffer_direction = tilelang.tensor((4, PE_num, M, N), torch.float16, allocator=allocator).zero_()
     
     # Signals for each buffer slot in each direction
-    signal_direction = tilelang.tensor((4, buffer_size, PE_num), torch.uint32, allocator=allocator).fill_(0)
+    signal_direction = tilelang.tensor((4, PE_num), torch.uint32, allocator=allocator).fill_(0)
     local_finish = tilelang.tensor((1), torch.uint32, allocator=allocator).fill_(0)
     global_finish = tilelang.tensor((1), torch.uint32, allocator=allocator).fill_(0)
     barrier = tilelang.tensor((PE_num), torch.int32, allocator=allocator).zero_()
