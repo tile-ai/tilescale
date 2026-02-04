@@ -2103,13 +2103,13 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     os << "nvshmem_barrier_all()";
   } else if (op->op.same_as(tl::fence_cta())) {
     this->use_distributed_ = true;
-    os << "tl::memory_fence_cta()";
+    os << "tl::memory_fence_cta(" << PrintExpr(op->args[0]) << ")";
   } else if (op->op.same_as(tl::fence_gpu())) {
     this->use_distributed_ = true;
-    os << "tl::memory_fence_gpu()";
+    os << "tl::memory_fence_gpu(" << PrintExpr(op->args[0]) << ")";
   } else if (op->op.same_as(tl::fence_sys())) {
     this->use_distributed_ = true;
-    os << "tl::memory_fence_sys()";
+    os << "tl::memory_fence_sys(" << PrintExpr(op->args[0]) << ")";
   } else if (op->op.same_as(builtin::reinterpret())) {
     DataType tgt_dtype = op->dtype;
     DataType src_dtype = op->args[0]->dtype;

@@ -25,25 +25,65 @@ enum class SyncSemantic {
   RELAXED = 2,
   ACQUIRE = 3,
   RELEASE = 4,
-  ACQ_REL = 5
+  ACQ_REL = 5,
+  SC = 6
 };
 
 // Triggers a GPU trap for debugging
 TL_DEVICE void trap() { asm("trap;\n"); }
 
 // CTA-level memory fence
-TL_DEVICE void memory_fence_cta() {
-  asm volatile("fence.acq_rel.cta;\n" ::: "memory");
+TL_DEVICE void memory_fence_cta(int sem) {
+  switch (sem) {
+    case static_cast<int>(SyncSemantic::ACQUIRE):
+      asm volatile("fence.acquire.cta;\n" ::: "memory");
+      break;
+    case static_cast<int>(SyncSemantic::RELEASE):
+      asm volatile("fence.release.cta;\n" ::: "memory");
+      break;
+    case static_cast<int>(SyncSemantic::SC):
+      asm volatile("fence.sc.cta;\n" ::: "memory");
+      break;
+    default:
+      asm volatile("fence.acq_rel.cta;\n" ::: "memory");
+      break;
+  }
 }
 
 // GPU-level memory fence
-TL_DEVICE void memory_fence_gpu() {
-  asm volatile("fence.acq_rel.gpu;\n" ::: "memory");
+TL_DEVICE void memory_fence_gpu(int sem) {
+  switch (sem) {
+    case static_cast<int>(SyncSemantic::ACQUIRE):
+      asm volatile("fence.acquire.gpu;\n" ::: "memory");
+      break;
+    case static_cast<int>(SyncSemantic::RELEASE):
+      asm volatile("fence.release.gpu;\n" ::: "memory");
+      break;
+    case static_cast<int>(SyncSemantic::SC):
+      asm volatile("fence.sc.gpu;\n" ::: "memory");
+      break;
+    default:
+      asm volatile("fence.acq_rel.gpu;\n" ::: "memory");
+      break;
+  }
 }
 
 // System-level memory fence
-TL_DEVICE void memory_fence_sys() {
-  asm volatile("fence.acq_rel.sys;\n" ::: "memory");
+TL_DEVICE void memory_fence_sys(int sem) {
+  switch (sem) {
+    case static_cast<int>(SyncSemantic::ACQUIRE):
+      asm volatile("fence.acquire.sys;\n" ::: "memory");
+      break;
+    case static_cast<int>(SyncSemantic::RELEASE):
+      asm volatile("fence.release.sys;\n" ::: "memory");
+      break;
+    case static_cast<int>(SyncSemantic::SC):
+      asm volatile("fence.sc.sys;\n" ::: "memory");
+      break;
+    default:
+      asm volatile("fence.acq_rel.sys;\n" ::: "memory");
+      break;
+  }
 }
 
 // GPU-level load with acquire semantics
@@ -90,12 +130,12 @@ TL_DEVICE void init_barrier_gpu(uint32_t *barrier) {
   if (IS_MASTER_BLOCK() && IS_MASTER_THREAD()) {
     *barrier = BARRIER_MAGIC - kExpected;
   }
-  memory_fence_gpu(); // TODO: Is fence or sync needed here?
+  memory_fence_gpu(static_cast<int>(SyncSemantic::ACQ_REL)); // TODO: Is fence or sync needed here?
 }
 
 // Arrive at a GPU barrier (atomic increment)
 TL_DEVICE void arrive_barrier_gpu(uint32_t *barrier) {
-  memory_fence_gpu();
+  memory_fence_gpu(static_cast<int>(SyncSemantic::ACQ_REL));
   if (IS_MASTER_THREAD()) {
     atomic_add_release_gpu_u32(barrier, 1);
   }
@@ -114,7 +154,7 @@ TL_DEVICE void wait_barrier_gpu(uint32_t *barrier) {
 
 // Synchronize at a GPU barrier (arrive + wait)
 TL_DEVICE void sync_barrier_gpu(uint32_t *barrier) {
-  // memory_fence_gpu();
+  memory_fence_gpu(static_cast<int>(SyncSemantic::ACQ_REL));
   __syncthreads();
   if (IS_MASTER_THREAD()) {
     atomic_add_release_gpu_u32(barrier, 1);
@@ -177,7 +217,7 @@ TL_DEVICE void barrier_blocks(int offset, int rank, int num_ranks) {
 #define FINISHED_SUM_TAG (1024)
 
   if constexpr (need_fence) {
-    memory_fence_sys();
+    memory_fence_sys(static_cast<int>(SyncSemantic::ACQ_REL));
     __syncthreads();
   }
 

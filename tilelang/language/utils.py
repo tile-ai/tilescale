@@ -190,3 +190,4 @@ class MemorySemantic(Enum):
     ACQUIRE = 3
     RELEASE = 4
     ACQ_REL = 5
+    SC = 6

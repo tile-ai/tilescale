@@ -635,19 +635,19 @@ def sync_blocks(barrier: PrimExpr):
                            0)  # whether need fence
 
 
-def fence_cta():
+def fence_cta(sem: MemorySemantic = MemorySemantic.ACQ_REL):
     """Create a memory fence at the block level (visible to all threads in the current block)."""
-    return tir.call_intrin("handle", tir.op.Op.get("tl.fence_cta"))
+    return tir.call_intrin("handle", tir.op.Op.get("tl.fence_cta"), sem.value)
 
 
-def fence_gpu():
+def fence_gpu(sem: MemorySemantic = MemorySemantic.ACQ_REL):
     """Synchronize all threads at the GPU level (visible to all blocks on the current device)."""
-    return tir.call_intrin("handle", tir.op.Op.get("tl.fence_gpu"))
+    return tir.call_intrin("handle", tir.op.Op.get("tl.fence_gpu"), sem.value)
 
 
-def fence_sys():
+def fence_sys(sem: MemorySemantic = MemorySemantic.ACQ_REL):
     """Synchronize all threads at the system level (visible in a node)."""
-    return tir.call_intrin("handle", tir.op.Op.get("tl.fence_sys"))
+    return tir.call_intrin("handle", tir.op.Op.get("tl.fence_sys"), sem.value)
 
 
 def get_clock():
