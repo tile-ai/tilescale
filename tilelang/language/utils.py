@@ -163,7 +163,7 @@ def linear_index(*args: PrimExpr) -> PrimExpr:
 
 class MemoryScope(Enum):
     """Memory scope for wait operations.
-    
+
     - CTA: Uses ld.volatile.cta (faster, suitable for same-CTA synchronization)
     - CLUSTER: Uses ld.volatile.cluster (faster, suitable for same-cluster synchronization)
     - GPU: Uses ld.volatile.gpu (faster, suitable for same-GPU synchronization)
@@ -177,7 +177,7 @@ class MemoryScope(Enum):
 
 class MemorySemantic(Enum):
     """Memory semantic for memory operations.
-    
+
     - WEAK: Uses ld.weak (no synchronization)
     - VOLATILE: Uses ld.volatile (faster, suitable for same-GPU synchronization)
     - RELAXED: Uses ld.relaxed (faster, suitable for same-GPU synchronization)
