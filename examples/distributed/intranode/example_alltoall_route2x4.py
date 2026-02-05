@@ -22,7 +22,7 @@ class Direction(IntEnum):
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
     },
-    debug_root_path="/home/zhengju.tang/tilescale/examples/distributed/debug/"
+    # debug_root_path="/home/zhengju.tang/tilescale/examples/distributed/debug/"
 )
 def torus_alltoall_xy(PE_num, X, Y, M, N, block_M, block_N, threads):
 
@@ -102,6 +102,8 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, block_M, block_N, threads):
                     # Send East (right): neighbor receives in its east buffer
                     to_dir[0] = Direction.EAST
                     next_rank[0] = rank_x[0] * Y + T.floormod(rank_y[0] + 1, Y)
+
+            T.fence_sys(sem=T.MemorySemantic.RELEASE)
 
             # Phase 1: Initial send from src to the target neighbor
             if src_rank[0] == rank[0]:
@@ -226,7 +228,7 @@ def run_torus_alltoall(local_rank, num_ranks, args):
     dst = tilelang.tensor((PE_num * M, N), torch.float16, allocator=allocator).zero_()
 
     buffer_transfer = tilelang.tensor((PE_num, PE_num, M, N), torch.float16,
-                                      allocator=allocator).zero_()
+                                      allocator=allocator).fill_(-1)
 
     # Signals for each buffer slot in each direction
     signal_transfer = tilelang.tensor((PE_num, PE_num), torch.uint32,
