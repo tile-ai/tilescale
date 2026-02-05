@@ -202,7 +202,7 @@ jobs:
             uv pip install --prerelease=allow -v torch
           fi
           uv pip install -v -r requirements-test.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
-          echo "import torch; print(f'torch: {torch.__version__}')" | uv run --no-project --script
+          echo "import torch; print(f'torch: {torch.__version__}')" | uv run --no-project --script -
           if [[ "${{ matrix.runner.toolkit }}" == *"CUDA"* ]]; then
             uv pip install --no-build-isolation-package=flash-attn -v -r requirements-test-cuda.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
             echo "import flash_attn; print(f'flash_attn: {flash_attn.__version__}')" | uv run --no-project --script -
