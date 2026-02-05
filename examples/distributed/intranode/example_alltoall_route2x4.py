@@ -147,7 +147,8 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, block_M, block_N, threads):
             # Signal values: represent the src_rank
             with T.While(global_finish[0] < PE_num):
                 if tx == 0:
-                    T.wait_le(signal_transfer[bx, dst_rank[0], bz], PE_num, scope=T.MemoryScope.SYSTEM)
+                    T.wait_le(
+                        signal_transfer[bx, dst_rank[0], bz], PE_num, scope=T.MemoryScope.SYSTEM)
                 T.sync_threads()
 
                 if signal_transfer[bx, dst_rank[0], bz] < PE_num:
@@ -202,14 +203,15 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, block_M, block_N, threads):
                                             for dst_rank in T.serial(PE_num):
                                                 for dst_block in T.serial(num_blocks_M):
                                                     T.st(
-                                                        signal_transfer[src_rank, dst_rank, dst_block],
+                                                        signal_transfer[src_rank, dst_rank,
+                                                                        dst_block],
                                                         PE_num,
                                                         scope=T.MemoryScope.SYSTEM,
                                                         sem=T.MemorySemantic.RELEASE,
                                                         dst_pe=remote_pe,
                                                     )
                         T.sync_threads()
-                    
+
                     # Restore the signal to avoid duplicated sum of finish barrier
                     if tx == 0:
                         T.st(
@@ -255,7 +257,8 @@ def run_torus_alltoall(local_rank, num_ranks, args):
                                       allocator=allocator).fill_(-1)
 
     # Signals for each buffer slot in each direction
-    signal_transfer = tilelang.tensor((PE_num, PE_num, num_blocks_M), torch.uint32,
+    signal_transfer = tilelang.tensor((PE_num, PE_num, num_blocks_M),
+                                      torch.uint32,
                                       allocator=allocator).fill_(PE_num + 1)
     local_finish = tilelang.tensor((1), torch.uint32, allocator=allocator).fill_(0)
     global_finish = tilelang.tensor((1), torch.uint32, allocator=allocator).fill_(0)
@@ -322,7 +325,7 @@ def run_torus_alltoall(local_rank, num_ranks, args):
             # For bandwidth calculation, we usually use the amount of data sent per rank.
             total_data_bytes = (PE_num - 1) * M * N * 2  # float16 = 2 bytes
             bandwidth_gbps = (total_data_bytes / 1e9) / (elapsed_time_ms / 1e3)
-            print(f"Benchmark Results:")
+            print("Benchmark Results:")
             print(f"  Average Latency: {elapsed_time_ms:.4f} ms")
             print(f"  Effective Bandwidth: {bandwidth_gbps:.4f} GB/s")
 
