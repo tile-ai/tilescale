@@ -11,13 +11,14 @@ def alltoall(PE_num, M, N, block_M, block_N, threads):
 
     @T.prim_func
     def main(
-        src: T.Tensor((PE_num * M, N), "float16"),
-        dst: T.Tensor((PE_num * M, N), "float16"),
-        barrier: T.Tensor((PE_num), "int32"),
+            src: T.Tensor((PE_num * M, N), "float16"),
+            dst: T.Tensor((PE_num * M, N), "float16"),
+            barrier: T.Tensor((PE_num), "int32"),
     ):
         # Currently not support tiled copy
-        with T.Kernel(PE_num, T.ceildiv(M, block_M), T.ceildiv(N, block_N), threads=threads) as (bx, by, bz):
-            tx = T.get_thread_binding(0)
+        with T.Kernel(
+                PE_num, T.ceildiv(M, block_M), T.ceildiv(N, block_N),
+                threads=threads) as (bx, by, bz):
             rank = T.alloc_local([1], "int32")
             num_ranks = T.alloc_local([1], "int32")
 
@@ -32,7 +33,6 @@ def alltoall(PE_num, M, N, block_M, block_N, threads):
                 dst_pe=dst_rank,
             )
             T.fence_sys(sem=T.MemorySemantic.RELEASE)
-            
 
     return main
 
@@ -70,7 +70,9 @@ def run_alltoall(local_rank, num_ranks, args):
     torch.cuda.synchronize()
     dist.barrier(group_size)
     elapsed_time = start.elapsed_time(end)
-    print(f"Rank {local_rank} Kernel execution time: {elapsed_time:.3f} ms, Bandwidth: {2 * PE_num * M * N / (elapsed_time * 1e6):.3f} GB/s")
+    print(
+        f"Rank {local_rank} Kernel execution time: {elapsed_time:.3f} ms, Bandwidth: {2 * PE_num * M * N / (elapsed_time * 1e6):.3f} GB/s"
+    )
 
     # Torch Reference
     torch.cuda.synchronize()
@@ -98,4 +100,3 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     torch.multiprocessing.spawn(run_alltoall, args=(args.PE_num, args), nprocs=args.PE_num)
-    

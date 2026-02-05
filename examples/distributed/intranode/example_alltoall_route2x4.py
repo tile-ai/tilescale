@@ -259,7 +259,7 @@ def run_torus_alltoall(local_rank, num_ranks, args):
         # Find differences
         diff_mask = (dst != dst_ref)
         diff_count = diff_mask.sum().item()
-        
+
         if diff_count > 0:
             diff_indices = torch.nonzero(diff_mask, as_tuple=False)
             print(f"Rank {local_rank} found {diff_count} differences at locations:")
@@ -267,7 +267,9 @@ def run_torus_alltoall(local_rank, num_ranks, args):
             num_to_print = min(10, diff_count)
             for i in range(num_to_print):
                 idx = diff_indices[i]
-                print(f"  Position {idx.tolist()}: dst={dst[idx[0], idx[1]].item():.6f}, dst_ref={dst_ref[idx[0], idx[1]].item():.6f}")
+                print(
+                    f"  Position {idx.tolist()}: dst={dst[idx[0], idx[1]].item():.6f}, dst_ref={dst_ref[idx[0], idx[1]].item():.6f}"
+                )
             if diff_count > num_to_print:
                 print(f"  ... and {diff_count - num_to_print} more differences")
 
