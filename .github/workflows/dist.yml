@@ -139,6 +139,9 @@ jobs:
           activate-environment: true
 
       - name: Test built wheels
+        # Skip CUDA wheel tests on GitHub-hosted runners (no CUDA available)
+        # Tests should be run on self-hosted runners with CUDA or during release validation
+        if: ${{ !contains(matrix.target.toolkit, 'CUDA') || contains(matrix.target.runner, 'self-hosted') }}
         run: |
           for WHEEL in wheelhouse/*.whl; do
             echo "Testing wheel: ${WHEEL}"
