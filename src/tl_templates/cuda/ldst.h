@@ -3,7 +3,7 @@
 #include "common.h"
 
 // Memory semantic and scope enums
-enum class Semantic { WEAK, VOLATILE, ACQUIRE, RELEASE, RELAXED };
+enum class Semantic { WEAK, VOLATILE, RELAXED, ACQUIRE, RELEASE, ACQ_REL };
 enum class Scope { CTA, CLUSTER, GPU, SYS };
 
 #ifndef TL_ALWAYS_FALSE_V_DEFINED

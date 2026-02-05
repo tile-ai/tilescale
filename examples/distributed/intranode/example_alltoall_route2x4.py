@@ -6,7 +6,7 @@ import torch.distributed as dist
 import argparse
 from enum import IntEnum
 
-tilelang.disable_cache()
+# tilelang.disable_cache()
 
 
 class Direction(IntEnum):
@@ -22,7 +22,7 @@ class Direction(IntEnum):
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
     },
-    # debug_root_path="/home/zhengju.tang/tilescale/examples/distributed/debug/")
+    debug_root_path="/home/zhengju.tang/tilescale/examples/distributed/debug/"
 )
 def torus_alltoall_xy(PE_num, X, Y, M, N, block_M, block_N, threads):
 
@@ -64,6 +64,7 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, block_M, block_N, threads):
             num_block_M[0] = T.ceildiv(M, block_M)
             src_rank[0] = bx
             dst_rank[0] = by
+
             # Prepare for routing
             dst_rank_x = T.floordiv(dst_rank[0], Y)
             dst_rank_y = T.floormod(dst_rank[0], Y)
@@ -108,7 +109,6 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, block_M, block_N, threads):
                     T.put_block(
                         T.address_of(src[dst_rank[0] * M + bz * block_M, 0]),
                         T.address_of(buffer_transfer[rank[0], dst_rank[0], bz * block_M, 0]),
-                        # T.address_of(dst[rank[0] * M + by * block_M, 0]),
                         block_M * N,
                         next_rank[0],
                     )
@@ -127,8 +127,10 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, block_M, block_N, threads):
                         block_M * N,
                         -1,
                     )
+                    T.fence_cta(sem=T.MemorySemantic.RELEASE)
 
-            T.barrier_blocks(barrier)
+            # T.barrier_blocks(barrier)
+            T.fence_sys(sem=T.MemorySemantic.RELEASE)
 
             # Phase 2: Each block handles one final dst data in one direction buffer of current rank and check whether to transfer
             # Signal values: represent the src_rank
@@ -163,6 +165,7 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, block_M, block_N, threads):
                             block_M * N,
                             -1,
                         )
+                        T.fence_cta(sem=T.MemorySemantic.RELEASE)
                         if tx == 0:
                             old_local[0] = T.atom_add(
                                 local_finish[0],
@@ -193,7 +196,8 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, block_M, block_N, threads):
                                                 )
                         T.sync_threads()
 
-            T.barrier_blocks(barrier)
+            # T.barrier_blocks(barrier)
+            T.fence_sys(sem=T.MemorySemantic.RELEASE)
 
     return main
 
@@ -207,7 +211,7 @@ def run_torus_alltoall(local_rank, num_ranks, args):
 
     local_rank, num_ranks, group_size = init_dist(local_rank, num_ranks)
     allocator = tilelang.get_allocator(
-        size=2**32,
+        size=2**35,
         device="cuda",
         is_distributed=True,
         local_rank=local_rank,
@@ -250,14 +254,28 @@ def run_torus_alltoall(local_rank, num_ranks, args):
     else:
         max_diff = (dst - dst_ref).abs().max()
         print(f"Rank {local_rank} Verification Failed! ❌ Max diff: {max_diff}")
+        # Find differences
+        diff_mask = (dst != dst_ref)
+        diff_count = diff_mask.sum().item()
+        
+        if diff_count > 0:
+            diff_indices = torch.nonzero(diff_mask, as_tuple=False)
+            print(f"Rank {local_rank} found {diff_count} differences at locations:")
+            # Print first few differences
+            num_to_print = min(10, diff_count)
+            for i in range(num_to_print):
+                idx = diff_indices[i]
+                print(f"  Position {idx.tolist()}: dst={dst[idx[0], idx[1]].item():.6f}, dst_ref={dst_ref[idx[0], idx[1]].item():.6f}")
+            if diff_count > num_to_print:
+                print(f"  ... and {diff_count - num_to_print} more differences")
 
     dist.destroy_process_group()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--M", type=int, default=128)
-    parser.add_argument("--N", type=int, default=128)
+    parser.add_argument("--M", type=int, default=8192)
+    parser.add_argument("--N", type=int, default=7168)
     parser.add_argument("--PE_num", type=int, default=8)
     parser.add_argument("--X", type=int, default=2)
     parser.add_argument("--Y", type=int, default=4)
