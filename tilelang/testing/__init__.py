@@ -1,4 +1,5 @@
 import sys
+import os
 import inspect
 import pytest
 import random
@@ -16,6 +17,7 @@ __all__ = [
     "requires_metal",
     "requires_rocm",
     "requires_llvm",
+    "requires_distributed",
     "main",
     "requires_cuda_compute_version",
     "process_func",
@@ -28,6 +30,7 @@ __all__ = [
     "requires_metal",
     "requires_rocm",
     "requires_llvm",
+    "requires_distributed",
     "main",
     "requires_cuda_compute_version",
 ] + [f"requires_cuda_compute_version_{op}" for op in ("ge", "gt", "le", "lt", "eq")]
@@ -132,3 +135,12 @@ def requires_cuda_compute_version_lt(major_version, minor_version=0):
 
 def requires_cuda_compute_version_le(major_version, minor_version=0):
     return requires_cuda_compute_version(major_version, minor_version, mode="le")
+
+
+# Whether TILELANG_USE_DISTRIBUTED is enabled in the environment
+_distributed_enabled = os.environ.get("TILELANG_USE_DISTRIBUTED", "0").lower() in ("1", "true", "on")
+
+requires_distributed = pytest.mark.skipif(
+    not _distributed_enabled,
+    reason="Requires TILELANG_USE_DISTRIBUTED=1",
+)

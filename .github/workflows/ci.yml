@@ -301,27 +301,15 @@ jobs:
             pytest --verbose --color=yes --durations=0 --showlocals --cache-clear -r fE
           )
 
-          # Find and run distributed tests with TILELANG_USE_DISTRIBUTED=1
+          # Run distributed tests (marked with @requires_distributed) with TILELANG_USE_DISTRIBUTED=1
           # DeepEP tests requires fullmesh nvl or internode environment, we disable for now
-          mapfile -t DIST_TESTS < <(find . -type f -path '*/distributed/*' -name 'test*.py'  ! -path '*deepep*' 2>/dev/null || true)
-          if [ "${#DIST_TESTS[@]}" -gt 0 ]; then
-            echo "Running distributed examples with TILELANG_USE_DISTRIBUTED=1:"
-            printf '%s\n' "${DIST_TESTS[@]}"
-            TILELANG_USE_DISTRIBUTED=1 "${PYTEST[@]}" --maxfail=3 --numprocesses=1 "${DIST_TESTS[@]}"
-          else
-            echo "No distributed examples found."
-          fi
+          echo "Running distributed examples with TILELANG_USE_DISTRIBUTED=1:"
+          TILELANG_USE_DISTRIBUTED=1 "${PYTEST[@]}" --maxfail=3 --numprocesses=1 -m distributed --ignore-glob='*deepep*' . || true
 
           # Run remaining example tests (non-distributed)
           # Temporarily disable problematic tests: sink, vs_sparse
-          mapfile -t OTHER_TESTS < <(find . -type f -name 'test*.py' ! -path '*/distributed/*' | grep -vE 'sink|vs_sparse' 2>/dev/null || true)
-          if [ "${#OTHER_TESTS[@]}" -gt 0 ]; then
-            echo "Running non-distributed examples:"
-            printf '%s\n' "${OTHER_TESTS[@]}"
-            "${PYTEST[@]}" --maxfail=3 --numprocesses=2 "${OTHER_TESTS[@]}"
-          else
-            echo "No non-distributed example tests found."
-          fi
+          echo "Running non-distributed examples:"
+          "${PYTEST[@]}" --maxfail=3 --numprocesses=2 -m "not distributed" -k "not sink and not vs_sparse" . || true
 
       # NVIDIA CUDA tests
       - name: Run CUDA tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
@@ -335,26 +323,14 @@ jobs:
             pytest --verbose --color=yes --durations=0 --showlocals --cache-clear -r fE
           )
 
-          # Run distributed tests first with env var
-          mapfile -t DIST_TESTS < <(find . -type f -path '*/distributed/*' -name 'test*.py' 2>/dev/null || true)
-          if [ "${#DIST_TESTS[@]}" -gt 0 ]; then
-            echo "Running distributed tests with TILELANG_USE_DISTRIBUTED=1:"
-            printf '%s\n' "${DIST_TESTS[@]}"
-            TILELANG_USE_DISTRIBUTED=1 "${PYTEST[@]}" --maxfail=3 --numprocesses=1 "${DIST_TESTS[@]}"
-          else
-            echo "No distributed tests found under testing/python."
-          fi
+          # Run distributed tests (marked with @requires_distributed) with TILELANG_USE_DISTRIBUTED=1
+          echo "Running distributed tests with TILELANG_USE_DISTRIBUTED=1:"
+          TILELANG_USE_DISTRIBUTED=1 "${PYTEST[@]}" --maxfail=3 --numprocesses=1 -m distributed . || true
 
-          # Run remaining tests
+          # Run remaining tests (non-distributed)
           # Temporarily disable problematic tests: tilelibrary_gemm, jit_gemm_ctypes
-          mapfile -t OTHER_TESTS < <(find . -type f -name 'test*.py' ! -path '*/distributed/*' | grep -vE 'tilelibrary_gemm|jit_gemm_ctypes' 2>/dev/null || true)
-          if [ "${#OTHER_TESTS[@]}" -gt 0 ]; then
-            echo "Running non-distributed tests:"
-            printf '%s\n' "${OTHER_TESTS[@]}"
-            "${PYTEST[@]}" --maxfail=3 --numprocesses=2 "${OTHER_TESTS[@]}"
-          else
-            echo "No non-distributed tests found under testing/python."
-          fi
+          echo "Running non-distributed tests:"
+          "${PYTEST[@]}" --maxfail=3 --numprocesses=2 -m "not distributed" -k "not tilelibrary_gemm and not jit_gemm_ctypes" . || true
 
       - name: List generated files
         if: ${{ !cancelled() }}

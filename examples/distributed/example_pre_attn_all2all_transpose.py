@@ -2,6 +2,7 @@ import torch
 import torch.distributed as dist
 import pynvshmem
 import tilelang
+import tilelang.testing
 import tilelang.language as T
 from tilelang.distributed import init_distributed, dtype_map
 import argparse
@@ -164,6 +165,7 @@ def parse_args():
     return parser.parse_args()
 
 
+@tilelang.testing.requires_distributed
 def test_transpose_all_to_all_with_golden_reference():
     args = parse_args()
 

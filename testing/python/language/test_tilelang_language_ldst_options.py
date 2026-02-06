@@ -36,6 +36,7 @@ def _test_ld_options(scope, sem, na, nc):
     assert torch.equal(x, y)
 
 
+@tilelang.testing.requires_distributed
 @tilelang.testing.requires_cuda
 def test_ld_options():
     # ld.acquire.sys.global.s32 / u64
@@ -64,6 +65,7 @@ def _test_st_options(scope, sem, na):
     assert x.equal(torch.arange(32, device="cuda"))
 
 
+@tilelang.testing.requires_distributed
 @tilelang.testing.requires_cuda
 def test_st_options():
     # st.relaxed.sys.global.s32
