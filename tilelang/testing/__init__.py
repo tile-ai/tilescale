@@ -140,7 +140,17 @@ def requires_cuda_compute_version_le(major_version, minor_version=0):
 # Whether TILELANG_USE_DISTRIBUTED is enabled in the environment
 _distributed_enabled = os.environ.get("TILELANG_USE_DISTRIBUTED", "0").lower() in ("1", "true", "on")
 
-requires_distributed = pytest.mark.skipif(
-    not _distributed_enabled,
-    reason="Requires TILELANG_USE_DISTRIBUTED=1",
-)
+
+def requires_distributed(func):
+    """Mark a test as requiring distributed mode (TILELANG_USE_DISTRIBUTED=1).
+
+    Adds both:
+    - pytest.mark.distributed  → so CI can select these tests via ``-m distributed``
+    - pytest.mark.skipif       → so the test is skipped when the env var is unset
+    """
+    func = pytest.mark.distributed(func)
+    func = pytest.mark.skipif(
+        not _distributed_enabled,
+        reason="Requires TILELANG_USE_DISTRIBUTED=1",
+    )(func)
+    return func
