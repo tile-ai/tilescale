@@ -239,6 +239,8 @@ def run_torus_alltoall(local_rank, num_ranks, args):
     num_tiles = M // tile_M
     num_blocks = min(num_tiles, 148 // (PE_num * PE_num))
     num_warps = threads // 32
+    # Modify tile_M to use all warps
+    tile_M = M // (num_blocks * num_warps)
 
     local_rank, num_ranks, group_size = init_dist(local_rank, num_ranks)
     allocator = tilelang.get_allocator(
@@ -317,20 +319,18 @@ def run_torus_alltoall(local_rank, num_ranks, args):
         start_event.record()
         for _ in range(num_iters):
             kernel(src, dst, buffer_transfer, signal_transfer, local_finish, global_finish, barrier)
+            torch.cuda.synchronize()
+            dist.barrier(group_size)
         end_event.record()
         torch.cuda.synchronize()
-        dist.barrier(group_size)
 
-        if local_rank == 0:
-            elapsed_time_ms = start_event.elapsed_time(end_event) / num_iters
-            # All-to-all total data moved: each rank sends (PE_num - 1) * M * N elements
-            # and receives (PE_num - 1) * M * N elements.
-            # For bandwidth calculation, we usually use the amount of data sent per rank.
-            total_data_bytes = (PE_num - 1) * M * N * 2  # float16 = 2 bytes
-            bandwidth_gbps = (total_data_bytes / 1e9) / (elapsed_time_ms / 1e3)
-            print("Benchmark Results:")
-            print(f"  Average Latency: {elapsed_time_ms:.4f} ms")
-            print(f"  Effective Bandwidth: {bandwidth_gbps:.4f} GB/s")
+        elapsed_time_ms = start_event.elapsed_time(end_event) / num_iters
+        # All-to-all total data moved: each rank sends (PE_num - 1) * M * N elements
+        # and receives (PE_num - 1) * M * N elements.
+        # For bandwidth calculation, we usually use the amount of data sent per rank.
+        total_data_bytes = PE_num * M * N * 2  # float16 = 2 bytes
+        bandwidth_gbps = (total_data_bytes / 1e9) / (elapsed_time_ms / 1e3)
+        print(f"Rank {local_rank} Average Latency: {elapsed_time_ms:.4f} ms, Effective Bandwidth: {bandwidth_gbps:.4f} GB/s")
 
     dist.destroy_process_group()
 

@@ -43,7 +43,7 @@ def run_alltoall(local_rank, num_ranks, args):
     N = args.N
     block_M = 32
     block_N = N
-    threads = 128
+    threads = 256
 
     local_rank, num_ranks, group_size = init_dist(local_rank, num_ranks)
     allocator = tilelang.get_allocator(
@@ -62,16 +62,26 @@ def run_alltoall(local_rank, num_ranks, args):
 
     torch.cuda.synchronize()
     dist.barrier(group_size)
+
+    # Warmup
+    for _ in range(args.warmup):
+        kernel(src, dst, barrier)
+    torch.cuda.synchronize()
+    dist.barrier(group_size)
+
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
     start.record()
-    kernel(src, dst, barrier)
+    for _ in range(args.iter):
+        kernel(src, dst, barrier)
+        torch.cuda.synchronize()
+        dist.barrier(group_size)
     end.record()
     torch.cuda.synchronize()
     dist.barrier(group_size)
-    elapsed_time = start.elapsed_time(end)
+    elapsed_time = start.elapsed_time(end) / args.iter
     print(
-        f"Rank {local_rank} Kernel execution time: {elapsed_time:.3f} ms, Bandwidth: {2 * PE_num * M * N / (elapsed_time * 1e6):.3f} GB/s"
+        f"Rank {local_rank} Average Kernel execution time: {elapsed_time:.3f} ms, Bandwidth: {2 * PE_num * M * N / (elapsed_time * 1e6):.3f} GB/s"
     )
 
     # Torch Reference
@@ -97,6 +107,8 @@ if __name__ == "__main__":
     parser.add_argument("--PE_num", type=int, default=8)
     parser.add_argument("--M", type=int, default=8192)
     parser.add_argument("--N", type=int, default=7168)
+    parser.add_argument("--warmup", type=int, default=5, help="Number of warmup iterations")
+    parser.add_argument("--iter", type=int, default=10, help="Number of benchmark iterations")
 
     args = parser.parse_args()
     torch.multiprocessing.spawn(run_alltoall, args=(args.PE_num, args), nprocs=args.PE_num)
