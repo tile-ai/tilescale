@@ -138,7 +138,7 @@ public:
         role = Role::kProducer;
         has_bulk_copy_ = true;
       }
-      if (call->op.same_as(loop_break()) || call->op.same_as(wait_eq()))
+      if (call->op.same_as(loop_break()) || call->op.same_as(WaitOp::Get()))
         role = Role::kBoth;
       if (call->op.same_as(get_clock()))
         role = Role::kBoth;

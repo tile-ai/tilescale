@@ -3,10 +3,11 @@ from __future__ import annotations
 
 from tilelang import tvm as tvm
 from tilelang.language import ptx_arrive_barrier, evaluate, address_of
+from tilelang.language.utils import MemoryScope, MemorySemantic
 from tilelang.language.kernel import get_thread_bindings, get_block_extents
 from tilelang.utils.target import check_hip_availability
 from tvm import tir
-from typing import Any, Literal
+from typing import Any
 import tilelang.language as T
 from tvm.tir import PrimExpr, Var, Call, Buffer, BufferLoad
 
@@ -612,15 +613,16 @@ def sync_grid(barrier: PrimExpr):
     return tir.call_intrin("handle", tir.op.Op.get("tl.sync_grid"), address_of(barrier))
 
 
-def barrier_blocks(barrier: PrimExpr):
+def barrier_blocks(barrier: PrimExpr, need_fence: bool = True):
     """Barrier all blocks at a system-level barrier.
     Compare to sync_blocks, barrier_blocks have an extra system-level fence effect
 
     Args:
         barrier: The barrier to synchronize at, should be [num_ranks] of int32
+        need_fence: Whether need fence. Default to True
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.barrier_blocks"), address_of(barrier),
-                           1)  # whether need fence
+                           need_fence)  # whether need fence
 
 
 def sync_blocks(barrier: PrimExpr):
@@ -633,19 +635,19 @@ def sync_blocks(barrier: PrimExpr):
                            0)  # whether need fence
 
 
-def fence_cta():
+def fence_cta(sem: MemorySemantic = MemorySemantic.ACQ_REL):
     """Create a memory fence at the block level (visible to all threads in the current block)."""
-    return tir.call_intrin("handle", tir.op.Op.get("tl.fence_cta"))
+    return tir.call_intrin("handle", tir.op.Op.get("tl.fence_cta"), sem.value)
 
 
-def fence_gpu():
+def fence_gpu(sem: MemorySemantic = MemorySemantic.ACQ_REL):
     """Synchronize all threads at the GPU level (visible to all blocks on the current device)."""
-    return tir.call_intrin("handle", tir.op.Op.get("tl.fence_gpu"))
+    return tir.call_intrin("handle", tir.op.Op.get("tl.fence_gpu"), sem.value)
 
 
-def fence_sys():
+def fence_sys(sem: MemorySemantic = MemorySemantic.ACQ_REL):
     """Synchronize all threads at the system level (visible in a node)."""
-    return tir.call_intrin("handle", tir.op.Op.get("tl.fence_sys"))
+    return tir.call_intrin("handle", tir.op.Op.get("tl.fence_sys"), sem.value)
 
 
 def get_clock():
@@ -728,21 +730,28 @@ def cp_async_barrier_noinc(barrier_id: int | PrimExpr | tir.Call):
     return tir.call_intrin("handle", tir.op.Op.get("tl.ptx_cp_async_barrier_noinc"), barrier_id)
 
 
-def atom_add(barrier: PrimExpr, value: PrimExpr, scope: str = "gpu", sem: str = "relaxed"):
+def atom_add(barrier: PrimExpr,
+             value: PrimExpr,
+             scope: MemoryScope = MemoryScope.GPU,
+             sem: MemorySemantic = MemorySemantic.RELAXED):
     """Perform a ptx async copy barrier using cp.async.mbarrier.arrive.noinc.
     """
-    assert scope in ["gpu", "sys"], "Scope must be one of 'gpu', or 'sys'."
-    assert sem in ["relaxed", "acquire", "release", "acq_rel"
-                  ], "Semantic must be one of 'relaxed', 'acquire', 'release', or 'acq_rel'."
-    return tir.call_intrin("uint32", tir.op.Op.get("tl.atom_add"), address_of(barrier), value, sem,
-                           scope)
+    scope_str = {MemoryScope.GPU: "gpu", MemoryScope.SYSTEM: "sys"}[scope]
+    sem_str = {
+        MemorySemantic.RELAXED: "relaxed",
+        MemorySemantic.ACQUIRE: "acquire",
+        MemorySemantic.RELEASE: "release",
+        MemorySemantic.ACQ_REL: "acq_rel"
+    }[sem]
+    return tir.call_intrin("uint32", tir.op.Op.get("tl.atom_add"), address_of(barrier), value,
+                           sem_str, scope_str)
 
 
 def ld(
     src: PrimExpr,
     value: PrimExpr,
-    scope: Literal["cta", "gpu", "sys"] = "gpu",
-    sem: Literal["weak", "volatile", "acquire", "release", "relaxed"] = "weak",
+    scope: MemoryScope = MemoryScope.GPU,
+    sem: MemorySemantic = MemorySemantic.WEAK,
     na: bool = False,
     nc: bool = False,
     src_pe: tir.PrimExpr | tir.IntImm | None = -1,
@@ -762,23 +771,17 @@ def ld(
     Returns:
         tir.Call: A handle to the load operation.
     """
-    assert scope in ["cta", "gpu", "sys"], "Scope must be one of 'cta', 'gpu', or 'sys'."
-    assert sem in [
-        "weak", "volatile", "acquire", "relaxed"
-    ], "Semantic must be one of 'weak', 'volatile', 'acquire', 'release', or 'relaxed'."
-    scope = {"cta": 0, "gpu": 1, "sys": 2}[scope]
-    sem = {"weak": 0, "volatile": 1, "acquire": 2, "release": 3, "relaxed": 4}[sem]
     na = 1 if na else 0
     nc = 1 if nc else 0
-    return tir.call_intrin("handle", tir.op.Op.get("tl.ld"), address_of(src), value, sem, scope, na,
-                           nc, src_pe)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.ld"), address_of(src), value, sem.value,
+                           scope.value, na, nc, src_pe)
 
 
 def st(
     dst: PrimExpr,
     value: PrimExpr,
-    scope: Literal["cta", "gpu", "sys"] = "gpu",
-    sem: Literal["weak", "volatile", "release", "relaxed"] = "weak",
+    scope: MemoryScope = MemoryScope.GPU,
+    sem: MemorySemantic = MemorySemantic.WEAK,
     na: bool = False,
     dst_pe: tir.PrimExpr | tir.IntImm | None = -1,
 ):
@@ -796,16 +799,59 @@ def st(
     Returns:
         tir.Call: A handle to the store operation.
     """
-    assert scope in ["cta", "gpu", "sys"], "Scope must be one of 'cta', 'gpu', or 'sys'."
-    assert sem in ["weak", "volatile", "release", "relaxed"
-                  ], "Semantic must be one of 'weak', 'volatile', 'release', or 'relaxed'."
-
-    # convert to int
-    scope = {"cta": 0, "gpu": 1, "sys": 2}[scope]
-    sem = {"weak": 0, "volatile": 1, "acquire": 2, "release": 3, "relaxed": 4}[sem]
     na = 1 if na else 0
-    return tir.call_intrin("handle", tir.op.Op.get("tl.st"), address_of(dst), value, sem, scope, na,
-                           dst_pe)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.st"), address_of(dst), value, sem.value,
+                           scope.value, na, dst_pe)
+
+
+def atom_add_remote(
+    dst: PrimExpr,
+    value: PrimExpr,
+    scope: MemoryScope = MemoryScope.SYSTEM,
+    sem: MemorySemantic = MemorySemantic.RELAXED,
+    dst_pe: tir.PrimExpr | tir.IntImm | None = -1,
+):
+    """Perform a remote atomic add operation with return value support
+
+    Args:
+        dst: The destination address to store the value to.
+        value: The value to store.
+        scope: The memory scope.
+        sem: The memory semantic.
+        dst_pe: The destination processing element (PE) identifier.
+                Use -1 (default) for local PE, or a non-negative integer to target a remote PE.
+
+    Returns:
+        tir.Call: Returns the old value before the atomic add (uint32).
+    """
+    scope_str = {MemoryScope.GPU: "gpu", MemoryScope.SYSTEM: "sys"}[scope]
+    sem_str = {
+        MemorySemantic.RELAXED: "relaxed",
+        MemorySemantic.ACQUIRE: "acquire",
+        MemorySemantic.RELEASE: "release",
+        MemorySemantic.ACQ_REL: "acq_rel"
+    }[sem]
+
+    # Build the intrinsic function name
+    func_name = f"tl::ptx_atom_add_{sem_str}_{scope_str}"
+
+    # If dst_pe is specified and not -1, compute remote address
+    is_remote = not (isinstance(dst_pe, tir.IntImm) and dst_pe.value == -1)
+
+    if is_remote:
+        # Compute remote address: remote_base_ptr(dst_pe) + (address_of(dst) - remote_base_ptr(get_rank()))
+        local_rank = tir.Call("int64", tir.op.Op.get("tl.get_rank"), [])
+        local_base_ptr = tir.Call("handle", tir.op.Op.get("tl.get_remote_base_ptr"), [local_rank])
+        offset_to_base = tir.Sub(
+            tir.Call("handle", tir.op.Op.get("tl.get_uintptr_t"), [address_of(dst)]),
+            local_base_ptr)
+        remote_ptr = tir.Add(
+            tir.Call("handle", tir.op.Op.get("tl.get_remote_base_ptr"), [dst_pe]), offset_to_base)
+        # Call the PTX intrinsic directly with remote address
+        return tir.call_extern("uint32", func_name, remote_ptr, value)
+    else:
+        # Local atomic add
+        return tir.call_extern("uint32", func_name, address_of(dst), value)
 
 
 def elect_one_sync():
