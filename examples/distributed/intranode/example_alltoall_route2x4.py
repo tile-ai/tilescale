@@ -81,7 +81,7 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, threads):
                 diff[0] = dst_rank_x - rank_x[0]
                 if diff[0] > T.floordiv(X, 2):
                     diff[0] -= X
-                elif diff[0] < -T.floordiv(X, 2):
+                elif diff[0] <= -T.floordiv(X, 2):
                     diff[0] += X
 
                 if diff[0] < 0:
@@ -97,7 +97,7 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, threads):
                 diff[0] = dst_rank_y - rank_y[0]
                 if diff[0] > T.floordiv(Y, 2):
                     diff[0] -= Y
-                elif diff[0] < -T.floordiv(Y, 2):
+                elif diff[0] <= -T.floordiv(Y, 2):
                     diff[0] += Y
 
                 if diff[0] < 0:
@@ -135,7 +135,7 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, threads):
                         dst_pe=next_rank[0],
                     )
                 T.sync_warp()
-                # T.fence_sys(sem=T.MemorySemantic.RELEASE)
+                T.fence_sys(sem=T.MemorySemantic.RELEASE)
             else:
                 T.put_warp(
                     T.address_of(src[dst_rank[0] * M + bz * block_M + warp_idx * tile_M + chunk_start, 0]),
@@ -151,9 +151,9 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, threads):
                         sem=T.MemorySemantic.RELEASE,
                     )
                 T.sync_warp()
-                # T.fence_cta(sem=T.MemorySemantic.RELEASE)
+                T.fence_cta(sem=T.MemorySemantic.RELEASE)
 
-            # T.fence_sys(sem=T.MemorySemantic.RELEASE)
+            T.fence_sys(sem=T.MemorySemantic.RELEASE)
             T.sync_threads()
 
             # Phase 2: Each block handles one final dst data in one direction buffer of current rank and check whether to transfer
