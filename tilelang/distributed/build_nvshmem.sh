@@ -19,8 +19,8 @@ else
 fi
 
 wget https://developer.nvidia.com/downloads/assets/secure/nvshmem/nvshmem_src_3.2.5-1.txz
-tar zxvf nvshmem_src_3.2.5-1.txz
-rm -rf nvshmem_src_3.2.5-1.txz
+tar -zxvf nvshmem_src_3.2.5-1.txz
+rm -f nvshmem_src_3.2.5-1.txz
 
 mkdir -p "${NVSHMEM_SRC}"
 mv nvshmem_src/* "${NVSHMEM_SRC}/"

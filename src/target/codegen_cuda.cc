@@ -2846,22 +2846,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       }
     }
     os << ")";
-  } else if (op->op.same_as(tl::Quiet())) {
-    this->use_distributed_ = true;
-    this->use_nvshmem_ = true;
-    os << "nvshmem_quiet()";
-  } else if (op->op.same_as(tl::Fence())) {
-    this->use_distributed_ = true;
-    this->use_nvshmem_ = true;
-    os << "nvshmem_fence()";
-  } else if (op->op.same_as(tl::SyncAll())) {
-    this->use_distributed_ = true;
-    this->use_nvshmem_ = true;
-    os << "nvshmem_sync_all()";
-  } else if (op->op.same_as(tl::BarrierAll())) {
-    this->use_distributed_ = true;
-    this->use_nvshmem_ = true;
-    os << "nvshmem_barrier_all()";
   } else if (op->op.same_as(tl::fence_cta())) {
     this->use_distributed_ = true;
     os << "tl::memory_fence_cta()";
