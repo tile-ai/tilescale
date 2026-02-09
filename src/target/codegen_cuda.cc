@@ -307,11 +307,6 @@ std::string CodeGenTileLangCUDA::Finish() {
     decl_stream << "#include <curand_kernel.h>\n";
   }
 
-  if (use_nvshmem_) {
-    decl_stream << "#include <nvshmem.h>\n";
-    decl_stream << "#include <nvshmemx.h>\n";
-  }
-
   decl_stream << "#include <tl_templates/cuda/gemm.h>\n";
   if (enable_sparse_gemm_) {
     decl_stream << "#include <tl_templates/cuda/gemm_sp.h>\n";
