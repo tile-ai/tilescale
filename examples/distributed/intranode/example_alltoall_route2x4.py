@@ -6,7 +6,7 @@ import torch.distributed as dist
 import argparse
 from enum import IntEnum
 
-# tilelang.disable_cache()
+tilelang.disable_cache()
 
 
 class Direction(IntEnum):
@@ -30,7 +30,7 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, threads):
     tile_M = block_M // num_warps
     
     @T.prim_func
-    def main(
+    def main_route(
             # For each (src, dst) pair, the real transfer size is M * N
             src: T.Tensor((PE_num * M, N), "float16"),
             dst: T.Tensor((PE_num * M, N), "float16"),
@@ -180,6 +180,8 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, threads):
                             sem=T.MemorySemantic.RELEASE,
                             dst_pe=next_rank[0],
                         )
+                        # if bz == 0 and tx == 0:
+                        #     T.print(rank[0], "transfer rank")
                     T.sync_warp()
                 else:
                     # Current rank is the real destination of this chunk of data, the real source rank is the buffer index
@@ -197,6 +199,8 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, threads):
                             scope=T.MemoryScope.GPU,
                             sem=T.MemorySemantic.RELEASE,
                         )
+                        # if bz == 0 and tx == 0:
+                        #     T.print(rank[0], "dst rank")
                         if old_local[0] + 1 == (PE_num - 1) * num_tiles[0] + PE_num * num_tiles[0]:
                             for i in T.serial(PE_num):
                                 old_global[0] = T.atom_add_remote(
@@ -227,7 +231,7 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, threads):
 
             T.fence_sys(sem=T.MemorySemantic.RELEASE)
 
-    return main
+    return main_route
 
 
 def run_torus_alltoall(local_rank, num_ranks, args):
@@ -235,14 +239,12 @@ def run_torus_alltoall(local_rank, num_ranks, args):
     PE_num = args.PE_num
     X, Y = args.X, args.Y
     M, N = args.M, args.N
-    block_M, block_N = M // 8, N
+    block_M, block_N = M // 2, N
     threads = 256
 
     num_blocks = M // block_M
     num_blocks = min(num_blocks, NUM_SM // (PE_num * PE_num))
     num_warps = threads // 32
-    # Modify tile_M to use all warps
-    tile_M = M // (num_blocks * num_warps)
 
     local_rank, num_ranks, group_size = init_dist(local_rank, num_ranks)
     allocator = tilelang.get_allocator(
@@ -259,6 +261,10 @@ def run_torus_alltoall(local_rank, num_ranks, args):
 
     src = tilelang.tensor((PE_num * M, N), torch.float16, allocator=allocator).random_()
     dst = tilelang.tensor((PE_num * M, N), torch.float16, allocator=allocator).zero_()
+
+    dst_ref = torch.zeros((PE_num * M, N), dtype=torch.float16, device="cuda")
+    dist.all_to_all_single(dst_ref, src, group=group_size)
+    torch.cuda.synchronize()
 
     buffer_transfer = tilelang.tensor((PE_num, PE_num, M, N), torch.float16,
                                       allocator=allocator).fill_(0)
@@ -281,10 +287,6 @@ def run_torus_alltoall(local_rank, num_ranks, args):
 
     print(f"Rank {local_rank} TileLang AllToAll XY Routing Finished.")
 
-    dst_ref = torch.zeros((PE_num * M, N), dtype=torch.float16, device="cuda")
-    dist.all_to_all_single(dst_ref, src, group=group_size)
-    torch.cuda.synchronize()
-
     if torch.allclose(dst, dst_ref, atol=1e-2, rtol=1e-2):
         print(f"Rank {local_rank} Verification Passed! ✅")
     else:
@@ -295,32 +297,39 @@ def run_torus_alltoall(local_rank, num_ranks, args):
         diff_count = diff_mask.sum().item()
 
         if diff_count > 0:
-            diff_indices = torch.nonzero(diff_mask, as_tuple=False)
-            print(f"Rank {local_rank} found {diff_count} differences at locations:")
-            # Print first few differences
-            num_to_print = min(10, diff_count)
-            for i in range(num_to_print):
-                idx = diff_indices[i]
+            # Check each rank's symmetric buffer at every M boundary
+            print(f"Rank {local_rank} found {diff_count} differences")
+            print(f"Rank {local_rank} checking symmetric buffer positions at M={M} boundaries:")
+            for rank_idx in range(PE_num):
+                start_idx = rank_idx * M
+                # Check first element of each rank's buffer
                 print(
-                    f"  Position {idx.tolist()}: dst={dst[idx[0], idx[1]].item():.6f}, dst_ref={dst_ref[idx[0], idx[1]].item():.6f}"
+                    f"Rank {local_rank} Buffer[{rank_idx}][0,0]: dst={buffer_transfer[rank_idx, local_rank, 0, 0].item():.6f}, dst_ref={dst_ref[start_idx, 0].item():.6f}"
                 )
-            if diff_count > num_to_print:
-                print(f"  ... and {diff_count - num_to_print} more differences")
 
     if args.benchmark:
         # Warmup
-        for _ in range(5):
+        for _ in range(args.warmup):
             kernel(src, dst, buffer_transfer, signal_transfer, local_finish, global_finish, barrier)
         torch.cuda.synchronize()
         dist.barrier(group_size)
 
+        # Reinitialize
+        buffer_transfer.zero_()
+        signal_transfer.zero_()
+        local_finish.zero_()
+        global_finish.zero_()
+
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
 
-        num_iters = 10
+        num_iters = args.iter
         start_event.record()
         for _ in range(num_iters):
+            # torch.cuda.profiler.start()
+            # with torch.cuda.nvtx.range("alltoall_xy_routing_benchmark"):
             kernel(src, dst, buffer_transfer, signal_transfer, local_finish, global_finish, barrier)
+            # torch.cuda.profiler.stop()
             torch.cuda.synchronize()
             dist.barrier(group_size)
         end_event.record()
@@ -345,6 +354,8 @@ if __name__ == "__main__":
     parser.add_argument("--X", type=int, default=2)
     parser.add_argument("--Y", type=int, default=4)
     parser.add_argument("--benchmark", action="store_true", help="Run benchmark")
+    parser.add_argument("--warmup", type=int, default=5, help="Number of warmup iterations")
+    parser.add_argument("--iter", type=int, default=10, help="Number of benchmark iterations")
     args = parser.parse_args()
 
     torch.multiprocessing.spawn(run_torus_alltoall, args=(args.PE_num, args), nprocs=args.PE_num)
