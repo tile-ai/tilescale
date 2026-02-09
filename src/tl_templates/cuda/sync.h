@@ -323,81 +323,93 @@ TL_DEVICE T ld_wait_generic(const T *ptr, WaitScope scope,
 }
 
 template <typename P, typename T>
-TL_DEVICE void wait_eq(P ptr, T val, int scope = (int)WaitScope::SYSTEM,
+TL_DEVICE T wait_eq(P ptr, T val, int scope = (int)WaitScope::SYSTEM,
                        int semantic = (int)WaitSemantic::ACQUIRE) {
   static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
                 "P must be a pointer or uint64_t");
   T *flag_ptr = reinterpret_cast<T *>(ptr);
+  T ret;
 // Spin-loop
 #pragma unroll 1
-  while (ld_wait_generic(flag_ptr, (WaitScope)scope, (WaitSemantic)semantic) !=
+  while ((ret = ld_wait_generic(flag_ptr, (WaitScope)scope, (WaitSemantic)semantic)) !=
          val)
     ;
+  return ret;
 }
 
 template <typename P, typename T>
-TL_DEVICE void wait_ne(P ptr, T val, int scope = (int)WaitScope::SYSTEM,
+TL_DEVICE T wait_ne(P ptr, T val, int scope = (int)WaitScope::SYSTEM,
                        int semantic = (int)WaitSemantic::ACQUIRE) {
   static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
                 "P must be a pointer or uint64_t");
   T *flag_ptr = reinterpret_cast<T *>(ptr);
+  T ret;
 // Spin-loop
 #pragma unroll 1
-  while (ld_wait_generic(flag_ptr, (WaitScope)scope, (WaitSemantic)semantic) ==
+  while ((ret = ld_wait_generic(flag_ptr, (WaitScope)scope, (WaitSemantic)semantic)) ==
          val)
     ;
+  return ret;
 }
 
 template <typename P, typename T>
-TL_DEVICE void wait_ge(P ptr, T val, int scope = (int)WaitScope::SYSTEM,
+TL_DEVICE T wait_ge(P ptr, T val, int scope = (int)WaitScope::SYSTEM,
                        int semantic = (int)WaitSemantic::ACQUIRE) {
   static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
                 "P must be a pointer or uint64_t");
   T *flag_ptr = reinterpret_cast<T *>(ptr);
+  T ret;
 // Spin-loop
 #pragma unroll 1
-  while (ld_wait_generic(flag_ptr, (WaitScope)scope, (WaitSemantic)semantic) <
+  while ((ret = ld_wait_generic(flag_ptr, (WaitScope)scope, (WaitSemantic)semantic)) <
          val)
     ;
+  return ret;
 }
 
 template <typename P, typename T>
-TL_DEVICE void wait_le(P ptr, T val, int scope = (int)WaitScope::SYSTEM,
+TL_DEVICE T wait_le(P ptr, T val, int scope = (int)WaitScope::SYSTEM,
                        int semantic = (int)WaitSemantic::ACQUIRE) {
   static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
                 "P must be a pointer or uint64_t");
   T *flag_ptr = reinterpret_cast<T *>(ptr);
+  T ret;
 // Spin-loop
 #pragma unroll 1
-  while (ld_wait_generic(flag_ptr, (WaitScope)scope, (WaitSemantic)semantic) >
+  while ((ret = ld_wait_generic(flag_ptr, (WaitScope)scope, (WaitSemantic)semantic)) >
          val)
     ;
+  return ret;
 }
 
 template <typename P, typename T>
-TL_DEVICE void wait_gt(P ptr, T val, int scope = (int)WaitScope::SYSTEM,
+TL_DEVICE T wait_gt(P ptr, T val, int scope = (int)WaitScope::SYSTEM,
                        int semantic = (int)WaitSemantic::ACQUIRE) {
   static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
                 "P must be a pointer or uint64_t");
   T *flag_ptr = reinterpret_cast<T *>(ptr);
+  T ret;
 // Spin-loop
 #pragma unroll 1
-  while (ld_wait_generic(flag_ptr, (WaitScope)scope, (WaitSemantic)semantic) <=
+  while ((ret = ld_wait_generic(flag_ptr, (WaitScope)scope, (WaitSemantic)semantic)) <=
          val)
     ;
+  return ret;
 }
 
 template <typename P, typename T>
-TL_DEVICE void wait_lt(P ptr, T val, int scope = (int)WaitScope::SYSTEM,
+TL_DEVICE T wait_lt(P ptr, T val, int scope = (int)WaitScope::SYSTEM,
                        int semantic = (int)WaitSemantic::ACQUIRE) {
   static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
                 "P must be a pointer or uint64_t");
   T *flag_ptr = reinterpret_cast<T *>(ptr);
+  T ret;
 // Spin-loop
 #pragma unroll 1
-  while (ld_wait_generic(flag_ptr, (WaitScope)scope, (WaitSemantic)semantic) >=
+  while ((ret = ld_wait_generic(flag_ptr, (WaitScope)scope, (WaitSemantic)semantic)) >=
          val)
     ;
+  return ret;
 }
 
 } // namespace tl

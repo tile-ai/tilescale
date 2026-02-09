@@ -145,6 +145,7 @@ WaitOp::WaitOp(Array<PrimExpr> args, BufferMap vmap) {
   node->scope = (args.size() > 4) ? args[4].as<IntImmNode>()->value : 3;
   // semantic parameter is optional, default to ACQUIRE (3) for safety
   node->semantic = (args.size() > 5) ? args[5].as<IntImmNode>()->value : 3;
+  node->dtype = (args.size() > 6) ? args[6].as<StringImmNode>()->value : "int32";
   data_ = std::move(node);
   (void)vmap;
 }
@@ -183,8 +184,8 @@ Stmt WaitOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   // Pass semantic: 0=WEAK, 1=VOLATILE, 2=RELAXED, 3=ACQUIRE, 4=RELEASE,
   // 5=ACQ_REL
   new_args.push_back(IntImm(DataType::Int(32), semantic));
-
-  auto wait = Call(DataType::Handle(), builtin::call_extern(), new_args);
+  auto datatype = dtype == "int32" ? DataType::Int(32) : DataType::UInt(32);
+  auto wait = Call(datatype, builtin::call_extern(), new_args);
   return Evaluate(wait);
 }
 

@@ -93,7 +93,7 @@ def gemm_kernel(M,
             tid = T.get_thread_binding(0)
             T.clear(C_local)
             if tid == 0:
-                T.wait_eq(signal_buffer[pid_m * block_M // M_per_rank], 1)
+                T.wait_eq(signal_buffer[pid_m * block_M // M_per_rank], 1, dtype="uint32")
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=3):
                 T.copy(A[pid_m * block_M, k * block_K], A_shared)
                 T.copy(B[k * block_K, pid_n * block_N], B_shared)

@@ -1477,6 +1477,20 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->PrintIndent();
     int num_mma = Downcast<IntImm>(op->args[0])->value;
     this->stream << "tl::wait_wgmma<" << std::to_string(num_mma) << ">();\n";
+  } else if (op->op.same_as(Op::Get("tl.wait"))) {
+    // relation, addr, expected, peer, scope, semantic
+    ICHECK_GE(op->args.size(), 4);
+    const char *relation_str[] = {"eq", "ne", "ge", "le", "gt", "lt"};
+    int relation = Downcast<IntImm>(op->args[0])->value;
+    std::string addr = this->PrintExpr(op->args[1]);
+    std::string expected = this->PrintExpr(op->args[2]);
+    // peer is args[3], but wait_ne in sync.h doesn't take peer if it's already a pointer
+    // The Lower() in sync.cc handles distributed by converting to remote pointer
+    int scope = (op->args.size() > 4) ? Downcast<IntImm>(op->args[4])->value : 3;
+    int semantic = (op->args.size() > 5) ? Downcast<IntImm>(op->args[5])->value : 3;
+
+    os << "tl::wait_" << relation_str[relation] << "(" << addr << ", " << expected
+       << ", " << scope << ", " << semantic << ");\n";
   } else if (op->op.same_as(tl::pack_b16())) {
     os << "__pack_half2(" << this->PrintExpr(op->args[0]) << ", "
        << this->PrintExpr(op->args[1]) << ")";

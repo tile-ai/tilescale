@@ -53,6 +53,7 @@ public:
   int scope;         ///< Memory scope: 0=CTA, 1=CLUSTER, 2=GPU, 3=SYSTEM
   int semantic; ///< Memory semantic: 0=WEAK, 1=VOLATILE, 2=RELAXED, 3=ACQUIRE,
                 ///< 4=RELEASE, 5=ACQ_REL
+  std::string dtype; ///< The data type of the memory address, must be int32 or uint32
 
   bool is_distributed() const;
 
@@ -73,13 +74,15 @@ public:
         .def_ro("peer", &WaitOpNode::peer)
         .def_ro("relation", &WaitOpNode::relation)
         .def_ro("scope", &WaitOpNode::scope)
-        .def_ro("semantic", &WaitOpNode::semantic);
+        .def_ro("semantic", &WaitOpNode::semantic)
+        .def_ro("dtype", &WaitOpNode::dtype);
   }
 
   bool SEqualReduce(const WaitOpNode *other, SEqualReducer equal) const {
     return equal(addr, other->addr) && equal(expected, other->expected) &&
            equal(peer, other->peer) && relation == other->relation &&
-           scope == other->scope && semantic == other->semantic;
+           scope == other->scope && semantic == other->semantic &&
+           dtype == other->dtype;
   }
 
   void SHashReduce(SHashReducer hash_reduce) const {
@@ -89,6 +92,7 @@ public:
     hash_reduce(relation);
     hash_reduce(scope);
     hash_reduce(semantic);
+    hash_reduce(dtype);
   }
 
   static constexpr bool _type_has_method_sequal_reduce = true;
