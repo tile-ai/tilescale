@@ -256,8 +256,10 @@ class Environment:
     TVM_IMPORT_PYTHON_PATH = EnvVar("TVM_IMPORT_PYTHON_PATH", None)
 
     # NVSHMEM paths - auto-detect from pip-installed nvidia-nvshmem-cu12 or NVSHMEM_HOME
-    _nvshmem_include_dir: str | None = None
-    _nvshmem_lib_path: str | None = None
+    # _NVSHMEM_NOT_PROBED is a sentinel indicating that detection has not run yet.
+    _NVSHMEM_NOT_PROBED = object()
+    _nvshmem_include_dir: str | None = _NVSHMEM_NOT_PROBED
+    _nvshmem_lib_path: str | None = _NVSHMEM_NOT_PROBED
 
     @property
     def USE_NVSHMEM(self) -> bool:
@@ -271,15 +273,24 @@ class Environment:
 
     @property
     def NVSHMEM_INCLUDE_DIR(self) -> str | None:
-        """Get NVSHMEM include directory, auto-detecting if needed."""
-        if self._nvshmem_include_dir is None and self.USE_DISTRIBUTED:
+        """Get NVSHMEM include directory, auto-detecting if needed.
+
+        Path discovery is independent of USE_NVSHMEM / USE_DISTRIBUTED flags;
+        those flags control whether the paths are *used*, not whether they are
+        *discovered*.  This avoids duplicating detection logic elsewhere.
+        """
+        if self._nvshmem_include_dir is self._NVSHMEM_NOT_PROBED:
             self._nvshmem_include_dir, self._nvshmem_lib_path = Environment._find_nvshmem_paths()
         return self._nvshmem_include_dir
 
     @property
     def NVSHMEM_LIB_PATH(self) -> str | None:
-        """Get NVSHMEM library path, auto-detecting if needed."""
-        if self._nvshmem_lib_path is None and self.USE_DISTRIBUTED:
+        """Get NVSHMEM library path, auto-detecting if needed.
+
+        See :pyattr:`NVSHMEM_INCLUDE_DIR` for the rationale on unconditional
+        detection.
+        """
+        if self._nvshmem_lib_path is self._NVSHMEM_NOT_PROBED:
             self._nvshmem_include_dir, self._nvshmem_lib_path = Environment._find_nvshmem_paths()
         return self._nvshmem_lib_path
 
