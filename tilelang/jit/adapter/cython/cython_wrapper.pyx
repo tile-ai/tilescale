@@ -11,8 +11,7 @@ from tilelang.env import env
 
 def _use_nvshmem():
     """Check if NVSHMEM is enabled in the environment."""
-    val = str(env.USE_NVSHMEM).lower()
-    return val in ("1", "true", "yes", "on")
+    return env.USE_NVSHMEM
 
 if _use_nvshmem():
     import pynvshmem

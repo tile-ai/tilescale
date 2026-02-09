@@ -24,14 +24,12 @@ import logging
 
 def _use_nvshmem():
     """Check if NVSHMEM is enabled in the environment."""
-    val = str(env.USE_NVSHMEM).lower()
-    return val in ("1", "true", "yes", "on")
+    return env.USE_NVSHMEM
 
 
 def _use_distributed():
     """Check if distributed mode is enabled in the environment."""
-    val = str(env.USE_DISTRIBUTED).lower()
-    return val in ("1", "true", "yes", "on")
+    return env.USE_DISTRIBUTED
 
 
 logger = logging.getLogger(__name__)
