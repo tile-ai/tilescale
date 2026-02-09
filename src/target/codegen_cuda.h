@@ -19,11 +19,17 @@
  * Utility function for judging whether distributed mode is enabled.
  * This is used to determine whether to include distributed.h in the generated
  * code.
+ *
+ * Accepted truthy values: "1", "true", "on" (case-insensitive), consistent
+ * with the Python-side Environment.USE_DISTRIBUTED property.
  */
 static inline bool use_distributed() {
   const char *env = std::getenv("TILELANG_USE_DISTRIBUTED");
   if (env) {
-    return std::string(env) == "1";
+    std::string val(env);
+    // Convert to lowercase for case-insensitive comparison
+    for (auto &c : val) c = std::tolower(c);
+    return val == "1" || val == "true" || val == "on";
   }
   return false;
 }
