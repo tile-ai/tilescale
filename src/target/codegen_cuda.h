@@ -27,8 +27,10 @@ static inline bool use_distributed() {
   const char *env = std::getenv("TILELANG_USE_DISTRIBUTED");
   if (env) {
     std::string val(env);
+
     // Convert to lowercase for case-insensitive comparison
-    for (auto &c : val) c = std::tolower(c);
+    for (auto &c : val)
+      c = std::tolower(c);
     return val == "1" || val == "true" || val == "on";
   }
   return false;

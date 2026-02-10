@@ -86,8 +86,9 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
         "-I" + tl_template_path,
         "-I" + cutlass_path,
     ]
-    # Add NVSHMEM include path and library linking for distributed support
-    if env.USE_DISTRIBUTED and env.USE_NVSHMEM:
+
+    # Add NVSHMEM include path and library linking when NVSHMEM is enabled.
+    if env.USE_NVSHMEM:
         if env.NVSHMEM_INCLUDE_DIR and env.NVSHMEM_LIB_PATH:
             options.append("-I" + env.NVSHMEM_INCLUDE_DIR)
             options.append("-L" + env.NVSHMEM_LIB_PATH)
@@ -95,7 +96,7 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
             options.append("-rdc=true")
         else:
             raise ValueError(
-                "TILELANG_USE_DISTRIBUTED is enabled but NVSHMEM paths not found. Install nvidia-nvshmem-cu12 via pip or set NVSHMEM_SRC."
+                "TILELANG_USE_NVSHMEM is enabled but NVSHMEM paths not found. Install nvidia-nvshmem-cu12 via pip or set NVSHMEM_SRC."
             )
 
     # Merge extra device compiler flags from pass config, if provided

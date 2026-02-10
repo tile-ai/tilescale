@@ -9,7 +9,7 @@
 - **CUDA Version**: >= 12.1
 - **LLVM**: < 20 if you are using the bundled TVM submodule
 
-We currently provide three methods to install **TileScale**:
+Install **TileScale** with the following steps:
 
 **(optional)Prepare the container**:
 
@@ -48,32 +48,41 @@ You can now run TileScale examples and develop your applications.
 
 **Example Usage:**
 
-You can run TileScale examples:
+From the project root:
 
 ```bash
-cd /home/tilelang
 TILELANG_USE_DISTRIBUTED=1 python examples/distributed/example_allgather_gemm_overlapped.py
 ```
 
 ## To use NVSHMEM APIs
 
-Before running the examples using NVSHMEM APIs (e.g., [example_allgather.py](../../examples/distributed/example_allgather.py)), you need to build NVSHMEM library for device-side code generation.
+Device-side code generation (kernels calling `nvshmem_*` on the GPU) requires NVSHMEM built from source (the pip package does not provide `libnvshmem_device`). Build from source and install the Python bindings as follows.
+
+**1. Build NVSHMEM from source**
 
 ```bash
-pip install mpich  # building NVSHMEM needs MPI
-export NVSHMEM_SRC="your_custom_nvshmem_dir" # default to 3rdparty/nvshmem_src
+pip install mpich   # NVSHMEM build requires MPI
 cd tilelang/distributed
-source build_nvshmem.sh
+# Optional: set NVSHMEM_SRC to a custom path; default is ../../3rdparty/nvshmem_src
+# For H100 (sm_90), add: bash build_nvshmem.sh --arch 90
+bash build_nvshmem.sh
+# Then set the env vars printed at the end (NVSHMEM_SRC, LD_LIBRARY_PATH).
 ```
-You also need to install the `pynvshmem` package, which provides wrapped host-side Python API for NVSHMEM.
+
+The script downloads the NVSHMEM source tarball from NVIDIA; you may need to be logged in at [NVIDIA Developer](https://developer.nvidia.com) for the download to succeed.
+
+**2. Install pynvshmem (host-side Python API)**
+
+From the project root (ensure `NVSHMEM_SRC` is set, e.g. from step 1 in the same shell):
 
 ```bash
-cd ./pynvshmem
+cd tilelang/distributed/pynvshmem
 python setup.py install
-export LD_LIBRARY_PATH="$NVSHMEM_SRC/build/src/lib:$LD_LIBRARY_PATH"
+export LD_LIBRARY_PATH="${NVSHMEM_SRC}/build/src/lib:$LD_LIBRARY_PATH"
 ```
 
-Then you can test python import:
+**3. Verify**
+
 ```bash
 python -c "import pynvshmem"
 ```
