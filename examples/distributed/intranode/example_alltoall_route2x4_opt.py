@@ -25,21 +25,23 @@ class Direction(IntEnum):
     debug_root_path="/home/zhengju.tang/tilescale/examples/distributed/debug/"
 )
 def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, threads):
-    num_warps = threads // 32
     block_M = M // num_blocks
-    # tile_M = block_M // num_warps
     # Number of slots
     num_slots = PE_num
     
     @T.prim_func
-    def main_route(
+    def main_route_opt(
             # For each (src, dst) pair, the real transfer size is M * N
             src: T.Tensor((PE_num * M, N), "float16"),
             dst: T.Tensor((PE_num * M, N), "float16"),
             # buffer[dst_rank, slots, *, *]: This PE save slots for transferring data chunks for the real destination rank
             buffer_transfer: T.Tensor((PE_num, num_slots, M, N), "float16"),
+            # slot_counter[dst_rank, num_blocks]: Counter for each slot in each block
+            slot_counter: T.Tensor((PE_num, num_blocks), "uint32"),
             # Signal for each dst buffer
-            signal_transfer: T.Tensor((PE_num, num_blocks, num_warps), "uint32"),
+            signal_transfer: T.Tensor((PE_num, num_blocks), "int32"),
+            # Src idx during transfer
+            src_transfer: T.Tensor((PE_num, num_slots, num_blocks), "uint32"),
             # Signal for finish
             local_finish: T.Tensor((1), "uint32"),
             global_finish: T.Tensor((1), "uint32"),
@@ -48,7 +50,6 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, threads):
     ):
         with T.Kernel(PE_num, num_blocks, threads=threads) as (bx, bz):
             tx = T.get_thread_binding()
-            warp_idx = tx // 32
 
             rank = T.alloc_local([1], "uint32")
             rank_x = T.alloc_local([1], "uint32")
@@ -57,9 +58,14 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, threads):
             to_dir = T.alloc_local([1], "uint32")
             diff = T.alloc_local([1], "int32")
             dst_rank = T.alloc_local([1], "uint32")
+            old_counter = T.alloc_local([1], "uint32")
+            old_counter_shared = T.alloc_shared([PE_num, num_blocks], "uint32")
+            old_signal = T.alloc_local([1], "int32")
+            new_signal = T.alloc_local([1], "int32")
+            cur_counter = T.alloc_local([1], "uint32")
+            cur_counter_shared = T.alloc_shared([PE_num, num_blocks], "uint32")
             old_local = T.alloc_local([1], "uint32")
             old_global = T.alloc_local([1], "uint32")
-            num_tiles = T.alloc_local([1], "uint32")
 
             rank[0] = T.get_rank()
             rank_x[0] = T.floordiv(rank[0], Y)
@@ -78,7 +84,7 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, threads):
                 diff[0] = dst_rank_x - rank_x[0]
                 if diff[0] > T.floordiv(X, 2):
                     diff[0] -= X
-                elif diff[0] <= -T.floordiv(X, 2):
+                elif diff[0] <= -T.ceildiv(X, 2):
                     diff[0] += X
 
                 if diff[0] < 0:
@@ -94,7 +100,7 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, threads):
                 diff[0] = dst_rank_y - rank_y[0]
                 if diff[0] > T.floordiv(Y, 2):
                     diff[0] -= Y
-                elif diff[0] <= -T.floordiv(Y, 2):
+                elif diff[0] <= -T.ceildiv(Y, 2):
                     diff[0] += Y
 
                 if diff[0] < 0:
@@ -109,124 +115,182 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, threads):
             # Phase 1: Fully use all blocks to initially send from src to the target neighbor
             # Split the tile_M to each block
 
-            chunk_M = T.ceildiv(tile_M, PE_num)
-            chunk_start = bx * chunk_M
-            chunk_size = T.min(chunk_M, tile_M - chunk_start)
-
-            # if src_rank[0] == rank[0]:
             if dst_rank[0] != rank[0]:
-                T.put_warp(
-                    T.address_of(src[dst_rank[0] * M + bz * block_M + warp_idx * tile_M + chunk_start, 0]),
-                    T.address_of(buffer_transfer[rank[0], dst_rank[0], bz * block_M + warp_idx * tile_M + chunk_start, 0]),
-                    chunk_size * N,
-                    next_rank[0],
-                )
-                if tx % 32 == 0:
-                    T.atom_add_remote(
-                        signal_transfer[rank[0], dst_rank[0], bz, warp_idx],
+                if tx == 0:
+                    old_counter[0] = T.atom_add_remote(
+                        slot_counter[dst_rank[0], bz],
                         1,
                         scope=T.MemoryScope.SYSTEM,
                         sem=T.MemorySemantic.RELEASE,
                         dst_pe=next_rank[0],
                     )
-                T.sync_warp()
-                # T.fence_sys(sem=T.MemorySemantic.RELEASE)
+                    old_counter_shared[dst_rank[0], bz] = old_counter[0]
+                T.sync_threads()
+                T.put_block(
+                    T.address_of(src[dst_rank[0] * M + bz * block_M, 0]),
+                    T.address_of(buffer_transfer[dst_rank[0], old_counter_shared[dst_rank[0], bz], bz * block_M, 0]),
+                    block_M * N,
+                    next_rank[0],
+                )
+                if tx == 0:
+                    # Write src idx to src_transfer
+                    T.st(
+                        src_transfer[dst_rank[0], old_counter[0], bz],
+                        rank[0],
+                        scope=T.MemoryScope.SYSTEM,
+                        sem=T.MemorySemantic.RELEASE,
+                        dst_pe=next_rank[0],
+                    )
+                T.sync_threads()
+                T.fence_sys(sem=T.MemorySemantic.RELEASE)
+                if tx == 0:
+                    # Write signal always after remote data is ready
+                    T.atom_add_remote(
+                        signal_transfer[dst_rank[0], bz],
+                        1,
+                        scope=T.MemoryScope.SYSTEM,
+                        sem=T.MemorySemantic.RELEASE,
+                        dst_pe=next_rank[0],
+                    )
+                T.sync_threads()
+                T.fence_sys(sem=T.MemorySemantic.RELEASE)
+                # if tx == 0:
+                #     T.print(rank[0], "rank")
+                #     T.print(next_rank[0], "next rank")
+                #     T.print(dst_rank[0], "dst rank")
+                #     T.print(old_signal[0], "old signal")
+                #     T.print(old_signal_shared[dst_rank[0], bz], "old signal shared")
+                #     T.print(signal_transfer[dst_rank[0], bz], "signal transfer")
             else:
-                T.put_warp(
-                    T.address_of(src[dst_rank[0] * M + bz * block_M + warp_idx * tile_M + chunk_start, 0]),
-                    T.address_of(dst[rank[0] * M + bz * block_M + warp_idx * tile_M + chunk_start, 0]),
-                    chunk_size * N,
+                T.put_block(
+                    T.address_of(src[dst_rank[0] * M + bz * block_M, 0]),
+                    T.address_of(dst[rank[0] * M + bz * block_M, 0]),
+                    block_M * N,
                     -1,
                 )
-                if tx % 32 == 0:
+                if tx == 0:
                     old_local[0] = T.atom_add(
                         local_finish[0],
                         1,
                         scope=T.MemoryScope.GPU,
                         sem=T.MemorySemantic.RELEASE,
                     )
-                T.sync_warp()
-                # T.fence_cta(sem=T.MemorySemantic.RELEASE)
+                T.sync_threads()
+                T.fence_cta(sem=T.MemorySemantic.RELEASE)
 
             T.fence_sys(sem=T.MemorySemantic.RELEASE)
-            T.sync_threads()
 
-            # Phase 2: Each block handles one final dst data in one direction buffer of current rank and check whether to transfer
-            if tx % 32 == 0:
-                T.wait_ge(
-                    signal_transfer[bx, dst_rank[0], bz, warp_idx], PE_num, scope=T.MemoryScope.SYSTEM)
-            T.sync_warp()
+            # Phase 2: Each block handles one final dst data in each slot of buffer of current rank and check whether to transfer
+            old_signal[0] = 0
+            with T.While(signal_transfer[dst_rank[0], bz] >= old_signal[0]):
+                new_signal[0] = T.wait_ne(signal_transfer[dst_rank[0], bz], old_signal[0], scope=T.MemoryScope.GPU)
+                # if tx == 0:
+                #     T.print(rank[0], "rank")
+                #     T.print(new_signal[0], "new signal")
 
-            if signal_transfer[bx, dst_rank[0], bz, warp_idx] == PE_num and flag[0] == False:
-                flag[0] = True
-                # Handle the transfer signal
-                if dst_rank[0] != rank[0]:
-                    T.put_warp(
-                        T.address_of(buffer_transfer[bx, dst_rank[0], bz * block_M + warp_idx * tile_M, 0]),
-                        T.address_of(buffer_transfer[bx, dst_rank[0], bz * block_M + warp_idx * tile_M, 0]),
-                        tile_M * N,
-                        dst_pe=next_rank[0],
-                    )
-                    if tx % 32 == 0:
-                        T.st(
-                            signal_transfer[bx, dst_rank[0], bz, warp_idx],
-                            PE_num,
-                            scope=T.MemoryScope.SYSTEM,
-                            sem=T.MemorySemantic.RELEASE,
+                # Termination signal is -1
+                if new_signal[0] < old_signal[0]:
+                    T.loop_break()
+                # We send all intermediate buffer according to the signal
+                for slot_idx in T.serial(old_signal[0], new_signal[0]):
+                    src_idx = src_transfer[dst_rank[0], slot_idx, bz]
+                    # Handle the transfer signal
+                    if dst_rank[0] != rank[0]:
+                        if tx == 0:
+                            cur_counter[0] = T.atom_add_remote(
+                                slot_counter[dst_rank[0], bz],
+                                1,
+                                scope=T.MemoryScope.SYSTEM,
+                                sem=T.MemorySemantic.RELEASE,
+                                dst_pe=next_rank[0],
+                            )
+                            cur_counter_shared[dst_rank[0], bz] = cur_counter[0]
+                        T.sync_threads()
+                        T.put_block(
+                            T.address_of(buffer_transfer[dst_rank[0], slot_idx, bz * block_M, 0]),
+                            T.address_of(buffer_transfer[dst_rank[0], cur_counter_shared[dst_rank[0], bz], bz * block_M, 0]),
+                            block_M * N,
                             dst_pe=next_rank[0],
                         )
-                        # if bz == 0 and tx == 0:
-                        #     T.print(rank[0], "transfer rank")
-                    T.sync_warp()
-                else:
-                    # Current rank is the real destination of this chunk of data, the real source rank is the buffer index
-                    T.put_warp(
-                        T.address_of(buffer_transfer[bx, dst_rank[0], bz * block_M + warp_idx * tile_M, 0]),
-                        T.address_of(dst[bx * M + bz * block_M + warp_idx * tile_M, 0]),
-                        tile_M * N,
-                        -1,
-                    )
-                    T.sync_warp()
-                    if tx % 32 == 0:
-                        old_local[0] = T.atom_add(
-                            local_finish[0],
-                            1,
-                            scope=T.MemoryScope.GPU,
-                            sem=T.MemorySemantic.RELEASE,
+                        if tx == 0:
+                            # Write src idx to src_transfer
+                            T.st(
+                                src_transfer[dst_rank[0], cur_counter[0], bz],
+                                src_idx,
+                                scope=T.MemoryScope.SYSTEM,
+                                sem=T.MemorySemantic.RELEASE,
+                                dst_pe=next_rank[0],
+                            )
+                        T.sync_threads()
+                        T.fence_sys(sem=T.MemorySemantic.RELEASE)
+                        if tx == 0:
+                            # Write signal always after remote data is ready
+                            T.atom_add_remote(
+                                signal_transfer[dst_rank[0], bz],
+                                1,
+                                scope=T.MemoryScope.SYSTEM,
+                                sem=T.MemorySemantic.RELEASE,
+                                dst_pe=next_rank[0],
+                            )
+                        T.sync_threads()
+                        T.fence_sys(sem=T.MemorySemantic.RELEASE)
+                        # if tx == 0:
+                        #     T.print(rank[0], "rank")
+                        #     T.print(slot_idx, "slot idx")
+                        #     T.print(next_rank[0], "transfer to rank")
+                    else:
+                        # Current rank is the real destination of this chunk of data, the real source rank is the buffer index
+                        # if tx == 0:
+                        #     T.print(rank[0], "rank")
+                        #     T.print(src_transfer[dst_rank[0], slot_idx, bz], "src transfer")
+                        #     T.print(slot_idx, "slot idx")
+                        T.put_block(
+                            T.address_of(buffer_transfer[dst_rank[0], slot_idx, bz * block_M, 0]),
+                            T.address_of(dst[src_transfer[dst_rank[0], slot_idx, bz] * M + bz * block_M, 0]),
+                            block_M * N,
+                            -1,
                         )
-                        # if bz == 0 and tx == 0:
-                        #     T.print(rank[0], "dst rank")
-                        if old_local[0] + 1 == (PE_num - 1) * num_tiles[0] + PE_num * num_tiles[0]:
-                            for i in T.serial(PE_num):
-                                old_global[0] = T.atom_add_remote(
-                                    global_finish[0],
-                                    1,
-                                    scope=T.MemoryScope.SYSTEM,
-                                    sem=T.MemorySemantic.RELEASE,
-                                    dst_pe=i,
-                                )
-                            if old_global[0] + 1 == PE_num:
-                                # Send termination signals to wake up all waiting blocks on all PEs
-                                for remote_pe in T.serial(PE_num):
-                                    for src_rank_idx in T.serial(PE_num):
+                        T.fence_cta(sem=T.MemorySemantic.RELEASE)
+                        T.sync_threads()
+                        if tx == 0:
+                            old_local[0] = T.atom_add(
+                                local_finish[0],
+                                1,
+                                scope=T.MemoryScope.GPU,
+                                sem=T.MemorySemantic.RELEASE,
+                            )
+                            # if bz == 0 and tx == 0:
+                            #     T.print(rank[0], "dst rank")
+                            if old_local[0] + 1 == PE_num * num_blocks:
+                                for i in T.serial(PE_num):
+                                    old_global[0] = T.atom_add_remote(
+                                        global_finish[0],
+                                        1,
+                                        scope=T.MemoryScope.SYSTEM,
+                                        sem=T.MemorySemantic.RELEASE,
+                                        dst_pe=i,
+                                    )
+                                if old_global[0] + 1 == PE_num:
+                                    # Send termination signals to wake up all waiting blocks on all PEs
+                                    for remote_pe in T.serial(PE_num):
                                         for dst_rank_idx in T.serial(PE_num):
                                             for bz_idx in T.serial(num_blocks):
-                                                for dst_tile in T.serial(num_warps):
-                                                    T.st(
-                                                        signal_transfer[src_rank_idx, dst_rank_idx,
-                                                                        bz_idx, dst_tile],
-                                                        PE_num + 1,
-                                                        scope=T.MemoryScope.SYSTEM,
-                                                        sem=T.MemorySemantic.RELEASE,
-                                                        dst_pe=remote_pe,
-                                                    )
-                    T.sync_warp()
-        
-            T.sync_threads()
+                                                T.st(
+                                                    signal_transfer[dst_rank_idx, bz_idx],
+                                                    -1,
+                                                    scope=T.MemoryScope.SYSTEM,
+                                                    sem=T.MemorySemantic.RELEASE,
+                                                    dst_pe=remote_pe,
+                                                )
+                        T.sync_threads()
+                
+                # Update old signal for next iteration
+                old_signal[0] = new_signal[0]
+                T.sync_threads()
 
             T.fence_sys(sem=T.MemorySemantic.RELEASE)
 
-    return main_route
+    return main_route_opt
 
 
 def run_torus_alltoall(local_rank, num_ranks, args):
@@ -234,16 +298,15 @@ def run_torus_alltoall(local_rank, num_ranks, args):
     PE_num = args.PE_num
     X, Y = args.X, args.Y
     M, N = args.M, args.N
-    block_M, block_N = M // 2, N
-    threads = 256
+    block_M, block_N = M, N
+    threads = 128
 
     num_blocks = M // block_M
     num_blocks = min(num_blocks, NUM_SM // (PE_num * PE_num))
-    num_warps = threads // 32
 
     local_rank, num_ranks, group_size = init_dist(local_rank, num_ranks)
     allocator = tilelang.get_allocator(
-        size=2**35,
+        size=2**34,
         device="cuda",
         is_distributed=True,
         local_rank=local_rank,
@@ -262,12 +325,18 @@ def run_torus_alltoall(local_rank, num_ranks, args):
     torch.cuda.synchronize()
 
     buffer_transfer = tilelang.tensor((PE_num, PE_num, M, N), torch.float16,
-                                      allocator=allocator).fill_(0)
+                                      allocator=allocator).fill_(-1)
 
     # Signals for each buffer slot in each direction
-    signal_transfer = tilelang.tensor((PE_num, PE_num, num_blocks, num_warps),
-                                      torch.uint32,
+    slot_counter = tilelang.tensor((PE_num, num_blocks), torch.uint32, allocator=allocator).fill_(0)
+    signal_transfer = tilelang.tensor((PE_num, num_blocks),
+                                      torch.int32,
                                       allocator=allocator).fill_(0)
+
+    src_transfer = tilelang.tensor((PE_num, PE_num, num_blocks),
+                                    torch.uint32,
+                                    allocator=allocator).fill_(PE_num)
+
     local_finish = tilelang.tensor((1), torch.uint32, allocator=allocator).fill_(0)
     global_finish = tilelang.tensor((1), torch.uint32, allocator=allocator).fill_(0)
     barrier = tilelang.tensor((PE_num), torch.int32, allocator=allocator).zero_()
@@ -275,7 +344,7 @@ def run_torus_alltoall(local_rank, num_ranks, args):
     torch.cuda.synchronize()
     dist.barrier(group_size)
 
-    kernel(src, dst, buffer_transfer, signal_transfer, local_finish, global_finish, barrier)
+    kernel(src, dst, buffer_transfer, slot_counter, signal_transfer, src_transfer, local_finish, global_finish, barrier)
 
     torch.cuda.synchronize()
     dist.barrier(group_size)
@@ -299,18 +368,34 @@ def run_torus_alltoall(local_rank, num_ranks, args):
                 start_idx = rank_idx * M
                 # Check first element of each rank's buffer
                 print(
-                    f"Rank {local_rank} Buffer[{rank_idx}][0,0]: dst={buffer_transfer[rank_idx, local_rank, 0, 0].item():.6f}, dst_ref={dst_ref[start_idx, 0].item():.6f}"
+                    f"Rank {local_rank} Buffer[{rank_idx}][0,0]: dst={dst[start_idx, 0].item():.6f}, dst_ref={dst_ref[start_idx, 0].item():.6f}"
                 )
+            for slot in range(PE_num):
+                print(
+                    f"Rank {local_rank} slot={slot}: buffer={buffer_transfer[local_rank, slot, 0, 0].item():.6f}, src_transfer={src_transfer[local_rank, slot, 0].item():.6f}"
+                )
+            # Print first 10 differences with their coordinates
+            print(f"Rank {local_rank} first 10 differences:")
+            diff_indices = torch.nonzero(diff_mask, as_tuple=False)
+            for i in range(min(10, diff_indices.shape[0])):
+                idx = diff_indices[i]
+                row, col = idx[0].item(), idx[1].item()
+                print(
+                    f"Rank {local_rank} Diff[{i}] at ({row}, {col}): dst={dst[row, col].item():.6f}, dst_ref={dst_ref[row, col].item():.6f}"
+                )
+    # print(f"Rank {local_rank} slot_counter: {slot_counter}, signal_transfer: {signal_transfer}, src_transfer: {src_transfer}")
 
     if args.benchmark:
         # Warmup
         for _ in range(args.warmup):
-            kernel(src, dst, buffer_transfer, signal_transfer, local_finish, global_finish, barrier)
+            kernel(src, dst, buffer_transfer, slot_counter, signal_transfer, local_finish, global_finish, barrier)
         torch.cuda.synchronize()
         dist.barrier(group_size)
 
         # Reinitialize
         buffer_transfer.zero_()
+        src_transfer.fill_(PE_num)
+        slot_counter.zero_()
         signal_transfer.zero_()
         local_finish.zero_()
         global_finish.zero_()
@@ -323,7 +408,7 @@ def run_torus_alltoall(local_rank, num_ranks, args):
         for _ in range(num_iters):
             # torch.cuda.profiler.start()
             # with torch.cuda.nvtx.range("alltoall_xy_routing_benchmark"):
-            kernel(src, dst, buffer_transfer, signal_transfer, local_finish, global_finish, barrier)
+            kernel(src, dst, buffer_transfer, slot_counter, signal_transfer, local_finish, global_finish, barrier)
             # torch.cuda.profiler.stop()
             torch.cuda.synchronize()
             dist.barrier(group_size)
