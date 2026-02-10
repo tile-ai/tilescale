@@ -152,13 +152,6 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, threads):
                     )
                 T.sync_threads()
                 T.fence_sys(sem=T.MemorySemantic.RELEASE)
-                # if tx == 0:
-                #     T.print(rank[0], "rank")
-                #     T.print(next_rank[0], "next rank")
-                #     T.print(dst_rank[0], "dst rank")
-                #     T.print(old_signal[0], "old signal")
-                #     T.print(old_signal_shared[dst_rank[0], bz], "old signal shared")
-                #     T.print(signal_transfer[dst_rank[0], bz], "signal transfer")
             else:
                 T.put_block(
                     T.address_of(src[dst_rank[0] * M + bz * block_M, 0]),
@@ -182,9 +175,6 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, threads):
             old_signal[0] = 0
             with T.While(signal_transfer[dst_rank[0], bz] >= old_signal[0]):
                 new_signal[0] = T.wait_ne(signal_transfer[dst_rank[0], bz], old_signal[0], scope=T.MemoryScope.GPU)
-                # if tx == 0:
-                #     T.print(rank[0], "rank")
-                #     T.print(new_signal[0], "new signal")
 
                 # Termination signal is -1
                 if new_signal[0] < old_signal[0]:
@@ -230,16 +220,8 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, threads):
                             )
                         T.sync_threads()
                         T.fence_sys(sem=T.MemorySemantic.RELEASE)
-                        # if tx == 0:
-                        #     T.print(rank[0], "rank")
-                        #     T.print(slot_idx, "slot idx")
-                        #     T.print(next_rank[0], "transfer to rank")
                     else:
                         # Current rank is the real destination of this chunk of data, the real source rank is the buffer index
-                        # if tx == 0:
-                        #     T.print(rank[0], "rank")
-                        #     T.print(src_transfer[dst_rank[0], slot_idx, bz], "src transfer")
-                        #     T.print(slot_idx, "slot idx")
                         T.put_block(
                             T.address_of(buffer_transfer[dst_rank[0], slot_idx, bz * block_M, 0]),
                             T.address_of(dst[src_transfer[dst_rank[0], slot_idx, bz] * M + bz * block_M, 0]),
@@ -255,8 +237,6 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, threads):
                                 scope=T.MemoryScope.GPU,
                                 sem=T.MemorySemantic.RELEASE,
                             )
-                            # if bz == 0 and tx == 0:
-                            #     T.print(rank[0], "dst rank")
                             if old_local[0] + 1 == PE_num * num_blocks:
                                 for i in T.serial(PE_num):
                                     old_global[0] = T.atom_add_remote(
@@ -295,7 +275,6 @@ def run_torus_alltoall(local_rank, num_ranks, args):
     X, Y = args.X, args.Y
     M, N = args.M, args.N
     blocks = args.blocks
-    block_M, block_N = M // blocks, N
     threads = 512
 
     num_blocks = blocks
