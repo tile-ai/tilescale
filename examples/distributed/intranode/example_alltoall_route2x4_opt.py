@@ -124,15 +124,6 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, threads):
                         sem=T.MemorySemantic.RELEASE,
                         dst_pe=next_rank[0],
                     )
-                    old_counter_shared[dst_rank[0], bz] = old_counter[0]
-                T.sync_threads()
-                T.put_block(
-                    T.address_of(src[dst_rank[0] * M + bz * block_M, 0]),
-                    T.address_of(buffer_transfer[dst_rank[0], old_counter_shared[dst_rank[0], bz], bz * block_M, 0]),
-                    block_M * N,
-                    next_rank[0],
-                )
-                if tx == 0:
                     # Write src idx to src_transfer
                     T.st(
                         src_transfer[dst_rank[0], old_counter[0], bz],
@@ -141,7 +132,14 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, threads):
                         sem=T.MemorySemantic.RELEASE,
                         dst_pe=next_rank[0],
                     )
+                    old_counter_shared[dst_rank[0], bz] = old_counter[0]
                 T.sync_threads()
+                T.put_block(
+                    T.address_of(src[dst_rank[0] * M + bz * block_M, 0]),
+                    T.address_of(buffer_transfer[dst_rank[0], old_counter_shared[dst_rank[0], bz], bz * block_M, 0]),
+                    block_M * N,
+                    next_rank[0],
+                )
                 T.fence_sys(sem=T.MemorySemantic.RELEASE)
                 if tx == 0:
                     # Write signal always after remote data is ready
@@ -204,15 +202,6 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, threads):
                                 sem=T.MemorySemantic.RELEASE,
                                 dst_pe=next_rank[0],
                             )
-                            cur_counter_shared[dst_rank[0], bz] = cur_counter[0]
-                        T.sync_threads()
-                        T.put_block(
-                            T.address_of(buffer_transfer[dst_rank[0], slot_idx, bz * block_M, 0]),
-                            T.address_of(buffer_transfer[dst_rank[0], cur_counter_shared[dst_rank[0], bz], bz * block_M, 0]),
-                            block_M * N,
-                            dst_pe=next_rank[0],
-                        )
-                        if tx == 0:
                             # Write src idx to src_transfer
                             T.st(
                                 src_transfer[dst_rank[0], cur_counter[0], bz],
@@ -221,7 +210,14 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, threads):
                                 sem=T.MemorySemantic.RELEASE,
                                 dst_pe=next_rank[0],
                             )
+                            cur_counter_shared[dst_rank[0], bz] = cur_counter[0]
                         T.sync_threads()
+                        T.put_block(
+                            T.address_of(buffer_transfer[dst_rank[0], slot_idx, bz * block_M, 0]),
+                            T.address_of(buffer_transfer[dst_rank[0], cur_counter_shared[dst_rank[0], bz], bz * block_M, 0]),
+                            block_M * N,
+                            dst_pe=next_rank[0],
+                        )
                         T.fence_sys(sem=T.MemorySemantic.RELEASE)
                         if tx == 0:
                             # Write signal always after remote data is ready
