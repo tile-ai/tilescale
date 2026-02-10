@@ -239,8 +239,8 @@ def run_torus_alltoall(local_rank, num_ranks, args):
     PE_num = args.PE_num
     X, Y = args.X, args.Y
     M, N = args.M, args.N
-    block_M, block_N = M // 2, N
-    threads = 256
+    block_M, block_N = M // 4, N
+    threads = 128
 
     num_blocks = M // block_M
     num_blocks = min(num_blocks, NUM_SM // (PE_num * PE_num))

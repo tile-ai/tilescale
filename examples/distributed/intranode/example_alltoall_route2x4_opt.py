@@ -294,11 +294,12 @@ def run_torus_alltoall(local_rank, num_ranks, args):
     PE_num = args.PE_num
     X, Y = args.X, args.Y
     M, N = args.M, args.N
-    block_M, block_N = M, N
-    threads = 128
+    blocks = args.blocks
+    block_M, block_N = M // blocks, N
+    threads = 512
 
-    num_blocks = M // block_M
-    num_blocks = min(num_blocks, NUM_SM // (PE_num * PE_num))
+    num_blocks = blocks
+    num_blocks = min(num_blocks, NUM_SM // PE_num)
 
     local_rank, num_ranks, group_size = init_dist(local_rank, num_ranks)
     allocator = tilelang.get_allocator(
@@ -384,12 +385,19 @@ def run_torus_alltoall(local_rank, num_ranks, args):
     if args.benchmark:
         # Warmup
         for _ in range(args.warmup):
-            kernel(src, dst, buffer_transfer, slot_counter, signal_transfer, local_finish, global_finish, barrier)
-        torch.cuda.synchronize()
+            # Reinitialize
+            buffer_transfer.fill_(-1)
+            src_transfer.fill_(PE_num)
+            slot_counter.zero_()
+            signal_transfer.zero_()
+            local_finish.zero_()
+            global_finish.zero_()
+            kernel(src, dst, buffer_transfer, slot_counter, signal_transfer, src_transfer, local_finish, global_finish, barrier)
+            torch.cuda.synchronize()
         dist.barrier(group_size)
 
         # Reinitialize
-        buffer_transfer.zero_()
+        buffer_transfer.fill_(-1)
         src_transfer.fill_(PE_num)
         slot_counter.zero_()
         signal_transfer.zero_()
@@ -404,7 +412,7 @@ def run_torus_alltoall(local_rank, num_ranks, args):
         for _ in range(num_iters):
             # torch.cuda.profiler.start()
             # with torch.cuda.nvtx.range("alltoall_xy_routing_benchmark"):
-            kernel(src, dst, buffer_transfer, slot_counter, signal_transfer, local_finish, global_finish, barrier)
+            kernel(src, dst, buffer_transfer, slot_counter, signal_transfer, src_transfer, local_finish, global_finish, barrier)
             # torch.cuda.profiler.stop()
             torch.cuda.synchronize()
             dist.barrier(group_size)
@@ -432,6 +440,7 @@ if __name__ == "__main__":
     parser.add_argument("--benchmark", action="store_true", help="Run benchmark")
     parser.add_argument("--warmup", type=int, default=5, help="Number of warmup iterations")
     parser.add_argument("--iter", type=int, default=10, help="Number of benchmark iterations")
+    parser.add_argument("--blocks", type=int, default=1, help="Number of blocks")
     args = parser.parse_args()
 
     torch.multiprocessing.spawn(run_torus_alltoall, args=(args.PE_num, args), nprocs=args.PE_num)
