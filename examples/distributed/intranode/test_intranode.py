@@ -1,6 +1,5 @@
 import torch
 import tilelang
-import tilelang.language as T
 import tilelang.testing
 
 import example_allgather_gemm_overlapped
@@ -20,7 +19,6 @@ def test_example_allgather_gemm_overlapped():
 @tilelang.testing.requires_cuda_compute_version_eq(9, 0)
 def test_example_gemm_rs_overlapped():
     torch.multiprocessing.spawn(example_gemm_rs_overlapped.main, args=(2, None), nprocs=2)
-
 
 
 @tilelang.testing.requires_distributed
