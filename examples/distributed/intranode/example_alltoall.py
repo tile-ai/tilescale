@@ -47,7 +47,7 @@ def run_alltoall(local_rank, num_ranks, args):
 
     local_rank, num_ranks, group_size = init_dist(local_rank, num_ranks)
     allocator = tilelang.get_allocator(
-        size=2**35,
+        size=2**34,
         device="cuda",
         is_distributed=True,
         local_rank=local_rank,
@@ -66,6 +66,7 @@ def run_alltoall(local_rank, num_ranks, args):
     # Warmup
     for _ in range(args.warmup):
         kernel(src, dst, barrier)
+    dst.zero_()
     torch.cuda.synchronize()
     dist.barrier(group_size)
 
@@ -90,7 +91,6 @@ def run_alltoall(local_rank, num_ranks, args):
     dist.all_to_all_single(dst_ref, src, group=group_size)
     torch.cuda.synchronize()
 
-    # 对比结果
     if torch.allclose(dst, dst_ref, atol=1e-2, rtol=1e-2):
         print(f"Rank {local_rank} Verification Passed! ✅")
     else:

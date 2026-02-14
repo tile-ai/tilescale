@@ -17,6 +17,81 @@ class Direction(IntEnum):
     SELF = 4
 
 
+def compute_next_hop(src_rank, dst_rank, X, Y):
+    """Compute the next hop from src_rank towards dst_rank using XY-routing on a 2D torus."""
+    if src_rank == dst_rank:
+        return src_rank  # self, no hop needed
+
+    src_x, src_y = src_rank // Y, src_rank % Y
+    dst_x, dst_y = dst_rank // Y, dst_rank % Y
+
+    if dst_x != src_x:
+        # Route along X-axis first
+        diff = dst_x - src_x
+        if diff > X // 2:
+            diff -= X
+        elif diff <= -X // 2:
+            diff += X
+
+        if diff < 0:
+            # North
+            next_x = (src_x + X - 1) % X
+            return next_x * Y + src_y
+        else:
+            # South
+            next_x = (src_x + 1) % X
+            return next_x * Y + src_y
+    else:
+        # Route along Y-axis
+        diff = dst_y - src_y
+        if diff > Y // 2:
+            diff -= Y
+        elif diff <= -Y // 2:
+            diff += Y
+
+        if diff < 0:
+            # West
+            next_y = (src_y + Y - 1) % Y
+            return src_x * Y + next_y
+        else:
+            # East
+            next_y = (src_y + 1) % Y
+            return src_x * Y + next_y
+
+
+def compute_expected_slots(PE_num, X, Y):
+    """
+    Pre-compute the number of incoming slots each PE will receive for each dst_rank,
+    tracing the full XY-routing path through the torus.
+
+    Returns a list of lists of shape (PE_num, PE_num) where expected_slots[me][dst_rank] is
+    the number of data chunks that PE 'me' will receive in its buffer for destination 'dst_rank'.
+
+    This includes both:
+    - Final reception: dst_rank == me, each other PE sends one chunk → PE_num - 1 slots
+    - Forwarding: dst_rank != me, data passes through me on the way to dst_rank
+
+    For each (src, final_dst) pair where src != final_dst, we trace the full multi-hop
+    XY-routing path. Every intermediate PE and the final destination PE each receive one slot.
+    """
+    # expected_slots[receiver_pe][dst_rank] = count of incoming slots
+    expected = [[0] * PE_num for _ in range(PE_num)]
+
+    for src in range(PE_num):
+        for final_dst in range(PE_num):
+            if src == final_dst:
+                continue
+            # Trace the full path from src to final_dst
+            current = src
+            while current != final_dst:
+                next_hop = compute_next_hop(current, final_dst, X, Y)
+                # next_hop receives one slot for dst_rank=final_dst
+                expected[next_hop][final_dst] += 1
+                current = next_hop
+
+    return expected
+
+
 @tilelang.jit(
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
@@ -39,16 +114,14 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, num_warps, threads):
             buffer_transfer: T.Tensor((PE_num, num_slots, M, N), "float16"),
             # slot_counter[dst_rank, num_blocks, num_warps]: Counter for allocating slot indices
             slot_counter: T.Tensor((PE_num, num_blocks, num_warps), "uint32"),
-            # Per-slot ready flag: 0=not ready, 1=data ready, -1=termination (no more slots)
+            # Per-slot ready flag: 0=not ready, 1=data ready
             # signal_transfer[dst_rank, slot, num_blocks, num_warps]
             signal_transfer: T.Tensor((PE_num, num_slots, num_blocks, num_warps), "int32"),
             # Src idx during transfer
             src_transfer: T.Tensor((PE_num, num_slots, num_blocks, num_warps), "uint32"),
-            # Signal for finish
-            local_finish: T.Tensor((1), "uint32"),
-            global_finish: T.Tensor((1), "uint32"),
-            # Barrier for all blocks
-            barrier: T.Tensor((PE_num), "int32"),
+            # Pre-computed expected incoming slot counts per (PE, dst_rank)
+            # expected_slots[pe, dst_rank]: how many slots PE 'pe' will receive for dst_rank
+            expected_slots: T.Tensor((PE_num, PE_num), "int32"),
     ):
         with T.Kernel(PE_num, num_blocks, threads=threads) as (bx, bz):
             tx = T.get_thread_binding()
@@ -65,10 +138,9 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, num_warps, threads):
             old_counter_shared = T.alloc_shared([PE_num, num_blocks, num_warps], "uint32")
             cur_counter = T.alloc_local([1], "uint32")
             cur_counter_shared = T.alloc_shared([PE_num, num_blocks, num_warps], "uint32")
-            old_local = T.alloc_local([1], "uint32")
-            old_global = T.alloc_local([1], "uint32")
             slot_flag = T.alloc_local([1], "int32")
             slot_flag_shared = T.alloc_shared([num_warps], "int32")
+            num_expected = T.alloc_local([1], "int32")
 
             rank[0] = T.get_rank()
             rank_x[0] = T.floordiv(rank[0], Y)
@@ -76,6 +148,9 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, num_warps, threads):
             next_rank[0] = rank[0]
             
             dst_rank[0] = bx
+
+            # Read pre-computed expected slot count for this PE and dst_rank
+            num_expected[0] = expected_slots[rank[0], dst_rank[0]]
 
             # Prepare for routing
             dst_rank_x = T.floordiv(dst_rank[0], Y)
@@ -145,8 +220,6 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, num_warps, threads):
                     next_rank[0],
                 )
                 T.fence_sys(sem=T.MemorySemantic.RELEASE)
-                # Ensure ALL lanes' put_warp writes + fence are complete before lane 0 sends signal
-                T.sync_warp()
                 if tx % 32 == 0:
                     # Set per-slot ready flag: this specific slot is now ready
                     T.st(
@@ -165,24 +238,18 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, num_warps, threads):
                     chunk_M * N,
                     -1,
                 )
-                if tx % 32 == 0:
-                    old_local[0] = T.atom_add(
-                        local_finish[0],
-                        1,
-                        scope=T.MemoryScope.GPU,
-                        sem=T.MemorySemantic.RELEASE,
-                    )
                 T.sync_warp()
                 T.fence_cta(sem=T.MemorySemantic.RELEASE)
 
-            T.sync_threads()
-            T.fence_sys(sem=T.MemorySemantic.RELEASE)
-
-            # Phase 2: Poll per-slot ready flags sequentially and process each slot
-            # Each warp checks slot 0, 1, 2, ... for its (dst_rank, bz, warp_id).
-            # flag=0 means not ready yet (spin), flag=1 means data ready, flag=-1 means no more slots.
+            # Phase 2: Poll per-slot ready flags sequentially and process each slot.
+            # Use pre-computed expected_slots count to know exactly how many slots to process,
+            # eliminating the need for termination signals.
             for slot_idx in T.serial(num_slots):
-                # Wait for this slot's flag to become non-zero
+                # Skip if no more expected slots or this block doesn't receive for this dst_rank
+                if slot_idx >= num_expected[0]:
+                    T.loop_break()
+
+                # Wait for this slot's data to become ready (flag != 0)
                 if tx % 32 == 0:
                     slot_flag[0] = T.wait_ne(
                         signal_transfer[dst_rank[0], slot_idx, bz, warp_id],
@@ -192,9 +259,6 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, num_warps, threads):
                     slot_flag_shared[warp_id] = slot_flag[0]
                 T.sync_warp()
 
-                # Termination: flag == -1 means no more slots to process
-                if slot_flag_shared[warp_id] < 0:
-                    T.loop_break()
 
                 src_idx = src_transfer[dst_rank[0], slot_idx, bz, warp_id]
                 # Handle the transfer
@@ -247,46 +311,6 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, num_warps, threads):
                     )
                     T.fence_cta(sem=T.MemorySemantic.RELEASE)
                     T.sync_warp()
-                    if tx % 32 == 0:
-                        old_local[0] = T.atom_add(
-                            local_finish[0],
-                            1,
-                            scope=T.MemoryScope.GPU,
-                            sem=T.MemorySemantic.RELEASE,
-                        )
-                        if old_local[0] + 1 == PE_num * num_blocks * num_warps:
-                            # All local data received, notify all PEs
-                            for i in T.serial(PE_num):
-                                old_global[0] = T.atom_add_remote(
-                                    global_finish[0],
-                                    1,
-                                    scope=T.MemoryScope.SYSTEM,
-                                    sem=T.MemorySemantic.RELEASE,
-                                    dst_pe=i,
-                                )
-                            if old_global[0] + 1 == PE_num:
-                                # Last PE to finish: send termination flags to all waiting slots on all PEs
-                                # For each (dst_rank, bz, warp_id), we need to set the flag of the
-                                # next unused slot to -1 so the receiver knows to stop polling.
-                                for remote_pe in T.serial(PE_num):
-                                    for dst_rank_idx in T.serial(PE_num):
-                                        for bz_idx in T.serial(num_blocks):
-                                            for warp_idx in T.serial(num_warps):
-                                                # The next unused slot index is slot_counter[dst_rank, bz, warp]
-                                                # We write -1 to signal_transfer[dst_rank, slot_counter_val, bz, warp]
-                                                # But reading slot_counter from remote is complex.
-                                                # Instead, write -1 to ALL remaining slots (from 0 to num_slots-1).
-                                                # Slots already processed (flag=1) won't be re-checked.
-                                                # The receiver will hit -1 at the first unwritten slot.
-                                                for slot_i in T.serial(num_slots):
-                                                    T.st(
-                                                        signal_transfer[dst_rank_idx, slot_i, bz_idx, warp_idx],
-                                                        -1,
-                                                        scope=T.MemoryScope.SYSTEM,
-                                                        sem=T.MemorySemantic.RELEASE,
-                                                        dst_pe=remote_pe,
-                                                    )
-                    T.sync_warp()
 
             T.sync_warp()
 
@@ -316,6 +340,13 @@ def run_torus_alltoall(local_rank, num_ranks, args):
         group=group_size,
     )
 
+    # Pre-compute expected slot counts based on XY-routing topology
+    expected_slots_host = compute_expected_slots(PE_num, X, Y)
+    if local_rank == 0:
+        print(f"Expected slots per PE (rows=receiver, cols=dst_rank):")
+        for pe in range(PE_num):
+            print(f"  PE {pe}: {expected_slots_host[pe]}")
+
     kernel = torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, num_warps, threads)
     kernel.initialize(allocator=allocator)
 
@@ -331,7 +362,7 @@ def run_torus_alltoall(local_rank, num_ranks, args):
 
     # Signals for each buffer slot in each direction
     slot_counter = tilelang.tensor((PE_num, num_blocks, num_warps), torch.uint32, allocator=allocator).fill_(0)
-    # Per-slot ready flags: 0=not ready, 1=ready, -1=termination
+    # Per-slot ready flags: 0=not ready, 1=ready
     signal_transfer = tilelang.tensor((PE_num, PE_num, num_blocks, num_warps),
                                       torch.int32,
                                       allocator=allocator).fill_(0)
@@ -340,14 +371,14 @@ def run_torus_alltoall(local_rank, num_ranks, args):
                                     torch.uint32,
                                     allocator=allocator).fill_(PE_num)
 
-    local_finish = tilelang.tensor((1), torch.uint32, allocator=allocator).fill_(0)
-    global_finish = tilelang.tensor((1), torch.uint32, allocator=allocator).fill_(0)
-    barrier = tilelang.tensor((PE_num), torch.int32, allocator=allocator).zero_()
+    # Pre-computed expected slots tensor (same for all PEs)
+    expected_slots_tensor = tilelang.tensor((PE_num, PE_num), torch.int32, allocator=allocator)
+    expected_slots_tensor.copy_(torch.tensor(expected_slots_host, dtype=torch.int32, device="cuda"))
 
     torch.cuda.synchronize()
     dist.barrier(group_size)
 
-    kernel(src, dst, buffer_transfer, slot_counter, signal_transfer, src_transfer, local_finish, global_finish, barrier)
+    kernel(src, dst, buffer_transfer, slot_counter, signal_transfer, src_transfer, expected_slots_tensor)
 
     torch.cuda.synchronize()
     dist.barrier(group_size)
@@ -391,23 +422,27 @@ def run_torus_alltoall(local_rank, num_ranks, args):
         # Warmup
         for _ in range(args.warmup):
             # Reinitialize
+            torch.cuda.synchronize()
+            dist.barrier(group_size)
             buffer_transfer.fill_(-1)
             src_transfer.fill_(PE_num)
             slot_counter.zero_()
             signal_transfer.zero_()
-            local_finish.zero_()
-            global_finish.zero_()
-            kernel(src, dst, buffer_transfer, slot_counter, signal_transfer, src_transfer, local_finish, global_finish, barrier)
+            dst.zero_()
+            expected_slots_tensor.copy_(torch.tensor(expected_slots_host, dtype=torch.int32, device="cuda"))
+            kernel(src, dst, buffer_transfer, slot_counter, signal_transfer, src_transfer, expected_slots_tensor)
             torch.cuda.synchronize()
-        dist.barrier(group_size)
+            dist.barrier(group_size)
 
         # Reinitialize
         buffer_transfer.fill_(-1)
         src_transfer.fill_(PE_num)
         slot_counter.zero_()
         signal_transfer.zero_()
-        local_finish.zero_()
-        global_finish.zero_()
+        dst.zero_()
+        expected_slots_tensor.copy_(torch.tensor(expected_slots_host, dtype=torch.int32, device="cuda"))
+        torch.cuda.synchronize()
+        dist.barrier(group_size)
 
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
@@ -417,7 +452,7 @@ def run_torus_alltoall(local_rank, num_ranks, args):
         for _ in range(num_iters):
             # torch.cuda.profiler.start()
             # with torch.cuda.nvtx.range("alltoall_xy_routing_benchmark"):
-            kernel(src, dst, buffer_transfer, slot_counter, signal_transfer, src_transfer, local_finish, global_finish, barrier)
+            kernel(src, dst, buffer_transfer, slot_counter, signal_transfer, src_transfer, expected_slots_tensor)
             # torch.cuda.profiler.stop()
             torch.cuda.synchronize()
             dist.barrier(group_size)
