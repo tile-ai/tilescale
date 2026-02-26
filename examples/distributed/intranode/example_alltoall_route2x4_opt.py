@@ -1,3 +1,4 @@
+import os
 import tilelang
 import tilelang.language as T
 from tilelang.distributed import init_dist
@@ -7,6 +8,12 @@ import argparse
 from enum import IntEnum
 
 # tilelang.disable_cache()
+
+os.environ["TILELANG_USE_DISTRIBUTED"] = "1"
+
+def _dbg(rank: int, msg: str, debug: bool) -> None:
+    if debug:
+        print(f"[Rank {rank}] {msg}", flush=True)
 
 
 class Direction(IntEnum):
@@ -114,7 +121,7 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, num_warps, threads):
             buffer_transfer: T.Tensor((PE_num, num_slots, M, N), "float16"),
             # slot_counter[dst_rank, num_blocks, num_warps]: Counter for allocating slot indices
             slot_counter: T.Tensor((PE_num, num_blocks, num_warps), "uint32"),
-            # Per-slot ready flag: 0=not ready, 1=data ready
+            # Per-slot ready flag: writer sets signal=run_id (RELEASE); reader wait_eq(signal, run_id) (ACQUIRE)
             # signal_transfer[dst_rank, slot, num_blocks, num_warps]
             signal_transfer: T.Tensor((PE_num, num_slots, num_blocks, num_warps), "int32"),
             # Src idx during transfer
@@ -122,6 +129,8 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, num_warps, threads):
             # Pre-computed expected incoming slot counts per (PE, dst_rank)
             # expected_slots[pe, dst_rank]: how many slots PE 'pe' will receive for dst_rank
             expected_slots: T.Tensor((PE_num, PE_num), "int32"),
+            # Run generation: writers set signal = run_id, readers wait_eq(signal, run_id). Must be != 0.
+            run_id: T.Tensor((1,), "int32"),
     ):
         with T.Kernel(PE_num, num_blocks, threads=threads) as (bx, bz):
             tx = T.get_thread_binding()
@@ -135,8 +144,10 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, num_warps, threads):
             diff = T.alloc_local([1], "int32")
             dst_rank = T.alloc_local([1], "uint32")
             old_counter = T.alloc_local([1], "uint32")
+            slot_physical = T.alloc_local([1], "uint32")
             old_counter_shared = T.alloc_shared([PE_num, num_blocks, num_warps], "uint32")
             cur_counter = T.alloc_local([1], "uint32")
+            cur_slot_physical = T.alloc_local([1], "uint32")
             cur_counter_shared = T.alloc_shared([PE_num, num_blocks, num_warps], "uint32")
             slot_flag = T.alloc_local([1], "int32")
             slot_flag_shared = T.alloc_shared([num_warps], "int32")
@@ -203,15 +214,15 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, num_warps, threads):
                         sem=T.MemorySemantic.RELEASE,
                         dst_pe=next_rank[0],
                     )
-                    # Write src idx to src_transfer
+                    slot_physical[0] = T.floormod(old_counter[0], num_slots)
+                    old_counter_shared[dst_rank[0], bz, warp_id] = slot_physical[0]
                     T.st(
-                        src_transfer[dst_rank[0], old_counter[0], bz, warp_id],
+                        src_transfer[dst_rank[0], slot_physical[0], bz, warp_id],
                         rank[0],
                         scope=T.MemoryScope.SYSTEM,
                         sem=T.MemorySemantic.RELEASE,
                         dst_pe=next_rank[0],
                     )
-                    old_counter_shared[dst_rank[0], bz, warp_id] = old_counter[0]
                 T.sync_warp()
                 T.put_warp(
                     T.address_of(src[dst_rank[0] * M + bz * block_M + warp_id * tile_M, 0]),
@@ -221,10 +232,9 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, num_warps, threads):
                 )
                 T.fence_sys(sem=T.MemorySemantic.RELEASE)
                 if tx % 32 == 0:
-                    # Set per-slot ready flag: this specific slot is now ready
                     T.st(
                         signal_transfer[dst_rank[0], old_counter_shared[dst_rank[0], bz, warp_id], bz, warp_id],
-                        1,
+                        run_id[0],
                         scope=T.MemoryScope.SYSTEM,
                         sem=T.MemorySemantic.RELEASE,
                         dst_pe=next_rank[0],
@@ -249,16 +259,17 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, num_warps, threads):
                 if slot_idx >= num_expected[0]:
                     T.loop_break()
 
-                # Wait for this slot's data to become ready (flag != 0)
                 if tx % 32 == 0:
-                    slot_flag[0] = T.wait_ne(
+                    slot_flag[0] = T.wait_eq(
                         signal_transfer[dst_rank[0], slot_idx, bz, warp_id],
-                        0,
+                        run_id[0],
                         scope=T.MemoryScope.SYSTEM,
+                        semantic=T.MemorySemantic.ACQUIRE,
                     )
                     slot_flag_shared[warp_id] = slot_flag[0]
                 T.sync_warp()
-
+                # Ensure consumer sees producer's RELEASE writes: no reorder of subsequent reads above wait
+                T.fence_sys(sem=T.MemorySemantic.ACQUIRE)
 
                 src_idx = src_transfer[dst_rank[0], slot_idx, bz, warp_id]
                 # Handle the transfer
@@ -272,15 +283,15 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, num_warps, threads):
                             sem=T.MemorySemantic.RELEASE,
                             dst_pe=next_rank[0],
                         )
-                        # Write src idx to src_transfer on next hop
+                        cur_slot_physical[0] = T.floormod(cur_counter[0], num_slots)
+                        cur_counter_shared[dst_rank[0], bz, warp_id] = cur_slot_physical[0]
                         T.st(
-                            src_transfer[dst_rank[0], cur_counter[0], bz, warp_id],
+                            src_transfer[dst_rank[0], cur_slot_physical[0], bz, warp_id],
                             src_idx,
                             scope=T.MemoryScope.SYSTEM,
                             sem=T.MemorySemantic.RELEASE,
                             dst_pe=next_rank[0],
                         )
-                        cur_counter_shared[dst_rank[0], bz, warp_id] = cur_counter[0]
                     T.sync_warp()
                     T.put_warp(
                         T.address_of(buffer_transfer[dst_rank[0], slot_idx, bz * block_M + warp_id * tile_M, 0]),
@@ -291,10 +302,9 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, num_warps, threads):
                     T.fence_sys(sem=T.MemorySemantic.RELEASE)
                     T.sync_warp()
                     if tx % 32 == 0:
-                        # Set per-slot ready flag on next hop
                         T.st(
                             signal_transfer[dst_rank[0], cur_counter_shared[dst_rank[0], bz, warp_id], bz, warp_id],
-                            1,
+                            run_id[0],
                             scope=T.MemoryScope.SYSTEM,
                             sem=T.MemorySemantic.RELEASE,
                             dst_pe=next_rank[0],
@@ -318,6 +328,9 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, num_warps, threads):
 
 
 def run_torus_alltoall(local_rank, num_ranks, args):
+    debug = getattr(args, "debug", False)
+    _dbg(local_rank, "run_torus_alltoall started", debug)
+
     NUM_SM = 148
     PE_num = args.PE_num
     X, Y = args.X, args.Y
@@ -331,6 +344,8 @@ def run_torus_alltoall(local_rank, num_ranks, args):
     num_blocks = min(num_blocks, NUM_SM // PE_num)
 
     local_rank, num_ranks, group_size = init_dist(local_rank, num_ranks)
+    _dbg(local_rank, "init_dist done", debug)
+
     allocator = tilelang.get_allocator(
         size=2**34,
         device="cuda",
@@ -375,13 +390,22 @@ def run_torus_alltoall(local_rank, num_ranks, args):
     expected_slots_tensor = tilelang.tensor((PE_num, PE_num), torch.int32, allocator=allocator)
     expected_slots_tensor.copy_(torch.tensor(expected_slots_host, dtype=torch.int32, device="cuda"))
 
-    torch.cuda.synchronize()
-    dist.barrier(group_size)
-
-    kernel(src, dst, buffer_transfer, slot_counter, signal_transfer, src_transfer, expected_slots_tensor)
+    # Run generation: must be != 0 so wait_eq(signal, run_id) does not pass on unwritten memory
+    run_id_tensor = tilelang.tensor((1,), torch.int32, allocator=allocator)
 
     torch.cuda.synchronize()
+    _dbg(local_rank, "pre-verify: before barrier", debug)
     dist.barrier(group_size)
+    _dbg(local_rank, "pre-verify: after barrier, launching kernel run_id=1", debug)
+
+    run_id_tensor.copy_(torch.tensor([1], dtype=torch.int32, device="cuda"))
+    kernel(src, dst, buffer_transfer, slot_counter, signal_transfer, src_transfer, expected_slots_tensor, run_id_tensor)
+
+    _dbg(local_rank, "verify kernel returned", debug)
+    torch.cuda.synchronize()
+    _dbg(local_rank, "pre-verify: before post barrier", debug)
+    dist.barrier(group_size)
+    _dbg(local_rank, "verify done", debug)
 
     print(f"Rank {local_rank} TileLang AllToAll XY Routing Finished.")
 
@@ -419,44 +443,36 @@ def run_torus_alltoall(local_rank, num_ranks, args):
                 )
 
     if args.benchmark:
-        # Warmup
-        for _ in range(args.warmup):
-            # Reinitialize
-            torch.cuda.synchronize()
-            dist.barrier(group_size)
-            buffer_transfer.fill_(-1)
-            src_transfer.fill_(PE_num)
+        run_id = 2  # 1 used for verification
+        for w in range(args.warmup):
             slot_counter.zero_()
-            signal_transfer.zero_()
-            dst.zero_()
-            expected_slots_tensor.copy_(torch.tensor(expected_slots_host, dtype=torch.int32, device="cuda"))
-            kernel(src, dst, buffer_transfer, slot_counter, signal_transfer, src_transfer, expected_slots_tensor)
+            torch.cuda.synchronize()
+            _dbg(local_rank, f"warmup {w}: before barrier", debug)
+            dist.barrier(group_size)
+            _dbg(local_rank, f"warmup {w}: launching kernel run_id={run_id}", debug)
+            run_id_tensor.copy_(torch.tensor([run_id], dtype=torch.int32, device="cuda"))
+            run_id += 1
+            kernel(src, dst, buffer_transfer, slot_counter, signal_transfer, src_transfer, expected_slots_tensor, run_id_tensor)
+            _dbg(local_rank, f"warmup {w}: kernel returned", debug)
             torch.cuda.synchronize()
             dist.barrier(group_size)
 
         num_iters = args.iter
         elapsed_time_ms = []
-        for _ in range(num_iters):
-            # torch.cuda.profiler.start()
-            # with torch.cuda.nvtx.range("alltoall_xy_routing_benchmark"):
-            # Reinitialize
-            torch.cuda.synchronize()
-            dist.barrier(group_size)
-            buffer_transfer.fill_(-1)
-            src_transfer.fill_(PE_num)
+        for i in range(num_iters):
             slot_counter.zero_()
-            signal_transfer.zero_()
-            dst.zero_()
-            expected_slots_tensor.copy_(torch.tensor(expected_slots_host, dtype=torch.int32, device="cuda"))
             torch.cuda.synchronize()
+            _dbg(local_rank, f"iter {i}: before barrier", debug)
             dist.barrier(group_size)
+            _dbg(local_rank, f"iter {i}: launching kernel run_id={run_id + i}", debug)
+            run_id_tensor.copy_(torch.tensor([run_id + i], dtype=torch.int32, device="cuda"))
 
             start_event = torch.cuda.Event(enable_timing=True)
             end_event = torch.cuda.Event(enable_timing=True)
             start_event.record()
-            kernel(src, dst, buffer_transfer, slot_counter, signal_transfer, src_transfer, expected_slots_tensor)
+            kernel(src, dst, buffer_transfer, slot_counter, signal_transfer, src_transfer, expected_slots_tensor, run_id_tensor)
             end_event.record()
-            # torch.cuda.profiler.stop()
+            _dbg(local_rank, f"iter {i}: kernel returned", debug)
             torch.cuda.synchronize()
             dist.barrier(group_size)
             elapsed_time_ms.append(start_event.elapsed_time(end_event))
@@ -484,6 +500,7 @@ if __name__ == "__main__":
     parser.add_argument("--warmup", type=int, default=5, help="Number of warmup iterations")
     parser.add_argument("--iter", type=int, default=10, help="Number of benchmark iterations")
     parser.add_argument("--blocks", type=int, default=1, help="Number of blocks")
+    parser.add_argument("--debug", action="store_true", help="Print debug messages at barriers/kernel launch")
     args = parser.parse_args()
 
     torch.multiprocessing.spawn(run_torus_alltoall, args=(args.PE_num, args), nprocs=args.PE_num)
