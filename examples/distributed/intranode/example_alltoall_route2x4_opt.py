@@ -323,7 +323,7 @@ def run_torus_alltoall(local_rank, num_ranks, args):
     X, Y = args.X, args.Y
     M, N = args.M, args.N
     blocks = args.blocks
-    threads = 256
+    threads = 512
     assert threads % 32 == 0, "threads must be divisible by 32"
     num_warps = threads // 32
 
@@ -434,32 +434,35 @@ def run_torus_alltoall(local_rank, num_ranks, args):
             torch.cuda.synchronize()
             dist.barrier(group_size)
 
-        # Reinitialize
-        buffer_transfer.fill_(-1)
-        src_transfer.fill_(PE_num)
-        slot_counter.zero_()
-        signal_transfer.zero_()
-        dst.zero_()
-        expected_slots_tensor.copy_(torch.tensor(expected_slots_host, dtype=torch.int32, device="cuda"))
-        torch.cuda.synchronize()
-        dist.barrier(group_size)
-
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-
         num_iters = args.iter
-        start_event.record()
+        elapsed_time_ms = []
         for _ in range(num_iters):
             # torch.cuda.profiler.start()
             # with torch.cuda.nvtx.range("alltoall_xy_routing_benchmark"):
+            # Reinitialize
+            torch.cuda.synchronize()
+            dist.barrier(group_size)
+            buffer_transfer.fill_(-1)
+            src_transfer.fill_(PE_num)
+            slot_counter.zero_()
+            signal_transfer.zero_()
+            dst.zero_()
+            expected_slots_tensor.copy_(torch.tensor(expected_slots_host, dtype=torch.int32, device="cuda"))
+            torch.cuda.synchronize()
+            dist.barrier(group_size)
+
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            start_event.record()
             kernel(src, dst, buffer_transfer, slot_counter, signal_transfer, src_transfer, expected_slots_tensor)
+            end_event.record()
             # torch.cuda.profiler.stop()
             torch.cuda.synchronize()
             dist.barrier(group_size)
-        end_event.record()
+            elapsed_time_ms.append(start_event.elapsed_time(end_event))
         torch.cuda.synchronize()
 
-        elapsed_time_ms = start_event.elapsed_time(end_event) / num_iters
+        elapsed_time_ms = sum(elapsed_time_ms) / num_iters
         # All-to-all total data moved: each rank sends (PE_num - 1) * M * N elements
         # and receives (PE_num - 1) * M * N elements.
         # For bandwidth calculation, we usually use the amount of data sent per rank.
