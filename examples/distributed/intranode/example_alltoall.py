@@ -41,9 +41,9 @@ def run_alltoall(local_rank, num_ranks, args):
     PE_num = args.PE_num
     M = args.M
     N = args.N
-    block_M = 32
+    block_M = 512
     block_N = N
-    threads = 256
+    threads = 512
 
     local_rank, num_ranks, group_size = init_dist(local_rank, num_ranks)
     allocator = tilelang.get_allocator(
