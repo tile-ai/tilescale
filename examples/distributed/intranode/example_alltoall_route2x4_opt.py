@@ -99,6 +99,100 @@ def compute_expected_slots(PE_num, X, Y):
     return expected
 
 
+def compute_slot_assignment(PE_num, X, Y):
+    """
+    Pre-compute AOT slot assignments for all hops along every routing path.
+
+    Returns:
+      phase1_slot: [PE_num][PE_num] — phase1_slot[sender][dst_rank] = slot on next_hop
+                   (-1 if sender==dst_rank, i.e. self-send)
+      forward_slot: [PE_num][PE_num][PE_num] — forward_slot[me][dst_rank][incoming_slot_idx] = slot on next_hop
+                    (-1 if not a forwarding case)
+      incoming_src: [PE_num][PE_num][PE_num] — incoming_src[receiver][dst_rank][slot_idx] = original source PE
+                    (-1 if unused slot)
+    """
+    counter = [[0] * PE_num for _ in range(PE_num)]
+    phase1_slot = [[-1] * PE_num for _ in range(PE_num)]
+    forward_slot = [[[-1] * PE_num for _ in range(PE_num)] for _ in range(PE_num)]
+    incoming_src = [[[-1] * PE_num for _ in range(PE_num)] for _ in range(PE_num)]
+
+    for src in range(PE_num):
+        for final_dst in range(PE_num):
+            if src == final_dst:
+                continue
+            path = [src]
+            current = src
+            while current != final_dst:
+                nxt = compute_next_hop(current, final_dst, X, Y)
+                path.append(nxt)
+                current = nxt
+
+            prev_slot = -1
+            for i in range(len(path) - 1):
+                sender = path[i]
+                receiver = path[i + 1]
+                slot = counter[receiver][final_dst]
+                counter[receiver][final_dst] += 1
+
+                if i == 0:
+                    phase1_slot[sender][final_dst] = slot
+                else:
+                    forward_slot[sender][final_dst][prev_slot] = slot
+
+                incoming_src[receiver][final_dst][slot] = src
+                prev_slot = slot
+
+    return phase1_slot, forward_slot, incoming_src
+
+
+def print_routing_tables(PE_num, X, Y, expected_slots, phase1_slot, forward_slot, incoming_src):
+    print(f"Expected slots per PE (rows=receiver, cols=dst_rank):")
+    for pe in range(PE_num):
+        print(f"  PE {pe}: {expected_slots[pe]}")
+
+    print(f"\nRouting table next_hop[src][dst] ({PE_num}x{PE_num}):")
+    header = "       " + "".join(f"dst={d:<4}" for d in range(PE_num))
+    print(header)
+    for s in range(PE_num):
+        row = f"src={s}  "
+        for d in range(PE_num):
+            if s == d:
+                row += " -   "
+            else:
+                row += f" {compute_next_hop(s, d, X, Y):<4}"
+        print(row)
+
+    print(f"\nPhase1 slot: phase1_slot[sender][dst_rank]")
+    for pe in range(PE_num):
+        print(f"  PE {pe}: {phase1_slot[pe]}")
+
+    print(f"\nForward slot: forward_slot[me][dst_rank][incoming_slot]")
+    for pe in range(PE_num):
+        has_fwd = any(
+            forward_slot[pe][dr][sl] != -1
+            for dr in range(PE_num) for sl in range(PE_num)
+        )
+        if has_fwd:
+            print(f"  PE {pe}:")
+            for dr in range(PE_num):
+                active = [(sl, forward_slot[pe][dr][sl]) for sl in range(PE_num)
+                          if forward_slot[pe][dr][sl] != -1]
+                if active:
+                    pairs = ", ".join(f"in_slot={sl}->out_slot={v}" for sl, v in active)
+                    print(f"    dst_rank={dr}: {pairs}")
+
+    print(f"\nIncoming src: incoming_src[receiver][dst_rank][slot]")
+    for pe in range(PE_num):
+        print(f"  PE {pe}:")
+        for dr in range(PE_num):
+            active = [(sl, incoming_src[pe][dr][sl]) for sl in range(PE_num)
+                      if incoming_src[pe][dr][sl] != -1]
+            if active:
+                pairs = ", ".join(f"slot={sl}<-PE{v}" for sl, v in active)
+                print(f"    dst_rank={dr}: {pairs}")
+    print()
+
+
 @tilelang.jit(
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
@@ -119,18 +213,19 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, num_warps, threads, enable
             dst: T.Tensor((PE_num * M, N), "float16"),
             # buffer[dst_rank, slots, *, *]: This PE save slots for transferring data chunks for the real destination rank
             buffer_transfer: T.Tensor((PE_num, num_slots, M, N), "float16"),
-            # slot_counter[dst_rank, num_blocks, num_warps]: Counter for allocating slot indices
-            slot_counter: T.Tensor((PE_num, num_blocks, num_warps), "uint32"),
             # Per-slot ready flag: writer sets signal=run_id (RELEASE); reader wait_eq(signal, run_id) (ACQUIRE)
             # signal_transfer[dst_rank, slot, num_blocks, num_warps]
             signal_transfer: T.Tensor((PE_num, num_slots, num_blocks, num_warps), "int32"),
-            # Src idx during transfer
+            # Pre-filled original source PE for each incoming slot (host-side AOT)
             src_transfer: T.Tensor((PE_num, num_slots, num_blocks, num_warps), "uint32"),
             # Pre-computed expected incoming slot counts per (PE, dst_rank)
-            # expected_slots[pe, dst_rank]: how many slots PE 'pe' will receive for dst_rank
             expected_slots: T.Tensor((PE_num, PE_num), "int32"),
             # Run generation: writers set signal = run_id, readers wait_eq(signal, run_id). Must be != 0.
             run_id: T.Tensor((1,), "int32"),
+            # AOT Phase 1 slot: phase1_slot_map[dst_rank] = slot on next_hop for this PE
+            phase1_slot_map: T.Tensor((PE_num,), "int32"),
+            # AOT Phase 2 forward slot: forward_slot_map[dst_rank, incoming_slot] = slot on next_hop
+            forward_slot_map: T.Tensor((PE_num, num_slots), "int32"),
             # Profiling timestamps: [dst_rank, slot_idx, phase, block, warp]
             # phase 0 = phase1 start
             # phase 1 = phase1 end
@@ -150,12 +245,10 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, num_warps, threads, enable
             to_dir = T.alloc_local([1], "uint32")
             diff = T.alloc_local([1], "int32")
             dst_rank = T.alloc_local([1], "uint32")
-            old_counter = T.alloc_local([1], "uint32")
-            slot_physical = T.alloc_local([1], "uint32")
-            old_counter_shared = T.alloc_shared([PE_num, num_blocks, num_warps], "uint32")
-            cur_counter = T.alloc_local([1], "uint32")
-            cur_slot_physical = T.alloc_local([1], "uint32")
-            cur_counter_shared = T.alloc_shared([PE_num, num_blocks, num_warps], "uint32")
+            p1_slot = T.alloc_local([1], "int32")
+            p1_slot_shared = T.alloc_shared([PE_num, num_blocks, num_warps], "int32")
+            fwd_slot = T.alloc_local([1], "int32")
+            fwd_slot_shared = T.alloc_shared([PE_num, num_blocks, num_warps], "int32")
             slot_flag = T.alloc_local([1], "int32")
             slot_flag_shared = T.alloc_shared([num_warps], "int32")
             num_expected = T.alloc_local([1], "int32")
@@ -221,25 +314,10 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, num_warps, threads, enable
             chunk_M = T.min(block_M - warp_id * tile_M, tile_M)
             if dst_rank[0] != rank[0]:
                 if tx % 32 == 0:
-                    old_counter[0] = T.atom_add_remote(
-                        slot_counter[dst_rank[0], bz, warp_id],
-                        1,
-                        scope=T.MemoryScope.SYSTEM,
-                        sem=T.MemorySemantic.RELEASE,
-                        dst_pe=next_rank[0],
-                    )
-                    slot_physical[0] = T.floormod(old_counter[0], num_slots)
-                    old_counter_shared[dst_rank[0], bz, warp_id] = slot_physical[0]
-                    T.st(
-                        src_transfer[dst_rank[0], slot_physical[0], bz, warp_id],
-                        rank[0],
-                        scope=T.MemoryScope.SYSTEM,
-                        sem=T.MemorySemantic.RELEASE,
-                        dst_pe=next_rank[0],
-                    )
+                    p1_slot[0] = phase1_slot_map[dst_rank[0]]
+                    p1_slot_shared[dst_rank[0], bz, warp_id] = p1_slot[0]
                 T.sync_warp()
                 if next_rank[0] == dst_rank[0]:
-                    # Last hop: write directly to dst on the destination PE
                     T.put_warp(
                         T.address_of(src[dst_rank[0] * M + bz * block_M + warp_id * tile_M, 0]),
                         T.address_of(dst[rank[0] * M + bz * block_M + warp_id * tile_M, 0]),
@@ -249,14 +327,14 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, num_warps, threads, enable
                 else:
                     T.put_warp(
                         T.address_of(src[dst_rank[0] * M + bz * block_M + warp_id * tile_M, 0]),
-                        T.address_of(buffer_transfer[dst_rank[0], old_counter_shared[dst_rank[0], bz, warp_id], bz * block_M + warp_id * tile_M, 0]),
+                        T.address_of(buffer_transfer[dst_rank[0], p1_slot_shared[dst_rank[0], bz, warp_id], bz * block_M + warp_id * tile_M, 0]),
                         chunk_M * N,
                         next_rank[0],
                     )
                 T.fence_sys(sem=T.MemorySemantic.RELEASE)
                 if tx % 32 == 0:
                     T.st(
-                        signal_transfer[dst_rank[0], old_counter_shared[dst_rank[0], bz, warp_id], bz, warp_id],
+                        signal_transfer[dst_rank[0], p1_slot_shared[dst_rank[0], bz, warp_id], bz, warp_id],
                         run_id[0],
                         scope=T.MemoryScope.SYSTEM,
                         sem=T.MemorySemantic.RELEASE,
@@ -312,29 +390,12 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, num_warps, threads, enable
                     T.sync_warp()
 
                 src_idx = src_transfer[dst_rank[0], slot_idx, bz, warp_id]
-                # Handle the transfer
                 if dst_rank[0] != rank[0]:
-                    # Forward to next hop
                     if tx % 32 == 0:
-                        cur_counter[0] = T.atom_add_remote(
-                            slot_counter[dst_rank[0], bz, warp_id],
-                            1,
-                            scope=T.MemoryScope.SYSTEM,
-                            sem=T.MemorySemantic.RELEASE,
-                            dst_pe=next_rank[0],
-                        )
-                        cur_slot_physical[0] = T.floormod(cur_counter[0], num_slots)
-                        cur_counter_shared[dst_rank[0], bz, warp_id] = cur_slot_physical[0]
-                        T.st(
-                            src_transfer[dst_rank[0], cur_slot_physical[0], bz, warp_id],
-                            src_idx,
-                            scope=T.MemoryScope.SYSTEM,
-                            sem=T.MemorySemantic.RELEASE,
-                            dst_pe=next_rank[0],
-                        )
+                        fwd_slot[0] = forward_slot_map[dst_rank[0], slot_idx]
+                        fwd_slot_shared[dst_rank[0], bz, warp_id] = fwd_slot[0]
                     T.sync_warp()
                     if next_rank[0] == dst_rank[0]:
-                        # Last hop: write directly to dst on the destination PE
                         T.put_warp(
                             T.address_of(buffer_transfer[dst_rank[0], slot_idx, bz * block_M + warp_id * tile_M, 0]),
                             T.address_of(dst[src_idx * M + bz * block_M + warp_id * tile_M, 0]),
@@ -344,7 +405,7 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, num_warps, threads, enable
                     else:
                         T.put_warp(
                             T.address_of(buffer_transfer[dst_rank[0], slot_idx, bz * block_M + warp_id * tile_M, 0]),
-                            T.address_of(buffer_transfer[dst_rank[0], cur_counter_shared[dst_rank[0], bz, warp_id], bz * block_M + warp_id * tile_M, 0]),
+                            T.address_of(buffer_transfer[dst_rank[0], fwd_slot_shared[dst_rank[0], bz, warp_id], bz * block_M + warp_id * tile_M, 0]),
                             chunk_M * N,
                             dst_pe=next_rank[0],
                         )
@@ -352,7 +413,7 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, num_warps, threads, enable
                     T.sync_warp()
                     if tx % 32 == 0:
                         T.st(
-                            signal_transfer[dst_rank[0], cur_counter_shared[dst_rank[0], bz, warp_id], bz, warp_id],
+                            signal_transfer[dst_rank[0], fwd_slot_shared[dst_rank[0], bz, warp_id], bz, warp_id],
                             run_id[0],
                             scope=T.MemoryScope.SYSTEM,
                             sem=T.MemorySemantic.RELEASE,
@@ -406,10 +467,10 @@ def run_torus_alltoall(local_rank, num_ranks, args):
 
     # Pre-compute expected slot counts based on XY-routing topology
     expected_slots_host = compute_expected_slots(PE_num, X, Y)
+    phase1_slot_host, forward_slot_host, incoming_src_host = compute_slot_assignment(PE_num, X, Y)
     if local_rank == 0:
-        print(f"Expected slots per PE (rows=receiver, cols=dst_rank):")
-        for pe in range(PE_num):
-            print(f"  PE {pe}: {expected_slots_host[pe]}")
+        print_routing_tables(PE_num, X, Y, expected_slots_host, phase1_slot_host,
+                             forward_slot_host, incoming_src_host)
 
     enable_profiling = args.profile
     kernel = torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, num_warps, threads, enable_profiling=enable_profiling)
@@ -425,9 +486,6 @@ def run_torus_alltoall(local_rank, num_ranks, args):
     buffer_transfer = tilelang.tensor((PE_num, PE_num, M, N), torch.float16,
                                       allocator=allocator).fill_(-1)
 
-    # Signals for each buffer slot in each direction
-    slot_counter = tilelang.tensor((PE_num, num_blocks, num_warps), torch.uint32, allocator=allocator).fill_(0)
-    # Per-slot ready flags: 0=not ready, 1=ready
     signal_transfer = tilelang.tensor((PE_num, PE_num, num_blocks, num_warps),
                                       torch.int32,
                                       allocator=allocator).fill_(0)
@@ -435,10 +493,20 @@ def run_torus_alltoall(local_rank, num_ranks, args):
     src_transfer = tilelang.tensor((PE_num, PE_num, num_blocks, num_warps),
                                     torch.uint32,
                                     allocator=allocator).fill_(PE_num)
+    incoming_src_for_me = torch.tensor(incoming_src_host[local_rank], dtype=torch.int32, device="cuda")
+    # incoming_src_for_me shape: (PE_num, PE_num) = (dst_rank, slot)
+    # Broadcast to (PE_num, PE_num, num_blocks, num_warps), replacing -1 with PE_num (unused sentinel)
+    incoming_src_for_me = incoming_src_for_me.clamp(min=0)
+    src_transfer.copy_(incoming_src_for_me.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, num_blocks, num_warps).to(torch.uint32))
 
-    # Pre-computed expected slots tensor (same for all PEs)
     expected_slots_tensor = tilelang.tensor((PE_num, PE_num), torch.int32, allocator=allocator)
     expected_slots_tensor.copy_(torch.tensor(expected_slots_host, dtype=torch.int32, device="cuda"))
+
+    # AOT slot tables (per-PE)
+    phase1_slot_tensor = tilelang.tensor((PE_num,), torch.int32, allocator=allocator)
+    phase1_slot_tensor.copy_(torch.tensor(phase1_slot_host[local_rank], dtype=torch.int32, device="cuda"))
+    forward_slot_tensor = tilelang.tensor((PE_num, PE_num), torch.int32, allocator=allocator)
+    forward_slot_tensor.copy_(torch.tensor(forward_slot_host[local_rank], dtype=torch.int32, device="cuda"))
 
     # Profiling timestamps: [dst_rank, num_slots, 5 phases, num_blocks, num_warps]
     num_slots = PE_num
@@ -456,7 +524,7 @@ def run_torus_alltoall(local_rank, num_ranks, args):
     run_id_tensor.copy_(torch.tensor([1], dtype=torch.int32, device="cuda"))
     if enable_profiling:
         timestamps_tensor.zero_()
-    kernel(src, dst, buffer_transfer, slot_counter, signal_transfer, src_transfer, expected_slots_tensor, run_id_tensor, timestamps_tensor)
+    kernel(src, dst, buffer_transfer, signal_transfer, src_transfer, expected_slots_tensor, run_id_tensor, phase1_slot_tensor, forward_slot_tensor, timestamps_tensor)
 
     _dbg(local_rank, "verify kernel returned", debug)
     torch.cuda.synchronize()
@@ -502,14 +570,13 @@ def run_torus_alltoall(local_rank, num_ranks, args):
     if args.benchmark:
         run_id = 2  # 1 used for verification
         for w in range(args.warmup):
-            slot_counter.zero_()
             torch.cuda.synchronize()
             _dbg(local_rank, f"warmup {w}: before barrier", debug)
             dist.barrier(group_size)
             _dbg(local_rank, f"warmup {w}: launching kernel run_id={run_id}", debug)
             run_id_tensor.copy_(torch.tensor([run_id], dtype=torch.int32, device="cuda"))
             run_id += 1
-            kernel(src, dst, buffer_transfer, slot_counter, signal_transfer, src_transfer, expected_slots_tensor, run_id_tensor, timestamps_tensor)
+            kernel(src, dst, buffer_transfer, signal_transfer, src_transfer, expected_slots_tensor, run_id_tensor, phase1_slot_tensor, forward_slot_tensor, timestamps_tensor)
             _dbg(local_rank, f"warmup {w}: kernel returned", debug)
             torch.cuda.synchronize()
             dist.barrier(group_size)
@@ -517,7 +584,6 @@ def run_torus_alltoall(local_rank, num_ranks, args):
         num_iters = args.iter
         elapsed_time_ms = []
         for i in range(num_iters):
-            slot_counter.zero_()
             torch.cuda.synchronize()
             _dbg(local_rank, f"iter {i}: before barrier", debug)
             dist.barrier(group_size)
@@ -531,7 +597,7 @@ def run_torus_alltoall(local_rank, num_ranks, args):
             start_event.record()
             # torch.cuda.profiler.start()
             # with torch.cuda.nvtx.range("alltoall_xy_routing_benchmark"):
-            kernel(src, dst, buffer_transfer, slot_counter, signal_transfer, src_transfer, expected_slots_tensor, run_id_tensor, timestamps_tensor)
+            kernel(src, dst, buffer_transfer, signal_transfer, src_transfer, expected_slots_tensor, run_id_tensor, phase1_slot_tensor, forward_slot_tensor, timestamps_tensor)
             # torch.cuda.synchronize()
             # dist.barrier(group_size)
             # torch.cuda.profiler.stop()
