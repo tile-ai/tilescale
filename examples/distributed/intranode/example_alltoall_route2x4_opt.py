@@ -252,6 +252,7 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, num_warps, threads, enable
             slot_flag = T.alloc_local([1], "int32")
             slot_flag_shared = T.alloc_shared([num_warps], "int32")
             num_expected = T.alloc_local([1], "int32")
+            next_slot = T.alloc_local([1], "int32")
             ts_val = T.alloc_local([1], "int64")
 
             rank[0] = T.get_rank()
@@ -358,36 +359,35 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, num_warps, threads, enable
                     timestamps[dst_rank[0], 0, 1, bz, warp_id] = ts_val[0]
                 T.sync_warp()
             
-            # Phase 2: Poll per-slot ready flags sequentially and process each slot.
-            # Use pre-computed expected_slots count to know exactly how many slots to process,
-            # eliminating the need for termination signals.
-            for slot_idx in T.serial(num_slots):
-                # Skip if no more expected slots or this block doesn't receive for this dst_rank
-                if slot_idx >= num_expected[0]:
-                    T.loop_break()
-
+            # Phase 2: Software-pipelined slot processing.
+            # Wait for slot 0 before the loop, then at the end of each iteration
+            # prefetch wait for the next slot so its spin overlaps with the current put.
+            if num_expected[0] > 0:
                 if enable_profiling:
                     if tx % 32 == 0:
                         ts_val[0] = T.get_clock()
-                        timestamps[dst_rank[0], slot_idx, 2, bz, warp_id] = ts_val[0]
+                        timestamps[dst_rank[0], 0, 2, bz, warp_id] = ts_val[0]
 
                 if tx % 32 == 0:
                     slot_flag[0] = T.wait_eq(
-                        signal_transfer[dst_rank[0], slot_idx, bz, warp_id],
+                        signal_transfer[dst_rank[0], 0, bz, warp_id],
                         run_id[0],
                         scope=T.MemoryScope.SYSTEM,
                         semantic=T.MemorySemantic.ACQUIRE,
                     )
                     slot_flag_shared[warp_id] = slot_flag[0]
                 T.sync_warp()
-                # Ensure consumer sees producer's RELEASE writes: no reorder of subsequent reads above wait
                 T.fence_sys(sem=T.MemorySemantic.ACQUIRE)
 
                 if enable_profiling:
                     if tx % 32 == 0:
                         ts_val[0] = T.get_clock()
-                        timestamps[dst_rank[0], slot_idx, 3, bz, warp_id] = ts_val[0]
+                        timestamps[dst_rank[0], 0, 3, bz, warp_id] = ts_val[0]
                     T.sync_warp()
+
+            for slot_idx in T.serial(num_slots):
+                if slot_idx >= num_expected[0]:
+                    T.loop_break()
 
                 src_idx = src_transfer[dst_rank[0], slot_idx, bz, warp_id]
                 if dst_rank[0] != rank[0]:
@@ -422,8 +422,6 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, num_warps, threads, enable
                     T.sync_warp()
                     T.fence_sys(sem=T.MemorySemantic.RELEASE)
                 else:
-                    # Final destination: data already written to dst by the last-hop sender.
-                    # Just synchronize, no local copy needed.
                     T.sync_warp()
 
                 if enable_profiling:
@@ -431,6 +429,31 @@ def torus_alltoall_xy(PE_num, X, Y, M, N, num_blocks, num_warps, threads, enable
                         ts_val[0] = T.get_clock()
                         timestamps[dst_rank[0], slot_idx, 4, bz, warp_id] = ts_val[0]
                     T.sync_warp()
+
+                # Prefetch: wait for next slot
+                next_slot[0] = slot_idx + 1
+                if next_slot[0] < num_expected[0]:
+                    if enable_profiling:
+                        if tx % 32 == 0:
+                            ts_val[0] = T.get_clock()
+                            timestamps[dst_rank[0], next_slot[0], 2, bz, warp_id] = ts_val[0]
+
+                    if tx % 32 == 0:
+                        slot_flag[0] = T.wait_eq(
+                            signal_transfer[dst_rank[0], next_slot[0], bz, warp_id],
+                            run_id[0],
+                            scope=T.MemoryScope.SYSTEM,
+                            semantic=T.MemorySemantic.ACQUIRE,
+                        )
+                        slot_flag_shared[warp_id] = slot_flag[0]
+                    T.sync_warp()
+                    T.fence_sys(sem=T.MemorySemantic.ACQUIRE)
+
+                    if enable_profiling:
+                        if tx % 32 == 0:
+                            ts_val[0] = T.get_clock()
+                            timestamps[dst_rank[0], next_slot[0], 3, bz, warp_id] = ts_val[0]
+                        T.sync_warp()
 
             T.sync_warp()
 
