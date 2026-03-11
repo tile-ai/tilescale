@@ -205,7 +205,12 @@ class BaseAllocator:
                     peer_ts.append(t)
                 else:
                     peer_ptr_val = int(self._buffer_ptrs[i]) + current_offset
-                    peer_t = tensor_from_ptr(peer_ptr_val, shape, dtype_str, self._device, False)
+                    # IPC-mapped pointers may report as local or remote device
+                    # depending on CUDA driver/topology, so try both.
+                    try:
+                        peer_t = tensor_from_ptr(peer_ptr_val, shape, dtype_str, i, False)
+                    except ValueError:
+                        peer_t = tensor_from_ptr(peer_ptr_val, shape, dtype_str, self._device, False)
                     peer_ts.append(peer_t)
 
         if take_ownership:
