@@ -43,6 +43,10 @@ static at::ScalarType dtype_from_string(const std::string &s) {
     return at::kChar;
   if (s == "bool")
     return at::kBool;
+  if (s == "float8_e4m3fn" || s == "float8e4m3fn")
+    return at::kFloat8_e4m3fn;
+  if (s == "float8_e5m2" || s == "float8e5m2")
+    return at::kFloat8_e5m2;
   throw std::runtime_error("Unsupported dtype string: '" + s + "'");
 }
 
