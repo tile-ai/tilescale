@@ -71,7 +71,7 @@ if __name__ == "__main__":
         return out
 
     dist.barrier(TP_GROUP)
-    ref, t = perf_fn(torch_ag, warmup, repeat)
+    t = perf_fn(torch_ag, warmup, repeat)
     print(f"rank {RANK} torch all_gather avg time: {t} ms")
 
     # Tilelang-dist
@@ -85,10 +85,12 @@ if __name__ == "__main__":
         return out
 
     dist.barrier(TP_GROUP)
-    out, t = perf_fn(tilelang_ag, warmup, repeat)
+    t = perf_fn(tilelang_ag, warmup, repeat)
     print(f"rank {RANK} tilelang all_gather avg time: {t} ms")
 
     # Check correctness
+    out = torch_ag()
+    ref = tilelang_ag()
     assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
     print(f"rank {RANK} check passed.✅")
 

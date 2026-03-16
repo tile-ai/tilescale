@@ -6,8 +6,6 @@ from dataclasses import dataclass
 from cuda import cudart
 from tilelang.distributed.utils import CUDA_CHECK
 
-tilelang.disable_cache()
-
 
 @tilelang.jit
 def barrier_all_blocks_sys_kernel(

@@ -13,8 +13,6 @@ from sp_ag_attention_intra_node import (
     fused_sp_ag_attn_intra_node,
 )
 
-tilelang.disable_cache()
-
 
 class FusedSequenceParallelAttn(torch.nn.Module):
     def __init__(
@@ -371,7 +369,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         print(f"rank {local_rank} check failed.❌")
         print(f"torch_out: {torch_out}, tilelang_out: {tilescale_out}")
 
-    _, tl_t = perf_fn(lambda: tilescale_module(q_shard, k_shards, v_shards, cu_seqlens_q, cu_seqlens_k), warmup=5, rep=5)
+    tl_t = perf_fn(lambda: tilescale_module(q_shard, k_shards, v_shards, cu_seqlens_q, cu_seqlens_k), warmup=5, rep=5)
 
     print(f"rank {local_rank} tilescale time: {tl_t:.2f} ms")
 

@@ -279,7 +279,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         print(f"rank {local_rank} check failed.❌")
         print(f"torch_C: {torch_C}, tilelang_C: {tilelang_C}")
 
-    _, tl_t = perf_fn(
+    tl_t = perf_fn(
         lambda: ag_gemm_op(
             A,
             B,
