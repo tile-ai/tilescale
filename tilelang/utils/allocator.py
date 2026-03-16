@@ -206,7 +206,15 @@ class BaseAllocator:
                 else:
                     peer_ptr_val = int(self._buffer_ptrs[i]) + current_offset
                     peer_device = self._device_ids[i]
-                    peer_t = tensor_from_ptr(peer_ptr_val, shape, dtype_str, peer_device, False)
+                    # NOTE: This is a workaround, as different CUDA driver versions have different behaviors
+                    # on the device of the peer tensor.
+                    try:
+                        peer_t = tensor_from_ptr(peer_ptr_val, shape, dtype_str, peer_device, False)
+                    except Exception as e:
+                        if isinstance(e, ValueError) and "does not match device of data" in str(e):
+                            peer_t = tensor_from_ptr(peer_ptr_val, shape, dtype_str, self._device, False)
+                        else:
+                            raise e
                     peer_ts.append(peer_t)
 
         if take_ownership:
