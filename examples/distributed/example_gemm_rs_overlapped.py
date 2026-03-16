@@ -10,8 +10,6 @@ from tilelang.distributed import init_dist
 from tilelang.distributed import perf_fn
 from reduce_scatter import reduce_scatter_2d_op, create_reduce_scater_2d_ctx
 
-tilelang.disable_cache()
-
 
 @tilelang.jit
 def gemm_kernel(

@@ -19,7 +19,6 @@ else:
     from cuda import cuda
 from tilelang.distributed import perf_fn
 
-tilelang.disable_cache()
 os.environ["NCCL_DEBUG"] = "WARN"  # silence NCCL log
 
 
@@ -269,6 +268,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         gemm_stream,
         ag_stream,
     )
+    signal_buffer[local_rank].zero_()
 
     torch_ag_buffer = torch.empty([M, K], dtype=dtype, device="cuda")
     torch_C = torch_ag_gemm(group, A, B, torch_ag_buffer)
@@ -298,6 +298,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         ),
         warmup=5,
         rep=10,
+        post_fn=lambda: signal_buffer[local_rank].zero_()
     )
 
     print(f"rank {local_rank} tilelang ag_gemm time: {tl_t:.2f} ms, TFLOPS: {2 * M * N * K / 1e9 / (tl_t) / num_local_ranks:.2f}")

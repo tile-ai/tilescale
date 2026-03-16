@@ -41,7 +41,7 @@ dtype_map = {
 
 def init_dist(local_rank: int, num_local_ranks: int):
     ip = os.getenv("MASTER_ADDR", "127.0.0.1")
-    port = int(os.getenv("MASTER_PORT", "8362"))
+    port = int(os.getenv("MASTER_PORT", "8361"))
     num_nodes = int(os.getenv("WORLD_SIZE", 1))
     node_rank = int(os.getenv("RANK", 0))
 
