@@ -246,7 +246,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     A = ag_buffer[local_rank][M_per_rank * local_rank : M_per_rank * (local_rank + 1), :].normal_()
     signal_buffer = tilelang.tensor((num_local_ranks,), torch.uint32, allocator=allocator, return_peers=True)
 
-    gemm_stream = torch.cuda.Stream()
+    gemm_stream = torch.cuda.current_stream()
     ag_stream = torch.cuda.Stream(priority=-1)
     signal_target = 1
 
@@ -268,7 +268,6 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         gemm_stream,
         ag_stream,
     )
-    signal_buffer[local_rank].zero_()
 
     torch_ag_buffer = torch.empty([M, K], dtype=dtype, device="cuda")
     torch_C = torch_ag_gemm(group, A, B, torch_ag_buffer)
@@ -298,7 +297,6 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         ),
         warmup=5,
         rep=10,
-        post_fn=lambda: signal_buffer[local_rank].zero_()
     )
 
     print(f"rank {local_rank} tilelang ag_gemm time: {tl_t:.2f} ms, TFLOPS: {2 * M * N * K / 1e9 / (tl_t) / num_local_ranks:.2f}")
