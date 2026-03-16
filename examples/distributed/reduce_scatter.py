@@ -266,7 +266,7 @@ def ring_reduce_tma(
         )
         # if begin_idx == 0:
         #     print(ring_reduce_tma_func.get_kernel_source())
-        ring_reduce_tma_func(input, output, stream=torch.cuda.current_stream().cuda_stream)
+        ring_reduce_tma_func(input, output)
     else:
         raise NotImplementedError("Currently only support num_sms = -1 for TMA ring reduce.")
         # grid = lambda META: (min(
@@ -377,11 +377,8 @@ def reduce_scatter_multi_node(input: torch.Tensor, ctx: ReduceScatter2DContext, 
 
     # directly reduce_scatter to output if nnodes == 1
     out_each_node = output if ctx.nnodes == 1 else None
-    if not has_fullmesh_nvlink():
-        raise Exception("Only support fullmesh nvlink topology for now.")
-    else:
-        print("Using fullmesh nvlink reduce_scatter.")
-        rs_result_per_node = reduce_scatter_for_each_node(input, ctx, out_each_node)
+    assert has_fullmesh_nvlink(), "Only support fullmesh nvlink topology for now."
+    rs_result_per_node = reduce_scatter_for_each_node(input, ctx, out_each_node)
 
     if ctx.nnodes == 1:
         return rs_result_per_node

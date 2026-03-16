@@ -74,7 +74,7 @@ def gemm_kernel(
             pid_n_ = (bid % num_pid_in_group) // group_size_m
 
             # threadblock swizzle
-            #  no stream-k support. only split by m x n
+            # no stream-k support. only split by m x n
             m_offset = M_per_rank * local_rank
             pid_m_offset = T.ceildiv(m_offset, block_M)
             pid_m = (pid_m_ + pid_m_offset) % num_pid_m
@@ -116,7 +116,7 @@ def gemm_kernel(
                 pid_n_ = (tile_id % num_pid_in_group) // group_size_m
 
                 # threadblock swizzle
-                #  no stream-k support. only split by m x n
+                # no stream-k support. only split by m x n
                 m_offset = M_per_rank * local_rank
                 pid_m_offset = T.ceildiv(m_offset, block_M)
                 pid_m = (pid_m_ + pid_m_offset) % num_pid_m
