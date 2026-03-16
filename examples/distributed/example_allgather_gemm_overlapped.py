@@ -19,7 +19,6 @@ else:
     from cuda import cuda
 from tilelang.distributed import perf_fn
 
-tilelang.disable_cache()
 os.environ["NCCL_DEBUG"] = "WARN"  # silence NCCL log
 
 
@@ -74,7 +73,7 @@ def gemm_kernel(
             pid_n_ = (bid % num_pid_in_group) // group_size_m
 
             # threadblock swizzle
-            #  no stream-k support. only split by m x n
+            # no stream-k support. only split by m x n
             m_offset = M_per_rank * local_rank
             pid_m_offset = T.ceildiv(m_offset, block_M)
             pid_m = (pid_m_ + pid_m_offset) % num_pid_m
@@ -116,7 +115,7 @@ def gemm_kernel(
                 pid_n_ = (tile_id % num_pid_in_group) // group_size_m
 
                 # threadblock swizzle
-                #  no stream-k support. only split by m x n
+                # no stream-k support. only split by m x n
                 m_offset = M_per_rank * local_rank
                 pid_m_offset = T.ceildiv(m_offset, block_M)
                 pid_m = (pid_m_ + pid_m_offset) % num_pid_m
@@ -247,7 +246,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     A = ag_buffer[local_rank][M_per_rank * local_rank : M_per_rank * (local_rank + 1), :].normal_()
     signal_buffer = tilelang.tensor((num_local_ranks,), torch.uint32, allocator=allocator, return_peers=True)
 
-    gemm_stream = torch.cuda.Stream()
+    gemm_stream = torch.cuda.current_stream()
     ag_stream = torch.cuda.Stream(priority=-1)
     signal_target = 1
 
@@ -279,7 +278,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         print(f"rank {local_rank} check failed.❌")
         print(f"torch_C: {torch_C}, tilelang_C: {tilelang_C}")
 
-    _, tl_t = perf_fn(
+    tl_t = perf_fn(
         lambda: ag_gemm_op(
             A,
             B,

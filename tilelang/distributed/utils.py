@@ -227,19 +227,44 @@ def dist_print(*args, **kwargs):
             print(*args, **kwargs)
 
 
-def perf_fn(fn, warmup, rep):
-    start_event = torch.cuda.Event(enable_timing=True)
-    stop_event = torch.cuda.Event(enable_timing=True)
-    for n in range(rep + warmup):
-        if n == warmup:
-            start_event.record()
-        output = fn()
-    stop_event.record()
-    start_event.wait()
-    stop_event.wait()
-    torch.cuda.current_stream().synchronize()
-    duration_ms = start_event.elapsed_time(stop_event)
-    return output, duration_ms / rep
+def perf_fn(fn, warmup: int = 50, rep: int = 50, post_fn=None):
+    """DeepEP style benchmark function.
+    Args:
+        fn: the function to benchmark.
+        warmup: the number of warmup iterations.
+        rep: the number of repetitions.
+        post_fn: the function to post-process the results.
+
+    Returns:
+        time (ms): the average time of the function.
+    """
+    import numpy as np
+
+    # Flush L2 cache with 256 MB data
+    torch.cuda.synchronize()
+    cache = torch.empty(int(256e6 // 4), dtype=torch.int, device="cuda")
+
+    # Warmup
+    for _ in range(warmup):
+        fn()
+
+    # Flush L2
+    cache.zero_()
+
+    # Testing
+    start_events = [torch.cuda.Event(enable_timing=True) for _ in range(rep)]
+    end_events = [torch.cuda.Event(enable_timing=True) for _ in range(rep)]
+    for i in range(rep):
+        # Record
+        start_events[i].record()
+        fn()
+        end_events[i].record()
+        if post_fn is not None:
+            post_fn()
+    torch.cuda.synchronize()
+
+    times = np.array([s.elapsed_time(e) for s, e in zip(start_events, end_events)])[1:]
+    return np.average(times).item()
 
 
 def CUDA_CHECK(err):
