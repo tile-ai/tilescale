@@ -16,8 +16,6 @@ from tilelang.utils.target import target_is_hopper, determine_target
 import torch.distributed as dist
 import tilelang.language as T
 
-tilelang.disable_cache()
-
 
 @dataclasses.dataclass
 class ReduceScatter2DContext:

@@ -5,6 +5,7 @@ import tilelang.testing
 import example_allgather_gemm_overlapped
 import example_gemm_rs_overlapped
 import example_sp_ag_attention_intra_node
+import example_reduce_scatter
 
 
 @tilelang.testing.requires_distributed
@@ -26,3 +27,10 @@ def test_example_gemm_rs_overlapped():
 @tilelang.testing.requires_cuda_compute_version_eq(9, 0)
 def test_example_sp_ag_attention_intra_node():
     torch.multiprocessing.spawn(example_sp_ag_attention_intra_node.main, args=(2, None), nprocs=2)
+
+
+@tilelang.testing.requires_distributed
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(9, 0)
+def test_example_reduce_scatter():
+    torch.multiprocessing.spawn(example_reduce_scatter.main, args=(2, None), nprocs=2)

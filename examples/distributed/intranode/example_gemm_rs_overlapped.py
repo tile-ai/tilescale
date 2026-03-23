@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import tilelang
 import tilelang.language as T
 import argparse
