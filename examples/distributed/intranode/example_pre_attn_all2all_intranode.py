@@ -7,6 +7,7 @@ Output: [B, H_PE, S,   D] — partial heads, full sequence per rank
 Rank r sends src[:, p*H_PE:(p+1)*H_PE, :, :] to rank p's
 dst[:, :, r*S_PE:(r+1)*S_PE, :].
 """
+
 import argparse
 import torch
 import torch.distributed as dist
@@ -77,8 +78,12 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
     allocator = tilelang.get_allocator(
-        size=2**30, device=device, is_distributed=True,
-        local_rank=local_rank, num_local_ranks=num_local_ranks, group=group,
+        size=2**30,
+        device=device,
+        is_distributed=True,
+        local_rank=local_rank,
+        num_local_ranks=num_local_ranks,
+        group=group,
     )
 
     func = kernel_pre_attn_all2all(PE_num, B, NH, S_PE, D, args.dtype)

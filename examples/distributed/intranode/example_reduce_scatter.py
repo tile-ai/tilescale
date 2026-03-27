@@ -34,9 +34,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     input_tensor = tilelang.tensor((M, N), dtype, allocator=allocator).normal_() / 10
     output_tensor = tilelang.tensor((M_per_rank, N), dtype, allocator=allocator)
 
-    ctx = create_reduce_scater_2d_ctx(
-        M, N, local_rank, num_local_ranks, num_local_ranks, dtype, allocator, overlap_with_gemm=False
-    )
+    ctx = create_reduce_scater_2d_ctx(M, N, local_rank, num_local_ranks, num_local_ranks, dtype, allocator, overlap_with_gemm=False)
 
     dist.barrier()
 

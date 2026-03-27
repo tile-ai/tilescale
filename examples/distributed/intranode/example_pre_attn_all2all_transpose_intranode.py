@@ -8,6 +8,7 @@ Rank r sends src[:, :, p*H_PE:(p+1)*H_PE, :] (shape [B, S_PE, H_PE, D])
 to rank p's dst[:, :, r*S_PE:(r+1)*S_PE, :] (shape [B, H_PE, S_PE, D])
 after transposing dims 1 and 2.
 """
+
 import argparse
 import torch
 import torch.distributed as dist
@@ -81,8 +82,12 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
     allocator = tilelang.get_allocator(
-        size=2**30, device=device, is_distributed=True,
-        local_rank=local_rank, num_local_ranks=num_local_ranks, group=group,
+        size=2**30,
+        device=device,
+        is_distributed=True,
+        local_rank=local_rank,
+        num_local_ranks=num_local_ranks,
+        group=group,
     )
 
     func = kernel_pre_attn_all2all_transpose(PE_num, B, NH, S_PE, D, args.dtype)
