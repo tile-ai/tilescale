@@ -38,3 +38,5 @@ Simply run via python:
 ```bash
 TILELANG_USE_DISTRIBUTED=1 python examples/distributed/intranode/example_allgather_gemm_overlapped.py
 ```
+
+> Tips: To disable annoying NCCL IB logs, consider running with: `NCCL_IB_DISABLE=1`
