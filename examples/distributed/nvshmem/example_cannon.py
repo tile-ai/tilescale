@@ -7,8 +7,6 @@ from tilelang.distributed import init_distributed, dtype_map
 import math
 import argparse
 
-tilelang.disable_cache()
-
 
 def cannon(MESH, M, N, K, block_M, block_N, block_K, dtype="float16", specialize=False):
     M_local = T.ceildiv(M, MESH)

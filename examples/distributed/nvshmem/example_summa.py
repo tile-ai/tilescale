@@ -3,11 +3,10 @@ import torch.distributed as dist
 import pynvshmem
 import tilelang
 import tilelang.language as T
+from tilelang.carver.arch import driver
 from tilelang.distributed import init_distributed, dtype_map
 import math
 import argparse
-
-tilelang.disable_cache()
 
 
 def summa(MESH, M, N, K, block_M, block_N, block_K, dtype="float16"):
@@ -16,7 +15,7 @@ def summa(MESH, M, N, K, block_M, block_N, block_K, dtype="float16"):
     K_local = T.ceildiv(K, MESH)
     accum_dtype = "float32"
 
-    sm_num = 132  # 132 SMs for H100
+    sm_num = driver.get_num_sms()
     total_tiles = T.ceildiv(M_local, block_M) * T.ceildiv(N_local, block_N)
 
     @T.prim_func

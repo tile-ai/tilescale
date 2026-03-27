@@ -7,8 +7,6 @@ from tilelang.distributed import init_distributed
 import argparse
 import random
 
-tilelang.disable_cache()
-
 
 def all_to_all(PE_num, TOKEN_NUM, TOPK, HIDDEN, EXPERT_NUM, dtype="float16"):
     EXPERTS_PER_RANK = EXPERT_NUM // PE_num
