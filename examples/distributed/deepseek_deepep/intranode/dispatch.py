@@ -853,7 +853,7 @@ def intranode_dispatch(
             "bfloat16",
         )
         kernel.initialize(allocator=allocator, stream=comm_stream.cuda_stream)
-        with tvm_ffi.use_torch_stream(torch.cuda.stream(comm_stream)):
+        with torch.cuda.stream(comm_stream):
             kernel(
                 rank,
                 recv_x,

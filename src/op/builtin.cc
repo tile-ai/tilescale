@@ -395,5 +395,26 @@ TIR_DEFINE_TL_BUILTIN(warp_any).set_num_inputs(2).set_attr<TCallEffectKind>(
 TIR_DEFINE_TL_BUILTIN(warp_all).set_num_inputs(2).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));
 
+TIR_DEFINE_TL_BUILTIN(ibgda_get_qps_per_rdma_rank)
+    .set_num_inputs(0)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
+TIR_DEFINE_TL_BUILTIN(ibgda_quiet)
+    .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(ibgda_put_nbi_warp)
+    .set_num_inputs(8)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(ibgda_amo_nonfetch_add)
+    .set_num_inputs(5)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+
 } // namespace tl
 } // namespace tvm
