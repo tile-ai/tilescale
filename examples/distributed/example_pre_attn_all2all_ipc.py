@@ -3,6 +3,8 @@ import torch.distributed as dist
 import torch.multiprocessing
 import tilelang
 from tilelang.distributed import init_dist, dtype_map
+from cuda import cudart
+from tilelang.distributed.utils import CUDA_CHECK
 import argparse
 import os
 
@@ -91,6 +93,61 @@ def torch_pre_attn_qkv_a2a_reference(group, q_input, k_input, v_input, skip_q_a2
     return [q_output, k_output, v_output]
 
 
+def _cp_engine_copy_data(dst_ptr, src_ptr, cp_size, stream):
+    """
+    Optimized CUDA async memory copy using cudaMemcpyAsync for reduced overhead.
+    """
+    (err,) = cudart.cudaMemcpyAsync(
+        dst_ptr,
+        src_ptr,
+        cp_size,
+        cudart.cudaMemcpyKind.cudaMemcpyDefault,
+        stream.cuda_stream,
+    )
+    CUDA_CHECK(err)
+
+
+def _cp_engine_copy_heads_by_batch(
+    dst_base_ptr,
+    src_base_ptr,
+    dst_batch_stride_bytes,
+    src_batch_stride_bytes,
+    dst_seq_offset,
+    src_head_offset,
+    seq_per_pe,
+    heads_per_pe,
+    total_src_heads,
+    head_dim,
+    dtype_itemsize,
+    batch_size,
+    stream,
+):
+    """
+    Copy [B, S_local, H_slice, D] from source [B, S_local, H_total, D]
+    to destination [B, S_global, H_slice, D] using 2D async copies per batch.
+    """
+    row_bytes = heads_per_pe * head_dim * dtype_itemsize
+    src_pitch = total_src_heads * head_dim * dtype_itemsize
+    dst_pitch = row_bytes
+    src_head_offset_bytes = src_head_offset * head_dim * dtype_itemsize
+    dst_seq_offset_bytes = dst_seq_offset * row_bytes
+
+    for b in range(batch_size):
+        src_ptr = src_base_ptr + b * src_batch_stride_bytes + src_head_offset_bytes
+        dst_ptr = dst_base_ptr + b * dst_batch_stride_bytes + dst_seq_offset_bytes
+        (err,) = cudart.cudaMemcpy2DAsync(
+            dst_ptr,
+            dst_pitch,
+            src_ptr,
+            src_pitch,
+            row_bytes,
+            seq_per_pe,
+            cudart.cudaMemcpyKind.cudaMemcpyDefault,
+            stream.cuda_stream,
+        )
+        CUDA_CHECK(err)
+
+
 def custom_ipc_all_to_all(
     data_src_peers,
     data_dst_peers,
@@ -102,33 +159,35 @@ def custom_ipc_all_to_all(
 ):
     """
     P2P IPC-based all-to-all dimension swap matching the PyTorch golden reference.
-    Executes asynchronous memory copies pulling from remote buffers to local buffer.
+    Executes asynchronous memory copies pulling from remote buffers to local buffer using cudaMemcpyAsync.
     """
     rank_orders = [(local_rank + i) % local_world_size for i in range(local_world_size)]
     
+    # Metadata
+    batch_size, _, total_heads, head_dim = data_src_peers[local_rank].shape
+    dtype_itemsize = data_src_peers[local_rank].dtype.itemsize
+    src_batch_stride_bytes = data_src_peers[local_rank].stride(0) * dtype_itemsize
+    dst_batch_stride_bytes = data_dst_peers[local_rank].stride(0) * dtype_itemsize
+    
     with torch.cuda.stream(stream):
         for src_rank in rank_orders:
-            # PULL mechanism:
-            # We want the heads belonging to our local_rank from the src_rank's data_src.
-            # data_src shape on src_rank: [BATCH_SIZE, SEQ_PER_PE, NUM_HEADS, HEAD_DIM]
-            src = data_src_peers[src_rank][
-                :,
-                :,
-                local_rank * HEADS_PER_PE : (local_rank + 1) * HEADS_PER_PE,
-                :
-            ]
-            
-            # We place this data into our local data_dst at the sequence position corresponding to src_rank.
-            # data_dst shape on local_rank: [BATCH_SIZE, SEQ_LEN, HEADS_PER_PE, HEAD_DIM]
-            dst = data_dst_peers[local_rank][
-                :,
-                src_rank * SEQ_PER_PE : (src_rank + 1) * SEQ_PER_PE,
-                :,
-                :
-            ]
-            
-            # Execute P2P copy
-            dst.copy_(src)
+            src_tensor = data_src_peers[src_rank]
+            dst_tensor = data_dst_peers[local_rank]
+            _cp_engine_copy_heads_by_batch(
+                dst_base_ptr=dst_tensor.data_ptr(),
+                src_base_ptr=src_tensor.data_ptr(),
+                dst_batch_stride_bytes=dst_batch_stride_bytes,
+                src_batch_stride_bytes=src_batch_stride_bytes,
+                dst_seq_offset=src_rank * SEQ_PER_PE,
+                src_head_offset=local_rank * HEADS_PER_PE,
+                seq_per_pe=SEQ_PER_PE,
+                heads_per_pe=HEADS_PER_PE,
+                total_src_heads=total_heads,
+                head_dim=head_dim,
+                dtype_itemsize=dtype_itemsize,
+                batch_size=batch_size,
+                stream=stream,
+            )
 
 
 def custom_ipc_pre_attn_qkv_a2a(
@@ -146,35 +205,84 @@ def custom_ipc_pre_attn_qkv_a2a(
     stream,
     skip_q_a2a=False,
 ):
-    if not skip_q_a2a:
-        custom_ipc_all_to_all(
-            q_src_peers,
-            q_dst_peers,
-            local_rank,
-            local_world_size,
-            q_heads_per_pe,
-            seq_per_pe,
-            stream,
-        )
+    """
+    Fused P2P IPC-based all-to-all dimension swap matching the PyTorch golden reference.
+    Uses cudaMemcpyAsync for minimal Python overhead and maximal GPU utilization.
+    """
+    rank_orders = [(local_rank + i) % local_world_size for i in range(local_world_size)]
+    
+    # Metadata
+    batch_size = q_src_peers[local_rank].shape[0]
+    head_dim = q_src_peers[local_rank].shape[3]
+    q_total_heads = q_src_peers[local_rank].shape[2]
+    kv_total_heads = k_src_peers[local_rank].shape[2]
 
-    custom_ipc_all_to_all(
-        k_src_peers,
-        k_dst_peers,
-        local_rank,
-        local_world_size,
-        kv_heads_per_pe,
-        seq_per_pe,
-        stream,
-    )
-    custom_ipc_all_to_all(
-        v_src_peers,
-        v_dst_peers,
-        local_rank,
-        local_world_size,
-        kv_heads_per_pe,
-        seq_per_pe,
-        stream,
-    )
+    dtype_itemsize = q_src_peers[local_rank].dtype.itemsize
+    k_dtype_itemsize = k_src_peers[local_rank].dtype.itemsize
+
+    q_src_batch_stride_bytes = q_src_peers[local_rank].stride(0) * dtype_itemsize
+    q_dst_batch_stride_bytes = q_dst_peers[local_rank].stride(0) * dtype_itemsize
+    k_src_batch_stride_bytes = k_src_peers[local_rank].stride(0) * k_dtype_itemsize
+    k_dst_batch_stride_bytes = k_dst_peers[local_rank].stride(0) * k_dtype_itemsize
+    v_src_batch_stride_bytes = v_src_peers[local_rank].stride(0) * k_dtype_itemsize
+    v_dst_batch_stride_bytes = v_dst_peers[local_rank].stride(0) * k_dtype_itemsize
+    
+    with torch.cuda.stream(stream):
+        for src_rank in rank_orders:
+            if not skip_q_a2a:
+                q_src = q_src_peers[src_rank]
+                q_dst = q_dst_peers[local_rank]
+                _cp_engine_copy_heads_by_batch(
+                    dst_base_ptr=q_dst.data_ptr(),
+                    src_base_ptr=q_src.data_ptr(),
+                    dst_batch_stride_bytes=q_dst_batch_stride_bytes,
+                    src_batch_stride_bytes=q_src_batch_stride_bytes,
+                    dst_seq_offset=src_rank * seq_per_pe,
+                    src_head_offset=local_rank * q_heads_per_pe,
+                    seq_per_pe=seq_per_pe,
+                    heads_per_pe=q_heads_per_pe,
+                    total_src_heads=q_total_heads,
+                    head_dim=head_dim,
+                    dtype_itemsize=dtype_itemsize,
+                    batch_size=batch_size,
+                    stream=stream,
+                )
+
+            k_src = k_src_peers[src_rank]
+            k_dst = k_dst_peers[local_rank]
+            _cp_engine_copy_heads_by_batch(
+                dst_base_ptr=k_dst.data_ptr(),
+                src_base_ptr=k_src.data_ptr(),
+                dst_batch_stride_bytes=k_dst_batch_stride_bytes,
+                src_batch_stride_bytes=k_src_batch_stride_bytes,
+                dst_seq_offset=src_rank * seq_per_pe,
+                src_head_offset=local_rank * kv_heads_per_pe,
+                seq_per_pe=seq_per_pe,
+                heads_per_pe=kv_heads_per_pe,
+                total_src_heads=kv_total_heads,
+                head_dim=head_dim,
+                dtype_itemsize=k_dtype_itemsize,
+                batch_size=batch_size,
+                stream=stream,
+            )
+
+            v_src = v_src_peers[src_rank]
+            v_dst = v_dst_peers[local_rank]
+            _cp_engine_copy_heads_by_batch(
+                dst_base_ptr=v_dst.data_ptr(),
+                src_base_ptr=v_src.data_ptr(),
+                dst_batch_stride_bytes=v_dst_batch_stride_bytes,
+                src_batch_stride_bytes=v_src_batch_stride_bytes,
+                dst_seq_offset=src_rank * seq_per_pe,
+                src_head_offset=local_rank * kv_heads_per_pe,
+                seq_per_pe=seq_per_pe,
+                heads_per_pe=kv_heads_per_pe,
+                total_src_heads=kv_total_heads,
+                head_dim=head_dim,
+                dtype_itemsize=k_dtype_itemsize,
+                batch_size=batch_size,
+                stream=stream,
+            )
 
 
 def verify_results(custom_output, torch_output, rank, tensor_name="", tolerance=1e-3):
@@ -192,10 +300,12 @@ def verify_results(custom_output, torch_output, rank, tensor_name="", tolerance=
         print(f"   PyTorch shape:  {torch_output.shape}")
 
         # Find position with maximum difference
-        max_pos = torch.unravel_index(torch.argmax(diff), diff.shape)
-        print(f"   Max diff position: {max_pos}")
-        print(f"   TileLang value: {custom_output[max_pos]:.6f}")
-        print(f"   PyTorch value:  {torch_output[max_pos]:.6f}")
+        # max_pos = torch.unravel_index(torch.argmax(diff), diff.shape)
+        # print(f"   Max diff position: {max_pos}")
+        # print(f"   TileLang value: {custom_output[max_pos]:.6f}")
+        # print(f"   PyTorch value:  {torch_output[max_pos]:.6f}")
+        print(f"   TileLang output: {custom_output}")
+        print(f"   PyTorch output:  {torch_output}")
 
         return False
     else: 
@@ -204,7 +314,7 @@ def verify_results(custom_output, torch_output, rank, tensor_name="", tolerance=
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num-processes", type=int, default=None, help="Number of GPUs to spawn")
+    parser.add_argument("--num_processes", type=int, default=None, help="Number of GPUs to spawn")
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--seq_len", type=int, default=256)
     parser.add_argument("--num_heads", type=int, default=16)
@@ -213,6 +323,8 @@ def parse_args():
     parser.add_argument("--skip_q_a2a", default=False, action="store_true", help="skip q all-to-all")
     parser.add_argument("--dtype", default="float16")
     parser.add_argument("--debug", default=False, action="store_true", help="print debug info with sequential integer inputs")
+    parser.add_argument("--warmup", type=int, default=5, help="Number of warmup iterations for profiling")
+    parser.add_argument("--iters", type=int, default=10, help="Number of iterations for profiling")
     return parser.parse_args()
 
 
@@ -323,10 +435,19 @@ def run_all_to_all_with_golden_reference(args, WORLD_SIZE, RANK, LOCAL_RANK, TP_
             return_peers=True,
         )
 
-        # Local initialization
-        q_src_peers[LOCAL_RANK].copy_(q_input)
-        k_src_peers[LOCAL_RANK].copy_(k_input)
-        v_src_peers[LOCAL_RANK].copy_(v_input)
+        # Local initialization with cudaMemcpyAsync for efficiency
+        init_stream = torch.cuda.Stream()
+        with torch.cuda.stream(init_stream):
+            q_copy_size = q_input.numel() * q_input.dtype.itemsize
+            _cp_engine_copy_data(q_src_peers[LOCAL_RANK].data_ptr(), q_input.data_ptr(), q_copy_size, init_stream)
+            
+            k_copy_size = k_input.numel() * k_input.dtype.itemsize
+            _cp_engine_copy_data(k_src_peers[LOCAL_RANK].data_ptr(), k_input.data_ptr(), k_copy_size, init_stream)
+            
+            v_copy_size = v_input.numel() * v_input.dtype.itemsize
+            _cp_engine_copy_data(v_src_peers[LOCAL_RANK].data_ptr(), v_input.data_ptr(), v_copy_size, init_stream)
+            
+            init_stream.synchronize()
 
         q_dst_peers[LOCAL_RANK].fill_(0.0)
         k_dst_peers[LOCAL_RANK].fill_(0.0)
@@ -371,9 +492,83 @@ def run_all_to_all_with_golden_reference(args, WORLD_SIZE, RANK, LOCAL_RANK, TP_
 
         # Output unified result
         if all(results):
-            print(f"✅ PE {RANK} All Verification PASSED!")
+            if RANK == 0:
+                print(f"✅ All Verification PASSED!")
         else:
             print(f"❌ PE {RANK} Verification FAILED!")
+
+        # --- Profiling ---
+        warmup = args.warmup
+        iters = args.iters
+
+        # Profiling Torch Baseline
+        torch_times = []
+        for i in range(warmup + iters):
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            
+            torch.cuda.synchronize()
+            dist.barrier(TP_GROUP)
+            start_event.record()
+            
+            torch_pre_attn_qkv_a2a_reference(
+                TP_GROUP,
+                q_input,
+                k_input,
+                v_input,
+                skip_q_a2a=args.skip_q_a2a,
+            )
+            
+            end_event.record()
+            end_event.synchronize()
+            
+            if i >= warmup:
+                torch_times.append(start_event.elapsed_time(end_event))
+
+        # Profiling Custom IPC All-to-All
+        custom_times = []
+        profile_stream = torch.cuda.Stream()
+        for i in range(warmup + iters):
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            
+            torch.cuda.synchronize()
+            dist.barrier(LC_GROUP)
+            start_event.record(profile_stream)
+            
+            custom_ipc_pre_attn_qkv_a2a(
+                q_src_peers,
+                k_src_peers,
+                v_src_peers,
+                q_dst_peers,
+                k_dst_peers,
+                v_dst_peers,
+                LOCAL_RANK,
+                local_world_size,
+                Q_HEADS_PER_PE,
+                KV_HEADS_PER_PE,
+                SEQ_PER_PE,
+                profile_stream,
+                skip_q_a2a=args.skip_q_a2a,
+            )
+            
+            profile_stream.synchronize()
+            # Important: Add barrier to ensure all peers have finished pulling before advancing
+            dist.barrier(LC_GROUP)
+            end_event.record()
+            end_event.synchronize()
+            
+            if i >= warmup:
+                custom_times.append(start_event.elapsed_time(end_event))
+
+        if RANK == 0:
+            torch_avg = sum(torch_times) / iters
+            custom_avg = sum(custom_times) / iters
+            print(f"\n=== Profiling Results ({iters} iters) ===")
+            print(f"PyTorch All-to-All : {torch_avg:.3f} ms")
+            print(f"Custom IPC         : {custom_avg:.3f} ms")
+            print(f"Speedup            : {torch_avg / custom_avg:.2f}x\n")
+
     finally:
         if dist.is_initialized():
             dist.destroy_process_group()
