@@ -285,6 +285,82 @@ def custom_ipc_pre_attn_qkv_a2a(
             )
 
 
+def pack_local_qkv_for_fused_a2a(
+    q_input,
+    k_input,
+    v_input,
+    qkv_src_local,
+    local_world_size,
+    q_heads_per_pe,
+    kv_heads_per_pe,
+    skip_q_a2a=False,
+):
+    """
+    Pack local Q/K/V into interleaved head layout:
+    [rank0(Q,K,V), rank1(Q,K,V), ...] (or [ranki(K,V)] if skip_q_a2a).
+    This makes each receiver's payload contiguous for one-copy-per-src_rank transfer.
+    """
+    q_block = 0 if skip_q_a2a else q_heads_per_pe
+    packed_heads_per_rank = q_block + 2 * kv_heads_per_pe
+
+    qkv_src_local.fill_(0)
+    for dst_rank in range(local_world_size):
+        base = dst_rank * packed_heads_per_rank
+        cur = base
+        if not skip_q_a2a:
+            q_src = q_input[:, :, dst_rank * q_heads_per_pe : (dst_rank + 1) * q_heads_per_pe, :]
+            qkv_src_local[:, :, cur : cur + q_heads_per_pe, :].copy_(q_src)
+            cur += q_heads_per_pe
+
+        k_src = k_input[:, :, dst_rank * kv_heads_per_pe : (dst_rank + 1) * kv_heads_per_pe, :]
+        qkv_src_local[:, :, cur : cur + kv_heads_per_pe, :].copy_(k_src)
+        cur += kv_heads_per_pe
+
+        v_src = v_input[:, :, dst_rank * kv_heads_per_pe : (dst_rank + 1) * kv_heads_per_pe, :]
+        qkv_src_local[:, :, cur : cur + kv_heads_per_pe, :].copy_(v_src)
+
+
+def custom_ipc_pre_attn_qkv_a2a_packed_fused(
+    qkv_src_peers,
+    qkv_dst_peers,
+    local_rank,
+    local_world_size,
+    packed_heads_per_rank,
+    seq_per_pe,
+    stream,
+):
+    """
+    Higher-fusion IPC all-to-all:
+    each src_rank performs one 2D async copy for packed QKV payload.
+    """
+    rank_orders = [(local_rank + i) % local_world_size for i in range(local_world_size)]
+
+    batch_size, _, total_src_heads, head_dim = qkv_src_peers[local_rank].shape
+    dtype_itemsize = qkv_src_peers[local_rank].dtype.itemsize
+    src_batch_stride_bytes = qkv_src_peers[local_rank].stride(0) * dtype_itemsize
+    dst_batch_stride_bytes = qkv_dst_peers[local_rank].stride(0) * dtype_itemsize
+
+    with torch.cuda.stream(stream):
+        for src_rank in rank_orders:
+            src_tensor = qkv_src_peers[src_rank]
+            dst_tensor = qkv_dst_peers[local_rank]
+            _cp_engine_copy_heads_by_batch(
+                dst_base_ptr=dst_tensor.data_ptr(),
+                src_base_ptr=src_tensor.data_ptr(),
+                dst_batch_stride_bytes=dst_batch_stride_bytes,
+                src_batch_stride_bytes=src_batch_stride_bytes,
+                dst_seq_offset=src_rank * seq_per_pe,
+                src_head_offset=local_rank * packed_heads_per_rank,
+                seq_per_pe=seq_per_pe,
+                heads_per_pe=packed_heads_per_rank,
+                total_src_heads=total_src_heads,
+                head_dim=head_dim,
+                dtype_itemsize=dtype_itemsize,
+                batch_size=batch_size,
+                stream=stream,
+            )
+
+
 def verify_results(custom_output, torch_output, rank, tensor_name="", tolerance=1e-3):
     """Verify output against PyTorch golden reference. Returns True if passed, False if failed."""
     if not torch.allclose(custom_output, torch_output, atol=tolerance, rtol=tolerance):
@@ -314,7 +390,7 @@ def verify_results(custom_output, torch_output, rank, tensor_name="", tolerance=
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num_processes", type=int, default=None, help="Number of GPUs to spawn")
+    parser.add_argument("--num_processes", type=int, default=4, help="Number of GPUs to spawn")
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--seq_len", type=int, default=256)
     parser.add_argument("--num_heads", type=int, default=16)
@@ -396,89 +472,59 @@ def run_all_to_all_with_golden_reference(args, WORLD_SIZE, RANK, LOCAL_RANK, TP_
             rank=RANK,
         )
 
-        # Custom IPC memory allocation
-        q_src_peers = tilelang.tensor(
-            (args.batch_size, SEQ_PER_PE, args.num_heads, args.head_dim),
+        # Packed fused IPC memory allocation
+        q_block = 0 if args.skip_q_a2a else Q_HEADS_PER_PE
+        packed_heads_per_rank = q_block + 2 * KV_HEADS_PER_PE
+        packed_total_src_heads = packed_heads_per_rank * local_world_size
+
+        qkv_src_peers = tilelang.tensor(
+            (args.batch_size, SEQ_PER_PE, packed_total_src_heads, args.head_dim),
             dtype_torch,
             allocator=allocator,
-            return_peers=True
+            return_peers=True,
         )
-        k_src_peers = tilelang.tensor(
-            (args.batch_size, SEQ_PER_PE, kv_num_heads, args.head_dim),
-            dtype_torch,
-            allocator=allocator,
-            return_peers=True
-        )
-        v_src_peers = tilelang.tensor(
-            (args.batch_size, SEQ_PER_PE, kv_num_heads, args.head_dim),
+        qkv_dst_peers = tilelang.tensor(
+            (args.batch_size, args.seq_len, packed_heads_per_rank, args.head_dim),
             dtype_torch,
             allocator=allocator,
             return_peers=True,
         )
 
-        q_dst_peers = tilelang.tensor(
-            (args.batch_size, args.seq_len, Q_HEADS_PER_PE, args.head_dim),
-            dtype_torch,
-            allocator=allocator,
-            return_peers=True,
+        # Local initialization: pack once, then fused all-to-all copies packed payload
+        pack_local_qkv_for_fused_a2a(
+            q_input,
+            k_input,
+            v_input,
+            qkv_src_peers[LOCAL_RANK],
+            local_world_size,
+            Q_HEADS_PER_PE,
+            KV_HEADS_PER_PE,
+            skip_q_a2a=args.skip_q_a2a,
         )
-        k_dst_peers = tilelang.tensor(
-            (args.batch_size, args.seq_len, KV_HEADS_PER_PE, args.head_dim),
-            dtype_torch,
-            allocator=allocator,
-            return_peers=True,
-        )
-        v_dst_peers = tilelang.tensor(
-            (args.batch_size, args.seq_len, KV_HEADS_PER_PE, args.head_dim),
-            dtype_torch,
-            allocator=allocator,
-            return_peers=True,
-        )
-
-        # Local initialization with cudaMemcpyAsync for efficiency
-        init_stream = torch.cuda.Stream()
-        with torch.cuda.stream(init_stream):
-            q_copy_size = q_input.numel() * q_input.dtype.itemsize
-            _cp_engine_copy_data(q_src_peers[LOCAL_RANK].data_ptr(), q_input.data_ptr(), q_copy_size, init_stream)
-            
-            k_copy_size = k_input.numel() * k_input.dtype.itemsize
-            _cp_engine_copy_data(k_src_peers[LOCAL_RANK].data_ptr(), k_input.data_ptr(), k_copy_size, init_stream)
-            
-            v_copy_size = v_input.numel() * v_input.dtype.itemsize
-            _cp_engine_copy_data(v_src_peers[LOCAL_RANK].data_ptr(), v_input.data_ptr(), v_copy_size, init_stream)
-            
-            init_stream.synchronize()
-
-        q_dst_peers[LOCAL_RANK].fill_(0.0)
-        k_dst_peers[LOCAL_RANK].fill_(0.0)
-        v_dst_peers[LOCAL_RANK].fill_(0.0)
+        qkv_dst_peers[LOCAL_RANK].fill_(0.0)
 
         torch.cuda.synchronize()
         dist.barrier(LC_GROUP)
 
         # Run IPC data transfer
         stream = torch.cuda.Stream()
-        custom_ipc_pre_attn_qkv_a2a(
-            q_src_peers,
-            k_src_peers,
-            v_src_peers,
-            q_dst_peers,
-            k_dst_peers,
-            v_dst_peers,
+        custom_ipc_pre_attn_qkv_a2a_packed_fused(
+            qkv_src_peers,
+            qkv_dst_peers,
             LOCAL_RANK,
             local_world_size,
-            Q_HEADS_PER_PE,
-            KV_HEADS_PER_PE,
+            packed_heads_per_rank,
             SEQ_PER_PE,
             stream,
-            skip_q_a2a=args.skip_q_a2a,
         )
         stream.synchronize()
         dist.barrier(LC_GROUP)
 
-        custom_q_out = None if args.skip_q_a2a else q_dst_peers[LOCAL_RANK]
-        custom_k_out = k_dst_peers[LOCAL_RANK]
-        custom_v_out = v_dst_peers[LOCAL_RANK]
+        qkv_dst_local = qkv_dst_peers[LOCAL_RANK]
+        k_offset = q_block
+        custom_q_out = None if args.skip_q_a2a else qkv_dst_local[:, :, :Q_HEADS_PER_PE, :]
+        custom_k_out = qkv_dst_local[:, :, k_offset : k_offset + KV_HEADS_PER_PE, :]
+        custom_v_out = qkv_dst_local[:, :, k_offset + KV_HEADS_PER_PE : k_offset + 2 * KV_HEADS_PER_PE, :]
 
         if RANK == 0:
             print("Finished IPC Q/K/V all-to-all.")
@@ -536,20 +582,14 @@ def run_all_to_all_with_golden_reference(args, WORLD_SIZE, RANK, LOCAL_RANK, TP_
             dist.barrier(LC_GROUP)
             start_event.record(profile_stream)
             
-            custom_ipc_pre_attn_qkv_a2a(
-                q_src_peers,
-                k_src_peers,
-                v_src_peers,
-                q_dst_peers,
-                k_dst_peers,
-                v_dst_peers,
+            custom_ipc_pre_attn_qkv_a2a_packed_fused(
+                qkv_src_peers,
+                qkv_dst_peers,
                 LOCAL_RANK,
                 local_world_size,
-                Q_HEADS_PER_PE,
-                KV_HEADS_PER_PE,
+                packed_heads_per_rank,
                 SEQ_PER_PE,
                 profile_stream,
-                skip_q_a2a=args.skip_q_a2a,
             )
             
             profile_stream.synchronize()
