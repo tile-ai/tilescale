@@ -353,6 +353,24 @@ def custom_ipc_pre_attn_qkv_a2a_packed_fused(
             )
 
 
+def split_packed_qkv_buffer(
+    packed_qkv,
+    q_heads_per_pe,
+    kv_heads_per_pe,
+    skip_q_a2a=False,
+):
+    """
+    Return views into the packed QKV layout without materializing a reorder.
+    Layout per source rank is [Q, K, V] or [K, V] if Q is skipped.
+    """
+    q_offset = 0
+    kv_offset = q_heads_per_pe if not skip_q_a2a else 0
+    q_view = None if skip_q_a2a else packed_qkv[:, :, q_offset : q_offset + q_heads_per_pe, :]
+    k_view = packed_qkv[:, :, kv_offset : kv_offset + kv_heads_per_pe, :]
+    v_view = packed_qkv[:, :, kv_offset + kv_heads_per_pe : kv_offset + 2 * kv_heads_per_pe, :]
+    return q_view, k_view, v_view
+
+
 def verify_results(custom_output, torch_output, rank, tensor_name="", tolerance=1e-3):
     """Verify output against PyTorch golden reference. Returns True if passed, False if failed."""
     if not torch.allclose(custom_output, torch_output, atol=tolerance, rtol=tolerance):
@@ -519,10 +537,12 @@ def run_all_to_all_with_golden_reference(args, WORLD_SIZE, RANK, LOCAL_RANK, TP_
         dist.barrier(LC_GROUP)
 
         qkv_dst_local = qkv_dst_peers[LOCAL_RANK]
-        k_offset = q_block
-        custom_q_out = None if args.skip_q_a2a else qkv_dst_local[:, :, :Q_HEADS_PER_PE, :]
-        custom_k_out = qkv_dst_local[:, :, k_offset : k_offset + KV_HEADS_PER_PE, :]
-        custom_v_out = qkv_dst_local[:, :, k_offset + KV_HEADS_PER_PE : k_offset + 2 * KV_HEADS_PER_PE, :]
+        custom_q_out, custom_k_out, custom_v_out = split_packed_qkv_buffer(
+            qkv_dst_local,
+            Q_HEADS_PER_PE,
+            KV_HEADS_PER_PE,
+            skip_q_a2a=args.skip_q_a2a,
+        )
 
         if RANK == 0:
             print("Finished IPC Q/K/V all-to-all.")
