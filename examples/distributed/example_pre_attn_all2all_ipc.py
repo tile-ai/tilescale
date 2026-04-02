@@ -148,27 +148,19 @@ def _cp_engine_copy_heads_by_batch(
         CUDA_CHECK(err)
 
 
-def custom_ipc_all_to_all(
-    data_src_peers,
-    data_dst_peers,
-    local_rank,
-    local_world_size,
-    HEADS_PER_PE,
-    SEQ_PER_PE,
-    stream
-):
+def custom_ipc_all_to_all(data_src_peers, data_dst_peers, local_rank, local_world_size, HEADS_PER_PE, SEQ_PER_PE, stream):
     """
     P2P IPC-based all-to-all dimension swap matching the PyTorch golden reference.
     Executes asynchronous memory copies pulling from remote buffers to local buffer using cudaMemcpyAsync.
     """
     rank_orders = [(local_rank + i) % local_world_size for i in range(local_world_size)]
-    
+
     # Metadata
     batch_size, _, total_heads, head_dim = data_src_peers[local_rank].shape
     dtype_itemsize = data_src_peers[local_rank].dtype.itemsize
     src_batch_stride_bytes = data_src_peers[local_rank].stride(0) * dtype_itemsize
     dst_batch_stride_bytes = data_dst_peers[local_rank].stride(0) * dtype_itemsize
-    
+
     with torch.cuda.stream(stream):
         for src_rank in rank_orders:
             src_tensor = data_src_peers[src_rank]
@@ -210,7 +202,7 @@ def custom_ipc_pre_attn_qkv_a2a(
     Uses cudaMemcpyAsync for minimal Python overhead and maximal GPU utilization.
     """
     rank_orders = [(local_rank + i) % local_world_size for i in range(local_world_size)]
-    
+
     # Metadata
     batch_size = q_src_peers[local_rank].shape[0]
     head_dim = q_src_peers[local_rank].shape[3]
@@ -226,7 +218,7 @@ def custom_ipc_pre_attn_qkv_a2a(
     k_dst_batch_stride_bytes = k_dst_peers[local_rank].stride(0) * k_dtype_itemsize
     v_src_batch_stride_bytes = v_src_peers[local_rank].stride(0) * k_dtype_itemsize
     v_dst_batch_stride_bytes = v_dst_peers[local_rank].stride(0) * k_dtype_itemsize
-    
+
     with torch.cuda.stream(stream):
         for src_rank in rank_orders:
             if not skip_q_a2a:
@@ -384,7 +376,7 @@ def verify_results(custom_output, torch_output, rank, tensor_name="", tolerance=
         print(f"   PyTorch output:  {torch_output}")
 
         return False
-    else: 
+    else:
         return True
 
 
@@ -444,16 +436,22 @@ def run_all_to_all_with_golden_reference(args, WORLD_SIZE, RANK, LOCAL_RANK, TP_
             print(f"Skip q all-to-all: {args.skip_q_a2a}")
 
         dtype_torch = dtype_map[args.dtype]
-        
+
         # PyTorch reference inputs
         if args.debug:
             # Use sequential integers for easy visualization
             q_size = args.batch_size * SEQ_PER_PE * args.num_heads * args.head_dim
-            q_input = torch.arange(q_size, dtype=dtype_torch, device="cuda").reshape([args.batch_size, SEQ_PER_PE, args.num_heads, args.head_dim])
-            
+            q_input = torch.arange(q_size, dtype=dtype_torch, device="cuda").reshape(
+                [args.batch_size, SEQ_PER_PE, args.num_heads, args.head_dim]
+            )
+
             k_size = args.batch_size * SEQ_PER_PE * kv_num_heads * args.head_dim
-            k_input = torch.arange(k_size, dtype=dtype_torch, device="cuda").reshape([args.batch_size, SEQ_PER_PE, kv_num_heads, args.head_dim])
-            v_input = torch.arange(k_size, dtype=dtype_torch, device="cuda").reshape([args.batch_size, SEQ_PER_PE, kv_num_heads, args.head_dim])
+            k_input = torch.arange(k_size, dtype=dtype_torch, device="cuda").reshape(
+                [args.batch_size, SEQ_PER_PE, kv_num_heads, args.head_dim]
+            )
+            v_input = torch.arange(k_size, dtype=dtype_torch, device="cuda").reshape(
+                [args.batch_size, SEQ_PER_PE, kv_num_heads, args.head_dim]
+            )
         else:
             q_input = torch.rand([args.batch_size, SEQ_PER_PE, args.num_heads, args.head_dim], dtype=dtype_torch, device="cuda")
             k_input = torch.rand([args.batch_size, SEQ_PER_PE, kv_num_heads, args.head_dim], dtype=dtype_torch, device="cuda")
@@ -539,7 +537,7 @@ def run_all_to_all_with_golden_reference(args, WORLD_SIZE, RANK, LOCAL_RANK, TP_
         # Output unified result
         if all(results):
             if RANK == 0:
-                print(f"✅ All Verification PASSED!")
+                print("✅ All Verification PASSED!")
         else:
             print(f"❌ PE {RANK} Verification FAILED!")
 
@@ -552,11 +550,11 @@ def run_all_to_all_with_golden_reference(args, WORLD_SIZE, RANK, LOCAL_RANK, TP_
         for i in range(warmup + iters):
             start_event = torch.cuda.Event(enable_timing=True)
             end_event = torch.cuda.Event(enable_timing=True)
-            
+
             torch.cuda.synchronize()
             dist.barrier(TP_GROUP)
             start_event.record()
-            
+
             torch_pre_attn_qkv_a2a_reference(
                 TP_GROUP,
                 q_input,
@@ -564,10 +562,10 @@ def run_all_to_all_with_golden_reference(args, WORLD_SIZE, RANK, LOCAL_RANK, TP_
                 v_input,
                 skip_q_a2a=args.skip_q_a2a,
             )
-            
+
             end_event.record()
             end_event.synchronize()
-            
+
             if i >= warmup:
                 torch_times.append(start_event.elapsed_time(end_event))
 
@@ -577,11 +575,11 @@ def run_all_to_all_with_golden_reference(args, WORLD_SIZE, RANK, LOCAL_RANK, TP_
         for i in range(warmup + iters):
             start_event = torch.cuda.Event(enable_timing=True)
             end_event = torch.cuda.Event(enable_timing=True)
-            
+
             torch.cuda.synchronize()
             dist.barrier(LC_GROUP)
             start_event.record(profile_stream)
-            
+
             custom_ipc_pre_attn_qkv_a2a_packed_fused(
                 qkv_src_peers,
                 qkv_dst_peers,
@@ -591,13 +589,13 @@ def run_all_to_all_with_golden_reference(args, WORLD_SIZE, RANK, LOCAL_RANK, TP_
                 SEQ_PER_PE,
                 profile_stream,
             )
-            
+
             profile_stream.synchronize()
             # Important: Add barrier to ensure all peers have finished pulling before advancing
             dist.barrier(LC_GROUP)
             end_event.record()
             end_event.synchronize()
-            
+
             if i >= warmup:
                 custom_times.append(start_event.elapsed_time(end_event))
 
