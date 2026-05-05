@@ -40,16 +40,9 @@ static size_t align_to_granularity(size_t size_raw, size_t granularity) {
   return size;
 }
 
-static void ensure_cuda_context() {
-  // Force CUDA runtime to create a context on the current device
-  cudaFree(0);
-}
-
 // ---------- VMM malloc/free ----------
 
 void *vmm_malloc(size_t size_raw) {
-  ensure_cuda_context();
-
   CUdevice device;
   CU_CHECK(cuCtxGetDevice(&device));
 
@@ -81,7 +74,7 @@ void vmm_free(void *ptr) {
   CU_CHECK(cuMemRetainAllocationHandle(&handle, ptr));
 
   size_t size = 0;
-  CU_CHECK(cuMemGetAddressRange(NULL, &size, (CUdeviceptr)ptr));
+  CU_CHECK(cuMemGetAddressRange_v2(NULL, &size, (CUdeviceptr)ptr));
 
   CU_CHECK(cuMemUnmap((CUdeviceptr)ptr, size));
   CU_CHECK(cuMemAddressFree((CUdeviceptr)ptr, size));
@@ -95,13 +88,13 @@ py::bytearray create_vmm_handle(void *ptr) {
   CU_CHECK(cuMemRetainAllocationHandle(&handle, ptr));
 
   size_t size = 0;
-  CU_CHECK(cuMemGetAddressRange(NULL, &size, (CUdeviceptr)ptr));
+  CU_CHECK(cuMemGetAddressRange_v2(NULL, &size, (CUdeviceptr)ptr));
 
   CUmemFabricHandle fabric_handle;
   CU_CHECK(cuMemExportToShareableHandle(&fabric_handle, handle,
                                          CU_MEM_HANDLE_TYPE_FABRIC, 0));
 
-  // Serialize: 8 bytes size + sizeof(CUmemFabricHandle) bytes handle
+  // Serialize: 8 bytes size + sizeof(CUmemFabricHandle)
   std::string buf(sizeof(size_t) + sizeof(CUmemFabricHandle), '\0');
   std::memcpy(&buf[0], &size, sizeof(size_t));
   std::memcpy(&buf[sizeof(size_t)], &fabric_handle, sizeof(CUmemFabricHandle));
@@ -109,8 +102,6 @@ py::bytearray create_vmm_handle(void *ptr) {
 }
 
 void *open_vmm_handle(const py::bytearray &handle_bytes) {
-  ensure_cuda_context();
-
   std::string s = (std::string)handle_bytes;
   TS_HOST_ASSERT(s.size() == sizeof(size_t) + sizeof(CUmemFabricHandle));
 

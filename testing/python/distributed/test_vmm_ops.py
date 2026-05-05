@@ -84,23 +84,35 @@ def test_vmm_handle_export_import():
 
 
 def test_distributed_vmm(rank, world_size):
-    """Multi-GPU integration test: VMM alloc + P2P read."""
-    from tilelang.distributed.utils import create_dist_tensor, create_tensor
+    """Multi-GPU integration test: VMM alloc + P2P read via BaseAllocator."""
+    from tilelang.utils.allocator import BaseAllocator
 
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     torch.cuda.set_device(local_rank)
 
     group = dist.new_group(list(range(world_size)))
 
-    # Allocate a tensor with cudaMalloc (needed for VMM handle export)
-    data = create_tensor([1024], torch.float32)
-    data.fill_(float(rank + 1))
+    # Use BaseAllocator with use_vmm=True — it allocates via vmm_malloc
+    # and handles the VMM handle exchange internally
+    allocator = BaseAllocator(
+        size=1024 * 1024,  # 1 MB
+        device=f"cuda",
+        is_distributed=True,
+        local_rank=local_rank,
+        num_local_ranks=world_size,
+        group=group,
+        use_vmm=True,
+    )
 
-    # Create dist tensor with VMM
-    buffer_ptrs = create_dist_tensor(local_rank, world_size, data, rank, group, use_vmm=True)
+    assert allocator.initialized()
+    assert allocator._buffer_ptrs is not None
+    assert allocator._buffer_ptrs.shape[0] == world_size
+    assert allocator._buffer_ptrs[local_rank].item() != 0
 
-    assert buffer_ptrs.shape[0] == world_size
-    assert buffer_ptrs[local_rank].item() != 0
+    # Allocate a tensor from the VMM buffer and verify P2P access
+    t = allocator._allocate_tensor((256,), torch.float32)
+    t.fill_(float(rank + 1))
+    torch.cuda.synchronize()
 
     dist.barrier()
 
@@ -124,7 +136,10 @@ def test_distributed_ipc_fallback(rank, world_size):
     buffer_ptrs = create_dist_tensor(local_rank, world_size, data, rank, group, use_vmm=False)
 
     assert buffer_ptrs.shape[0] == world_size
-    assert buffer_ptrs[local_rank].item() != 0
+    # Note: IPC path doesn't set local rank's pointer (no self-open needed)
+    # Check that at least one remote rank's pointer is non-zero
+    remote_rank = (local_rank + 1) % world_size
+    assert buffer_ptrs[remote_rank].item() != 0, f"Remote rank {remote_rank} pointer is zero"
 
     dist.barrier()
 
