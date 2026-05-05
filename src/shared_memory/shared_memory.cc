@@ -2,9 +2,8 @@
  * \file shared_memory/shared_memory.cc
  * \brief VMM/IPC/multicast shared memory ops registered via TVM FFI.
  *
- * Replaces the old pybind11 tilescale_ext_C module. All functions are
- * registered under the "tl.shared_memory.*" namespace and accessed from
- * Python via tvm_ffi.get_global_func().
+ * All functions are registered under the "tl.shared_memory.*" namespace
+ * and accessed from Python via tvm_ffi.get_global_func().
  */
 
 #include <cuda.h>

@@ -136,6 +136,119 @@ template <> struct RedV4<ReduceOp::MAX, float> {
   }
 };
 
+// === V2 variants (64-bit = 2×f32, implemented as 2 scalar ops) ===
+
+template <ReduceOp op, typename DType> struct LdReduceV2 {
+  TL_DEVICE static void run(void *, const void *) {
+    static_assert(always_false_v<DType>,
+                  "tl::multimem::LdReduceV2: unsupported dtype/op");
+  }
+};
+
+template <> struct LdReduceV2<ReduceOp::ADD, float> {
+  TL_DEVICE static void run(void *dst, const void *mcast_ptr) {
+    int2 ret;
+    asm volatile(
+        "multimem.ld_reduce.relaxed.sys.global.add.v2.f32 {%0, %1}, [%2];"
+        : "=r"(ret.x), "=r"(ret.y)
+        : "l"(mcast_ptr)
+        : "memory");
+    *reinterpret_cast<int2 *>(dst) = ret;
+  }
+};
+
+template <> struct LdReduceV2<ReduceOp::MIN, float> {
+  TL_DEVICE static void run(void *dst, const void *mcast_ptr) {
+    int2 ret;
+    asm volatile(
+        "multimem.ld_reduce.relaxed.sys.global.min.v2.f32 {%0, %1}, [%2];"
+        : "=r"(ret.x), "=r"(ret.y)
+        : "l"(mcast_ptr)
+        : "memory");
+    *reinterpret_cast<int2 *>(dst) = ret;
+  }
+};
+
+template <> struct LdReduceV2<ReduceOp::MAX, float> {
+  TL_DEVICE static void run(void *dst, const void *mcast_ptr) {
+    int2 ret;
+    asm volatile(
+        "multimem.ld_reduce.relaxed.sys.global.max.v2.f32 {%0, %1}, [%2];"
+        : "=r"(ret.x), "=r"(ret.y)
+        : "l"(mcast_ptr)
+        : "memory");
+    *reinterpret_cast<int2 *>(dst) = ret;
+  }
+};
+
+template <typename DType> struct StV2 {
+  TL_DEVICE static void run(void *, const void *) {
+    static_assert(always_false_v<DType>, "tl::multimem::StV2: unsupported dtype");
+  }
+};
+
+template <> struct StV2<float> {
+  TL_DEVICE static void run(void *mcast_ptr, const void *src) {
+    int2 val = *reinterpret_cast<const int2 *>(src);
+    asm volatile("multimem.st.relaxed.sys.global.v2.b32 [%0], {%1, %2};"
+                 :
+                 : "l"(mcast_ptr), "r"(val.x), "r"(val.y)
+                 : "memory");
+  }
+};
+
+template <ReduceOp op, typename DType> struct RedV2 {
+  TL_DEVICE static void run(void *, const void *) {
+    static_assert(always_false_v<DType>,
+                  "tl::multimem::RedV2: unsupported dtype/op");
+  }
+};
+
+template <> struct RedV2<ReduceOp::ADD, float> {
+  TL_DEVICE static void run(void *mcast_ptr, const void *src) {
+    const float *src_f = reinterpret_cast<const float *>(src);
+    const char *mc = reinterpret_cast<const char *>(mcast_ptr);
+    #pragma unroll
+    for (int i = 0; i < 2; i++) {
+      unsigned val = __float_as_uint(src_f[i]);
+      asm volatile("multimem.red.relaxed.sys.global.add.f32 [%0], %1;"
+                   :
+                   : "l"(mc + i * 4), "r"(val)
+                   : "memory");
+    }
+  }
+};
+
+template <> struct RedV2<ReduceOp::MIN, float> {
+  TL_DEVICE static void run(void *mcast_ptr, const void *src) {
+    const float *src_f = reinterpret_cast<const float *>(src);
+    const char *mc = reinterpret_cast<const char *>(mcast_ptr);
+    #pragma unroll
+    for (int i = 0; i < 2; i++) {
+      unsigned val = __float_as_uint(src_f[i]);
+      asm volatile("multimem.red.relaxed.sys.global.min.f32 [%0], %1;"
+                   :
+                   : "l"(mc + i * 4), "r"(val)
+                   : "memory");
+    }
+  }
+};
+
+template <> struct RedV2<ReduceOp::MAX, float> {
+  TL_DEVICE static void run(void *mcast_ptr, const void *src) {
+    const float *src_f = reinterpret_cast<const float *>(src);
+    const char *mc = reinterpret_cast<const char *>(mcast_ptr);
+    #pragma unroll
+    for (int i = 0; i < 2; i++) {
+      unsigned val = __float_as_uint(src_f[i]);
+      asm volatile("multimem.red.relaxed.sys.global.max.f32 [%0], %1;"
+                   :
+                   : "l"(mc + i * 4), "r"(val)
+                   : "memory");
+    }
+  }
+};
+
 } // namespace multimem
 } // namespace tl
 
