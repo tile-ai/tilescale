@@ -19,7 +19,7 @@
 #include <vector>
 
 #include "exception.h"
-#include "ts_ext_ops.h"
+#include "ops.h"
 
 namespace py = pybind11;
 

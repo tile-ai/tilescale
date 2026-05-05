@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "exception.h"
-#include "ts_ext_ops.h"
+#include "ops.h"
 
 static int64_t safe_mul_int64(int64_t a, int64_t b) {
   if (a == 0 || b == 0)

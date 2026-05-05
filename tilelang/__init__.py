@@ -148,12 +148,12 @@ from .utils import (
     deprecated,  # noqa: F401
 )
 
-# TileScale distributed extensions (optional - only available when tilescale_ext is installed)
+# TileScale distributed extensions (optional - requires shared_memory C extension)
 try:
     from .utils.tensor import tensor  # noqa: F401
     from .utils.allocator import get_allocator  # noqa: F401
 except ImportError:
-    # tilescale_ext not installed - distributed features unavailable
+    # shared_memory C extension not built - distributed features unavailable
     tensor = None
     get_allocator = None
 

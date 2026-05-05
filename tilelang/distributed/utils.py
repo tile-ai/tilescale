@@ -21,7 +21,7 @@ else:
     from cuda import cuda, cudart
 
 import ctypes
-from tilescale_ext import (
+from tilelang.distributed.shared_memory import (
     _create_tensor,
     _create_ipc_handle,
     _sync_ipc_handles,

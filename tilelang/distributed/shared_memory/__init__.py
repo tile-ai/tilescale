@@ -1,4 +1,6 @@
-from tilescale_ext._C import (
+"""Shared memory allocator for distributed communication (IPC + VMM/fabric)."""
+
+from tilelang.distributed.shared_memory._C import (  # type: ignore[import]
     tensor_from_ptr,
     _create_tensor,
     _create_ipc_handle,

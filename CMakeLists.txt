@@ -352,11 +352,12 @@ if(USE_CUDA)
   if(Torch_FOUND)
     message(STATUS "Building tilescale_ext with Torch ${Torch_VERSION}")
 
+    set(SHARED_MEMORY_CSRC ${CMAKE_CURRENT_SOURCE_DIR}/tilelang/distributed/shared_memory/csrc)
     set(TILESCALE_EXT_SOURCES
-      ${CMAKE_CURRENT_SOURCE_DIR}/tilelang/utils/ts_ext/ts_ext_bindings.cpp
-      ${CMAKE_CURRENT_SOURCE_DIR}/tilelang/utils/ts_ext/tensor.cpp
-      ${CMAKE_CURRENT_SOURCE_DIR}/tilelang/utils/ts_ext/ipc_ops.cpp
-      ${CMAKE_CURRENT_SOURCE_DIR}/tilelang/utils/ts_ext/vmm_ops.cpp
+      ${SHARED_MEMORY_CSRC}/bindings.cpp
+      ${SHARED_MEMORY_CSRC}/tensor.cpp
+      ${SHARED_MEMORY_CSRC}/ipc_ops.cpp
+      ${SHARED_MEMORY_CSRC}/vmm_ops.cpp
     )
 
     # Find libtorch_python.so
@@ -372,7 +373,7 @@ if(USE_CUDA)
     target_include_directories(tilescale_ext_C PRIVATE
       ${TORCH_INCLUDE_DIRS}
       ${CUDAToolkit_INCLUDE_DIRS}
-      ${CMAKE_CURRENT_SOURCE_DIR}/tilelang/utils/ts_ext
+      ${SHARED_MEMORY_CSRC}
     )
 
     if(TORCH_PYTHON_RESULT EQUAL 0 AND EXISTS "${TORCH_PYTHON_LIBRARY}")
@@ -390,10 +391,10 @@ if(USE_CUDA)
       LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
     )
 
-    # Install as tilescale_ext/_C.so so it can be imported as tilescale_ext._C
+    # Install as tilelang/distributed/shared_memory/_C.so
     install(TARGETS tilescale_ext_C
-            LIBRARY DESTINATION tilescale_ext
-            RUNTIME DESTINATION tilescale_ext)
+            LIBRARY DESTINATION tilelang/distributed/shared_memory
+            RUNTIME DESTINATION tilelang/distributed/shared_memory)
   else()
     message(WARNING "Torch not found, tilescale_ext will not be built")
   endif()

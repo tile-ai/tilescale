@@ -100,9 +100,8 @@ include = [
     # Composable Kernel
     "3rdparty/composable_kernel/include",
     "3rdparty/composable_kernel/library",
-    # tilescale_ext C++ extension
-    "tilelang/utils/ts_ext/**",
-    "tilescale_ext/**",
+    # Shared memory C++ extension
+    "tilelang/distributed/shared_memory/**",
     "testing/**",
     "examples/**",
 ]
@@ -117,7 +116,6 @@ exclude = [
 
 [tool.scikit-build.wheel.packages]
 tilelang = "tilelang"
-tilescale_ext = "tilescale_ext"
 "tilelang/src" = "src"
 # NOTE: The mapping below places the contents of '3rdparty' inside 'tilelang/3rdparty' in the wheel.
 # This is necessary to find TVM shared libraries at runtime.

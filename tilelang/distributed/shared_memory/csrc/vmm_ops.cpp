@@ -12,7 +12,7 @@
 #include <vector>
 
 #include "exception.h"
-#include "ts_ext_ops.h"
+#include "ops.h"
 
 namespace py = pybind11;
 
@@ -136,13 +136,11 @@ bool supports_vmm_fabric() {
   if (err != cudaSuccess || device_count == 0)
     return false;
 
-  // Check driver version >= 12.4 (CUDA 12040)
   int driver_version = 0;
   CUresult cu_err = cuDriverGetVersion(&driver_version);
   if (cu_err != CUDA_SUCCESS || driver_version < 12040)
     return false;
 
-  // Check all devices support fabric handles
   for (int i = 0; i < device_count; ++i) {
     CUdevice dev;
     CU_CHECK(cuDeviceGet(&dev, i));

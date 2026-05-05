@@ -1,4 +1,4 @@
-#include "ts_ext_ops.h"
+#include "ops.h"
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <torch/extension.h>
@@ -6,14 +6,13 @@
 namespace py = pybind11;
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.doc() = "TileScale unified CUDA/IPCs extension";
+  m.doc() = "TileScale shared memory allocator (IPC + VMM)";
 
-  // alloc_cuda API
+  // Tensor utilities
   m.def("tensor_from_ptr", &tensor_from_ptr, py::arg("ptr"), py::arg("shape"),
         py::arg("dtype") = std::string("float32"), py::arg("device") = 0,
         py::arg("take_ownership") = false);
 
-  // ipc_ext API
   m.def(
       "_create_tensor",
       [](const std::vector<int64_t> &shape, const py::object &dtype) {
@@ -25,11 +24,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("create_host_device_tensor", &create_host_device_tensor,
         "Create host/device shared pinned-mapped tensor (shape + dtype)");
 
+  // IPC API
   m.def(
       "_create_ipc_handle",
       [](uintptr_t ptr_value) {
-        void *ptr = reinterpret_cast<void *>(ptr_value);
-        return create_ipc_handle(ptr);
+        return create_ipc_handle(reinterpret_cast<void *>(ptr_value));
       },
       py::arg("ptr_value"));
 
@@ -39,9 +38,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
          uintptr_t buffer_ptrs_gpu_addr,
          const std::vector<std::optional<py::bytearray>> &all_gathered_handles,
          const std::optional<py::bytearray> &root_unique_id_opt) {
-        void **buffer_ptrs_gpu =
-            reinterpret_cast<void **>(buffer_ptrs_gpu_addr);
-        sync_ipc_handles(rank, device_ids, buffer_ptrs_gpu,
+        sync_ipc_handles(rank, device_ids,
+                         reinterpret_cast<void **>(buffer_ptrs_gpu_addr),
                          all_gathered_handles, root_unique_id_opt);
       },
       py::arg("rank"), py::arg("device_ids"), py::arg("buffer_ptrs_gpu_addr"),
@@ -68,8 +66,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def(
       "_create_vmm_handle",
       [](uintptr_t ptr_value) {
-        void *ptr = reinterpret_cast<void *>(ptr_value);
-        return create_vmm_handle(ptr);
+        return create_vmm_handle(reinterpret_cast<void *>(ptr_value));
       },
       py::arg("ptr_value"));
 
@@ -92,9 +89,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       [](int rank, const std::vector<int> &device_ids,
          uintptr_t buffer_ptrs_gpu_addr,
          const std::vector<std::optional<py::bytearray>> &all_gathered_handles) {
-        void **buffer_ptrs_gpu =
-            reinterpret_cast<void **>(buffer_ptrs_gpu_addr);
-        sync_vmm_handles(rank, device_ids, buffer_ptrs_gpu,
+        sync_vmm_handles(rank, device_ids,
+                         reinterpret_cast<void **>(buffer_ptrs_gpu_addr),
                          all_gathered_handles);
       },
       py::arg("rank"), py::arg("device_ids"), py::arg("buffer_ptrs_gpu_addr"),

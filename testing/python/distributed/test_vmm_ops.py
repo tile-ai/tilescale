@@ -19,16 +19,16 @@ import torch.distributed as dist
 
 def test_supports_fabric():
     """Test fabric support detection."""
-    from tilescale_ext import _supports_vmm_fabric
+    from tilelang.distributed.shared_memory import _supports_vmm_fabric
 
     result = _supports_vmm_fabric()
-    print(f"[PASS] _supports_vmm_fabric() = {result}")
+    print(f"\033[32m[PASS]\033[0m _supports_vmm_fabric() = {result}")
     return result
 
 
 def test_vmm_malloc_free():
     """Test VMM malloc and free roundtrip."""
-    from tilescale_ext import _vmm_malloc, _vmm_free
+    from tilelang.distributed.shared_memory import _vmm_malloc, _vmm_free
 
     size = 1024 * 1024  # 1 MB
     ptr = _vmm_malloc(size)
@@ -43,12 +43,12 @@ def test_vmm_malloc_free():
     assert rc == 0, f"cudaMemset on VMM pointer failed: {rc}"
 
     _vmm_free(ptr)
-    print("[PASS] test_vmm_malloc_free")
+    print("\033[32m[PASS]\033[0m test_vmm_malloc_free")
 
 
 def test_vmm_handle_export_import():
     """Test handle export and import on a single GPU."""
-    from tilescale_ext import _vmm_malloc, _vmm_free, _create_vmm_handle, _open_vmm_handle, _close_vmm_handle
+    from tilelang.distributed.shared_memory import _vmm_malloc, _vmm_free, _create_vmm_handle, _open_vmm_handle, _close_vmm_handle
 
     size = 4096
     ptr = _vmm_malloc(size)
@@ -80,7 +80,7 @@ def test_vmm_handle_export_import():
 
     _close_vmm_handle(ptr2)
     _vmm_free(ptr)
-    print("[PASS] test_vmm_handle_export_import")
+    print("\033[32m[PASS]\033[0m test_vmm_handle_export_import")
 
 
 def test_distributed_vmm(rank, world_size):
@@ -117,7 +117,7 @@ def test_distributed_vmm(rank, world_size):
     dist.barrier()
 
     if rank == 0:
-        print(f"[PASS] test_distributed_vmm (world_size={world_size})")
+        print(f"\033[32m[PASS]\033[0m test_distributed_vmm (world_size={world_size})")
 
 
 def test_distributed_ipc_fallback(rank, world_size):
@@ -144,7 +144,7 @@ def test_distributed_ipc_fallback(rank, world_size):
     dist.barrier()
 
     if rank == 0:
-        print(f"[PASS] test_distributed_ipc_fallback (world_size={world_size})")
+        print(f"\033[32m[PASS]\033[0m test_distributed_ipc_fallback (world_size={world_size})")
 
 
 def main():

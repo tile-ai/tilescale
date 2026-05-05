@@ -5,7 +5,7 @@ import ctypes.util
 import os
 import torch
 import torch.distributed as dist
-from tilescale_ext import (
+from tilelang.distributed.shared_memory import (
     tensor_from_ptr,
     _create_ipc_handle,
     _sync_ipc_handles,
