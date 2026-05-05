@@ -11,7 +11,6 @@ Usage:
 
 import argparse
 import os
-import sys
 
 import torch
 import torch.distributed as dist
@@ -96,7 +95,7 @@ def test_distributed_vmm(rank, world_size):
     # and handles the VMM handle exchange internally
     allocator = BaseAllocator(
         size=1024 * 1024,  # 1 MB
-        device=f"cuda",
+        device="cuda",
         is_distributed=True,
         local_rank=local_rank,
         num_local_ranks=world_size,

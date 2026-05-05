@@ -3,7 +3,8 @@
  * \brief Unified multimem operator implementation.
  *
  * Reuses CopyNode's ParallelOp + InferLayout + VectorizeLoop pipeline,
- * then post-processes to replace mcast buffer accesses with multimem instructions.
+ * then post-processes to replace mcast buffer accesses with multimem
+ * instructions.
  */
 
 #include "multimem.h"
@@ -28,11 +29,11 @@ namespace tl {
 using namespace tir;
 
 // === MultimemOp Constructor ===
-// args[0]: src region (tl.region call), args[1]: dst region, args[2]: mode, args[3]: reduce_op
+// args[0]: src region (tl.region call), args[1]: dst region, args[2]: mode,
+// args[3]: reduce_op
 MultimemOp::MultimemOp(Array<PrimExpr> args,
                        Map<String, ObjectRef> annotations) {
-  ObjectPtr<MultimemOpNode> node =
-      tvm::ffi::make_object<MultimemOpNode>();
+  ObjectPtr<MultimemOpNode> node = tvm::ffi::make_object<MultimemOpNode>();
 
   // Parse buffer regions using same utility as CopyNode
   Array<Range> rgs[2];
@@ -90,7 +91,7 @@ MultimemOp::MultimemOp(Array<PrimExpr> args,
 // 128-bit per multimem instruction => width = 128 / dtype_bits
 int MultimemOpNode::GetCoalescedWidth() const {
   int bits = src->dtype.bits();
-  return 128 / bits;  // f32->4, f16->8, bf16->8
+  return 128 / bits; // f32->4, f16->8, bf16->8
 }
 
 // === MakeIterVars ===
@@ -212,7 +213,8 @@ For MultimemOpNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
 }
 
 // === InferLayout ===
-// Delegates to ParallelOp for layout inference (same as CopyNode::LowerNormalCopy)
+// Delegates to ParallelOp for layout inference (same as
+// CopyNode::LowerNormalCopy)
 LayoutMap MultimemOpNode::InferLayout(const LayoutInferArgs &T,
                                       InferLevel level) const {
   // Multimem ops always go through the ParallelOp path during Lower.
@@ -221,7 +223,8 @@ LayoutMap MultimemOpNode::InferLayout(const LayoutInferArgs &T,
 }
 
 // === Lower ===
-// The main lowering path: MakeSIMTLoop -> ParallelOp pipeline -> MultimemRewriter
+// The main lowering path: MakeSIMTLoop -> ParallelOp pipeline ->
+// MultimemRewriter
 Stmt MultimemOpNode::Lower(const LowerArgs &T,
                            arith::Analyzer *analyzer) const {
   // Step 1-2: Create SIMT loop and fuse/transform
@@ -236,8 +239,13 @@ Stmt MultimemOpNode::Lower(const LowerArgs &T,
   std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
                                     InferLevel::kFree};
   for (auto level : levels) {
-    par_op->InferLayout({T.target, T.thread_bounds, T.layout_map, analyzer,
-                         false, T.buffer_remap, {}},
+    par_op->InferLayout({T.target,
+                         T.thread_bounds,
+                         T.layout_map,
+                         analyzer,
+                         false,
+                         T.buffer_remap,
+                         {}},
                         level);
   }
 
@@ -246,7 +254,8 @@ Stmt MultimemOpNode::Lower(const LowerArgs &T,
   Stmt result = LowerParallelLoop(par_op->GetRoot(), loop_layout, T.thread_var,
                                   analyzer, par_op->GetPredicate(T.thread_var));
 
-  // Step 5: Post-process — replace mcast buffer accesses with multimem call_extern
+  // Step 5: Post-process — replace mcast buffer accesses with multimem
+  // call_extern
   Buffer mcast_buf = (mode == MultimemMode::kLdReduce) ? src : dst;
   // Remap the mcast buffer if needed
   if (T.buffer_remap.count(mcast_buf)) {

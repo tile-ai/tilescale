@@ -39,11 +39,11 @@ def multimem_allreduce_kernel(N, block_N, threads):
         with T.Kernel(T.ceildiv(N, block_N), threads=threads) as (bx,):
             result_local = T.alloc_fragment([block_N], "float32")
             T.multimem_ld_reduce(
-                mcast_buf[bx * block_N:(bx + 1) * block_N],
+                mcast_buf[bx * block_N : (bx + 1) * block_N],
                 result_local,
                 reduce_op=T.MultimemReduceOp.ADD,
             )
-            T.copy(result_local, result[bx * block_N:(bx + 1) * block_N])
+            T.copy(result_local, result[bx * block_N : (bx + 1) * block_N])
 
     return main
 
@@ -120,6 +120,4 @@ if __name__ == "__main__":
     parser.add_argument("--print_source", action="store_true")
     args = parser.parse_args()
 
-    torch.multiprocessing.spawn(
-        main, args=(args.num_processes, args), nprocs=args.num_processes, join=True
-    )
+    torch.multiprocessing.spawn(main, args=(args.num_processes, args), nprocs=args.num_processes, join=True)

@@ -25,9 +25,6 @@ from tilelang.distributed.shared_memory import (
     _create_tensor,
     _create_ipc_handle,
     _sync_ipc_handles,
-    _supports_vmm_fabric,
-    _vmm_malloc,
-    _vmm_free,
     _create_vmm_handle,
     _sync_vmm_handles,
     create_host_device_tensor,
@@ -122,6 +119,7 @@ def get_local_ipc_handle(data: torch.Tensor):
 def _resolve_use_vmm(use_vmm: bool | None) -> bool:
     """Resolve whether to use VMM based on env var and hardware support."""
     import os
+
     env_val = os.environ.get("TILESCALE_USE_VMM", None)
     if env_val is not None:
         return env_val == "1"

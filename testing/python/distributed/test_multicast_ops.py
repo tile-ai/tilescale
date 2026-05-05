@@ -58,8 +58,7 @@ def test_distributed_multicast_allocator(rank, world_size):
     peer_t = allocator.get_peer_tensor(peer_rank, (256,), torch.bfloat16)
     peer_val = peer_t[0].item()
     expected_val = float(peer_rank + 1)
-    assert abs(peer_val - expected_val) < 1e-2, \
-        f"rank {local_rank}: peer[{peer_rank}] = {peer_val}, expected {expected_val}"
+    assert abs(peer_val - expected_val) < 1e-2, f"rank {local_rank}: peer[{peer_rank}] = {peer_val}, expected {expected_val}"
 
     dist.barrier()
 
@@ -69,9 +68,7 @@ def test_distributed_multicast_allocator(rank, world_size):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--distributed", action="store_true", help="Run multi-GPU tests (requires torchrun)"
-    )
+    parser.add_argument("--distributed", action="store_true", help="Run multi-GPU tests (requires torchrun)")
     args = parser.parse_args()
 
     if args.distributed:

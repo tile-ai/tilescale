@@ -1,7 +1,7 @@
 /*!
  * \file tl/op/multimem_rewriter.h
- * \brief Post-process IR to replace vectorized BufferLoad/Store on mcast buffers
- *        with multimem call_extern instructions.
+ * \brief Post-process IR to replace vectorized BufferLoad/Store on mcast
+ * buffers with multimem call_extern instructions.
  */
 
 #ifndef TVM_TL_OP_MULTIMEM_REWRITER_H_
@@ -112,8 +112,9 @@ private:
   int reduce_op_;
 
   /*!
-   * \brief Try to rewrite a kVectorized for-loop containing a mcast BufferStore.
-   * Returns the replacement Stmt, or undefined if the pattern doesn't match.
+   * \brief Try to rewrite a kVectorized for-loop containing a mcast
+   * BufferStore. Returns the replacement Stmt, or undefined if the pattern
+   * doesn't match.
    */
   Stmt TryRewriteVectorizedLoop(const ForNode *op, int lanes) {
     // The body should be a single BufferStore (possibly wrapped in IfThenElse)
@@ -197,8 +198,8 @@ private:
    */
   Stmt MakeMultimemCall(const Buffer &local_buf,
                         const Array<PrimExpr> &local_indices,
-                        const Buffer &mc_buf,
-                        const Array<PrimExpr> &mc_indices, int lanes) const {
+                        const Buffer &mc_buf, const Array<PrimExpr> &mc_indices,
+                        int lanes) const {
     std::string func_name = MakeFuncName(lanes, local_buf->dtype);
 
     Array<PrimExpr> args;

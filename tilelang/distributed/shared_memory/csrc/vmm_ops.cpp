@@ -29,8 +29,8 @@ static void cu_mem_set_access_all(void *ptr, size_t size) {
     access_desc[idx].flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
   }
 
-  CU_CHECK(cuMemSetAccess((CUdeviceptr)ptr, size, access_desc.data(),
-                           device_count));
+  CU_CHECK(
+      cuMemSetAccess((CUdeviceptr)ptr, size, access_desc.data(), device_count));
 }
 
 static size_t align_to_granularity(size_t size_raw, size_t granularity) {
@@ -54,7 +54,7 @@ void *vmm_malloc(size_t size_raw) {
 
   size_t granularity = 0;
   CU_CHECK(cuMemGetAllocationGranularity(&granularity, &prop,
-                                          CU_MEM_ALLOC_GRANULARITY_MINIMUM));
+                                         CU_MEM_ALLOC_GRANULARITY_MINIMUM));
 
   size_t size = align_to_granularity(size_raw, granularity);
 
@@ -92,7 +92,7 @@ py::bytearray create_vmm_handle(void *ptr) {
 
   CUmemFabricHandle fabric_handle;
   CU_CHECK(cuMemExportToShareableHandle(&fabric_handle, handle,
-                                         CU_MEM_HANDLE_TYPE_FABRIC, 0));
+                                        CU_MEM_HANDLE_TYPE_FABRIC, 0));
 
   // Serialize: 8 bytes size + sizeof(CUmemFabricHandle)
   std::string buf(sizeof(size_t) + sizeof(CUmemFabricHandle), '\0');
@@ -114,7 +114,7 @@ void *open_vmm_handle(const py::bytearray &handle_bytes) {
 
   CUmemGenericAllocationHandle alloc_handle;
   CU_CHECK(cuMemImportFromShareableHandle(&alloc_handle, &fabric_handle,
-                                           CU_MEM_HANDLE_TYPE_FABRIC));
+                                          CU_MEM_HANDLE_TYPE_FABRIC));
 
   void *ptr = nullptr;
   CU_CHECK(cuMemAddressReserve((CUdeviceptr *)&ptr, size, 0, 0, 0));
@@ -124,9 +124,7 @@ void *open_vmm_handle(const py::bytearray &handle_bytes) {
   return ptr;
 }
 
-void close_vmm_handle(void *ptr) {
-  vmm_free(ptr);
-}
+void close_vmm_handle(void *ptr) { vmm_free(ptr); }
 
 // ---------- fabric support detection ----------
 
@@ -172,8 +170,8 @@ void sync_vmm_handles(
   }
 
   CUDA_CHECK(cudaMemcpy(buffer_ptrs_gpu, buffer_ptrs.data(),
-                         sizeof(void *) * buffer_ptrs.size(),
-                         cudaMemcpyHostToDevice));
+                        sizeof(void *) * buffer_ptrs.size(),
+                        cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaDeviceSynchronize());
 }
 

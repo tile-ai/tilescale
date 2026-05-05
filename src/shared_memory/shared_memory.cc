@@ -81,7 +81,7 @@ static int64_t vmm_malloc_impl(int64_t size_raw) {
 
   size_t granularity = 0;
   SM_CU_CHECK(cuMemGetAllocationGranularity(&granularity, &prop,
-                                             CU_MEM_ALLOC_GRANULARITY_MINIMUM));
+                                            CU_MEM_ALLOC_GRANULARITY_MINIMUM));
 
   size_t size = align_to_granularity((size_t)size_raw, granularity);
 
@@ -89,7 +89,8 @@ static int64_t vmm_malloc_impl(int64_t size_raw) {
   SM_CU_CHECK(cuMemCreate(&handle, size, &prop, 0));
 
   void *ptr = nullptr;
-  SM_CU_CHECK(cuMemAddressReserve((CUdeviceptr *)&ptr, size, granularity, 0, 0));
+  SM_CU_CHECK(
+      cuMemAddressReserve((CUdeviceptr *)&ptr, size, granularity, 0, 0));
   SM_CU_CHECK(cuMemMap((CUdeviceptr)ptr, size, 0, handle, 0));
   cu_mem_set_access_all(ptr, size);
 
@@ -123,7 +124,7 @@ static ffi::Bytes create_vmm_handle_impl(int64_t ptr_val) {
 
   CUmemFabricHandle fabric_handle;
   SM_CU_CHECK(cuMemExportToShareableHandle(&fabric_handle, handle,
-                                            CU_MEM_HANDLE_TYPE_FABRIC, 0));
+                                           CU_MEM_HANDLE_TYPE_FABRIC, 0));
 
   std::string raw(sizeof(size_t) + sizeof(CUmemFabricHandle), '\0');
   std::memcpy(&raw[0], &size, sizeof(size_t));
@@ -139,12 +140,11 @@ static int64_t open_vmm_handle_impl(ffi::Bytes handle_bytes) {
   std::memcpy(&size, data, sizeof(size_t));
 
   CUmemFabricHandle fabric_handle;
-  std::memcpy(&fabric_handle, data + sizeof(size_t),
-              sizeof(CUmemFabricHandle));
+  std::memcpy(&fabric_handle, data + sizeof(size_t), sizeof(CUmemFabricHandle));
 
   CUmemGenericAllocationHandle alloc_handle;
   SM_CU_CHECK(cuMemImportFromShareableHandle(&alloc_handle, &fabric_handle,
-                                              CU_MEM_HANDLE_TYPE_FABRIC));
+                                             CU_MEM_HANDLE_TYPE_FABRIC));
 
   void *ptr = nullptr;
   SM_CU_CHECK(cuMemAddressReserve((CUdeviceptr *)&ptr, size, 0, 0, 0));
@@ -242,7 +242,7 @@ static int64_t mc_create_impl(int64_t size_raw, int64_t num_devices) {
 
   size_t granularity = 0;
   SM_CU_CHECK(cuMulticastGetGranularity(&granularity, &prop,
-                                         CU_MULTICAST_GRANULARITY_RECOMMENDED));
+                                        CU_MULTICAST_GRANULARITY_RECOMMENDED));
 
   size_t size = align_to_granularity((size_t)size_raw, granularity);
   prop.size = size;
@@ -255,11 +255,12 @@ static int64_t mc_create_impl(int64_t size_raw, int64_t num_devices) {
 
 // Export multicast handle as fabric handle bytes (for sharing across processes)
 static ffi::Bytes mc_export_handle_impl(int64_t mc_handle_val) {
-  CUmemGenericAllocationHandle mc_handle = (CUmemGenericAllocationHandle)mc_handle_val;
+  CUmemGenericAllocationHandle mc_handle =
+      (CUmemGenericAllocationHandle)mc_handle_val;
 
   CUmemFabricHandle fabric_handle;
   SM_CU_CHECK(cuMemExportToShareableHandle(&fabric_handle, mc_handle,
-                                            CU_MEM_HANDLE_TYPE_FABRIC, 0));
+                                           CU_MEM_HANDLE_TYPE_FABRIC, 0));
 
   return ffi::Bytes(reinterpret_cast<const char *>(&fabric_handle),
                     sizeof(CUmemFabricHandle));
@@ -274,14 +275,15 @@ static int64_t mc_import_handle_impl(ffi::Bytes handle_bytes) {
 
   CUmemGenericAllocationHandle mc_handle;
   SM_CU_CHECK(cuMemImportFromShareableHandle(&mc_handle, &fabric_handle,
-                                              CU_MEM_HANDLE_TYPE_FABRIC));
+                                             CU_MEM_HANDLE_TYPE_FABRIC));
 
   return (int64_t)mc_handle;
 }
 
 // Add a device to the multicast object
 static void mc_add_device_impl(int64_t mc_handle_val, int64_t device_id) {
-  CUmemGenericAllocationHandle mc_handle = (CUmemGenericAllocationHandle)mc_handle_val;
+  CUmemGenericAllocationHandle mc_handle =
+      (CUmemGenericAllocationHandle)mc_handle_val;
   CUdevice device;
   SM_CU_CHECK(cuDeviceGet(&device, (int)device_id));
   SM_CU_CHECK(cuMulticastAddDevice(mc_handle, device));
@@ -289,8 +291,9 @@ static void mc_add_device_impl(int64_t mc_handle_val, int64_t device_id) {
 
 // Bind a physical memory VA (from vmm_malloc) to the multicast object
 static void mc_bind_mem_impl(int64_t mc_handle_val, int64_t ptr_val,
-                              int64_t size) {
-  CUmemGenericAllocationHandle mc_handle = (CUmemGenericAllocationHandle)mc_handle_val;
+                             int64_t size) {
+  CUmemGenericAllocationHandle mc_handle =
+      (CUmemGenericAllocationHandle)mc_handle_val;
   void *ptr = reinterpret_cast<void *>((uintptr_t)ptr_val);
 
   // Retrieve the physical allocation handle from the mapped pointer
@@ -298,7 +301,8 @@ static void mc_bind_mem_impl(int64_t mc_handle_val, int64_t ptr_val,
   SM_CU_CHECK(cuMemRetainAllocationHandle(&phys_handle, ptr));
 
   // Bind to multicast
-  SM_CU_CHECK(cuMulticastBindMem(mc_handle, 0, phys_handle, 0, (size_t)size, 0));
+  SM_CU_CHECK(
+      cuMulticastBindMem(mc_handle, 0, phys_handle, 0, (size_t)size, 0));
 
   // Release the temporary handle reference
   SM_CU_CHECK(cuMemRelease(phys_handle));
@@ -306,8 +310,9 @@ static void mc_bind_mem_impl(int64_t mc_handle_val, int64_t ptr_val,
 
 // Map multicast object to a VA, returns mc_ptr. Does NOT release handle.
 static int64_t mc_map_impl(int64_t mc_handle_val, int64_t size_raw,
-                            int64_t num_devices) {
-  CUmemGenericAllocationHandle mc_handle = (CUmemGenericAllocationHandle)mc_handle_val;
+                           int64_t num_devices) {
+  CUmemGenericAllocationHandle mc_handle =
+      (CUmemGenericAllocationHandle)mc_handle_val;
 
   CUmulticastObjectProp prop = {};
   prop.numDevices = (unsigned int)num_devices;
@@ -315,11 +320,12 @@ static int64_t mc_map_impl(int64_t mc_handle_val, int64_t size_raw,
 
   size_t granularity = 0;
   SM_CU_CHECK(cuMulticastGetGranularity(&granularity, &prop,
-                                         CU_MULTICAST_GRANULARITY_RECOMMENDED));
+                                        CU_MULTICAST_GRANULARITY_RECOMMENDED));
   size_t size = align_to_granularity((size_t)size_raw, granularity);
 
   void *mc_ptr = nullptr;
-  SM_CU_CHECK(cuMemAddressReserve((CUdeviceptr *)&mc_ptr, size, granularity, 0, 0));
+  SM_CU_CHECK(
+      cuMemAddressReserve((CUdeviceptr *)&mc_ptr, size, granularity, 0, 0));
   SM_CU_CHECK(cuMemMap((CUdeviceptr)mc_ptr, size, 0, mc_handle, 0));
   cu_mem_set_access_all(mc_ptr, size);
 
@@ -328,13 +334,14 @@ static int64_t mc_map_impl(int64_t mc_handle_val, int64_t size_raw,
 
 // Release a multicast handle (call after map)
 static void mc_release_handle_impl(int64_t mc_handle_val) {
-  CUmemGenericAllocationHandle mc_handle = (CUmemGenericAllocationHandle)mc_handle_val;
+  CUmemGenericAllocationHandle mc_handle =
+      (CUmemGenericAllocationHandle)mc_handle_val;
   SM_CU_CHECK(cuMemRelease(mc_handle));
 }
 
 // Free multicast VA mapping
 static void mc_unmap_impl(int64_t mc_ptr_val, int64_t size_raw,
-                           int64_t num_devices) {
+                          int64_t num_devices) {
   void *ptr = reinterpret_cast<void *>((uintptr_t)mc_ptr_val);
 
   CUmulticastObjectProp prop = {};
@@ -343,7 +350,7 @@ static void mc_unmap_impl(int64_t mc_ptr_val, int64_t size_raw,
 
   size_t granularity = 0;
   SM_CU_CHECK(cuMulticastGetGranularity(&granularity, &prop,
-                                         CU_MULTICAST_GRANULARITY_RECOMMENDED));
+                                        CU_MULTICAST_GRANULARITY_RECOMMENDED));
   size_t size = align_to_granularity((size_t)size_raw, granularity);
 
   SM_CU_CHECK(cuMemUnmap((CUdeviceptr)ptr, size));
@@ -358,7 +365,7 @@ static int64_t mc_get_aligned_size_impl(int64_t size_raw, int64_t num_devices) {
 
   size_t granularity = 0;
   SM_CU_CHECK(cuMulticastGetGranularity(&granularity, &prop,
-                                         CU_MULTICAST_GRANULARITY_RECOMMENDED));
+                                        CU_MULTICAST_GRANULARITY_RECOMMENDED));
   return (int64_t)align_to_granularity((size_t)size_raw, granularity);
 }
 
@@ -369,8 +376,8 @@ static int64_t mc_get_aligned_size_impl(int64_t size_raw, int64_t num_devices) {
 // for local rank). We pass individual handle open results back via buffer_ptrs.
 // packed_handles: num_ranks concatenated raw handle bytes
 static void sync_vmm_handles_impl(int64_t rank, int64_t num_ranks,
-                                   int64_t buffer_ptrs_gpu_addr,
-                                   ffi::Bytes packed_handles) {
+                                  int64_t buffer_ptrs_gpu_addr,
+                                  ffi::Bytes packed_handles) {
   const size_t handle_size = sizeof(size_t) + sizeof(CUmemFabricHandle);
   ICHECK(packed_handles.size() == handle_size * (size_t)num_ranks);
 
@@ -386,14 +393,14 @@ static void sync_vmm_handles_impl(int64_t rank, int64_t num_ranks,
 
   void **gpu_ptr = reinterpret_cast<void **>((uintptr_t)buffer_ptrs_gpu_addr);
   SM_CUDA_CHECK(cudaMemcpy(gpu_ptr, buffer_ptrs.data(),
-                            sizeof(void *) * buffer_ptrs.size(),
-                            cudaMemcpyHostToDevice));
+                           sizeof(void *) * buffer_ptrs.size(),
+                           cudaMemcpyHostToDevice));
   SM_CUDA_CHECK(cudaDeviceSynchronize());
 }
 
 static void sync_ipc_handles_impl(int64_t rank, int64_t num_ranks,
-                                   int64_t buffer_ptrs_gpu_addr,
-                                   ffi::Bytes packed_handles) {
+                                  int64_t buffer_ptrs_gpu_addr,
+                                  ffi::Bytes packed_handles) {
   ICHECK(packed_handles.size() == CUDA_IPC_HANDLE_SIZE * (size_t)num_ranks);
 
   std::vector<void *> buffer_ptrs(num_ranks, nullptr);
@@ -409,8 +416,8 @@ static void sync_ipc_handles_impl(int64_t rank, int64_t num_ranks,
 
   void **gpu_ptr = reinterpret_cast<void **>((uintptr_t)buffer_ptrs_gpu_addr);
   SM_CUDA_CHECK(cudaMemcpy(gpu_ptr, buffer_ptrs.data(),
-                            sizeof(void *) * buffer_ptrs.size(),
-                            cudaMemcpyHostToDevice));
+                           sizeof(void *) * buffer_ptrs.size(),
+                           cudaMemcpyHostToDevice));
   SM_CUDA_CHECK(cudaDeviceSynchronize());
 }
 

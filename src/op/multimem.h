@@ -33,18 +33,20 @@ enum class MultimemMode : int { kLdReduce = 0, kSt = 1, kRed = 2 };
  *  - kRed: reduce into multicast address (no read-back)
  *
  * Lower flow:
- *  1. MakeSIMTLoop: creates element-wise parallel loop (BufferLoad -> BufferStore)
+ *  1. MakeSIMTLoop: creates element-wise parallel loop (BufferLoad ->
+ * BufferStore)
  *  2. ParallelLoopFuser::Fuse + ParallelLoopTransformer::Substitute
  *  3. ParallelOp -> InferLayout at multiple levels
  *  4. LowerParallelLoop (PartitionLoop + VectorizeLoop)
- *  5. MultimemRewriter: post-process to replace mcast buffer accesses with call_extern
+ *  5. MultimemRewriter: post-process to replace mcast buffer accesses with
+ * call_extern
  */
 class MultimemOpNode : public TileOperatorNode {
 public:
   Buffer src, dst;
   Array<Range> src_range, dst_range;
   MultimemMode mode;
-  int reduce_op;  // 0=ADD, 1=MIN, 2=MAX
+  int reduce_op; // 0=ADD, 1=MIN, 2=MAX
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.MultimemOp", MultimemOpNode,
                                     TileOperatorNode);
@@ -76,9 +78,9 @@ class MultimemOp : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(MultimemOp, TileOperator,
                                              MultimemOpNode);
-  TVM_DLL MultimemOp(
-      Array<PrimExpr> args,
-      Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
+  TVM_DLL
+  MultimemOp(Array<PrimExpr> args,
+             Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
   static const Op &Get();
 };
 

@@ -88,7 +88,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       "_sync_vmm_handles",
       [](int rank, const std::vector<int> &device_ids,
          uintptr_t buffer_ptrs_gpu_addr,
-         const std::vector<std::optional<py::bytearray>> &all_gathered_handles) {
+         const std::vector<std::optional<py::bytearray>>
+             &all_gathered_handles) {
         sync_vmm_handles(rank, device_ids,
                          reinterpret_cast<void **>(buffer_ptrs_gpu_addr),
                          all_gathered_handles);

@@ -9,12 +9,9 @@ from tilelang.distributed.shared_memory import (
     tensor_from_ptr,
     _create_ipc_handle,
     _sync_ipc_handles,
-    _supports_vmm_fabric,
     _vmm_malloc,
     _vmm_free,
     _create_vmm_handle,
-    _open_vmm_handle,
-    _close_vmm_handle,
     _sync_vmm_handles,
     _supports_multicast,
     _mc_create,
@@ -232,9 +229,7 @@ class BaseAllocator:
         _mc_release_handle(mcast_handle)
         self._use_multicast = True
 
-    def _allocate_mcast_tensor(
-        self, shape: tuple[int, ...], dtype: torch.dtype
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def _allocate_mcast_tensor(self, shape: tuple[int, ...], dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
         """Allocate from multicast buffer (bump-pointer).
 
         Returns:
@@ -282,10 +277,8 @@ class BaseAllocator:
         self._closed = True
         # Barrier before multicast teardown to ensure no rank is still using MC VA
         if getattr(self, "_use_multicast", False) and self._group is not None:
-            try:
+            with contextlib.suppress(Exception):
                 dist.barrier(self._group)
-            except Exception:
-                pass
         self._free()
 
     def _free(self):
@@ -348,7 +341,6 @@ class BaseAllocator:
     def _allocate_tensor(
         self, shape: tuple[int, ...], dtype: torch.dtype, return_peers=False, take_ownership: bool = False
     ) -> torch.Tensor:
-
         numel = _prod_shape(shape)
         itemsize = _element_size_bytes(dtype)
         bytes_needed = numel * itemsize
@@ -442,6 +434,12 @@ def get_allocator(
     mcast_size: int | None = None,
 ) -> BaseAllocator:
     return BaseAllocator(
-        size, device=device, is_distributed=is_distributed, local_rank=local_rank,
-        num_local_ranks=num_local_ranks, group=group, use_vmm=use_vmm, mcast_size=mcast_size,
+        size,
+        device=device,
+        is_distributed=is_distributed,
+        local_rank=local_rank,
+        num_local_ranks=num_local_ranks,
+        group=group,
+        use_vmm=use_vmm,
+        mcast_size=mcast_size,
     )

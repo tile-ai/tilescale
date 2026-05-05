@@ -120,13 +120,13 @@ def tensor_from_ptr(
         # bfloat16 / uint32 / uint64: create as matching-size int type, then view
         element_size = torch.empty((), dtype=dtype).element_size()
         if element_size == 2:
-            proxy_dtype = torch.int16
+            # proxy_dtype = torch.int16
             proxy_typestr = "<i2"
         elif element_size == 4:
-            proxy_dtype = torch.int32
+            # proxy_dtype = torch.int32
             proxy_typestr = "<i4"
         elif element_size == 8:
-            proxy_dtype = torch.int64
+            # proxy_dtype = torch.int64
             proxy_typestr = "<i8"
         else:
             raise ValueError(f"Cannot handle dtype {dtype} with element_size={element_size}")
@@ -138,12 +138,13 @@ def tensor_from_ptr(
 
 # ---------- Higher-level Python wrappers ----------
 
+
 def _sync_vmm_handles(rank, device_ids, buffer_ptrs_gpu_addr, all_gathered_handles):
     """Compatibility wrapper: packs handles into a single bytes blob and calls FFI."""
     num = len(device_ids)
     # all_gathered_handles is a list of bytearrays (or bytes)
     # Pack into single contiguous bytes blob
-    handle_size = len(all_gathered_handles[0]) if all_gathered_handles[0] is not None else 0
+    # handle_size = len(all_gathered_handles[0]) if all_gathered_handles[0] is not None else 0
     packed = b""
     for h in all_gathered_handles:
         packed += bytes(h)
