@@ -182,6 +182,7 @@ def main():
         dist.destroy_process_group()
     else:
         # Single-GPU unit tests
+        torch.cuda.set_device(0)
         has_fabric = test_supports_fabric()
         if has_fabric:
             test_vmm_malloc_free()
