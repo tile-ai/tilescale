@@ -110,7 +110,7 @@ from .random import (
 # Distributed multi-device primitives (NVSHMEM)
 from .distributed.multi_device.nvshmem import *  # noqa: F401
 from .distributed.multi_device.cpengine import *  # noqa: F401
-from .distributed.common import *  # noqa: F401
+from .distributed import *  # noqa: F401
 
 
 def import_source(source: str | None = None):

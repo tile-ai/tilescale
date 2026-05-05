@@ -176,3 +176,28 @@ void sync_vmm_handles(
                          cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaDeviceSynchronize());
 }
+
+// ---------- Multicast support detection ----------
+
+bool supports_multicast() {
+  int device_count = 0;
+  cudaError_t err = cudaGetDeviceCount(&device_count);
+  if (err != cudaSuccess || device_count == 0)
+    return false;
+
+  int driver_version = 0;
+  CUresult cu_err = cuDriverGetVersion(&driver_version);
+  if (cu_err != CUDA_SUCCESS || driver_version < 12040)
+    return false;
+
+  for (int i = 0; i < device_count; ++i) {
+    CUdevice dev;
+    CU_CHECK(cuDeviceGet(&dev, i));
+    int supported = 0;
+    CU_CHECK(cuDeviceGetAttribute(
+        &supported, CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED, dev));
+    if (!supported)
+      return false;
+  }
+  return true;
+}

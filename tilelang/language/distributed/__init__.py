@@ -18,6 +18,13 @@ from .common import (
     wait_lt,
 )
 
+from .multimem import (
+    MultimemReduceOp,
+    multimem_ld_reduce,
+    multimem_st,
+    multimem_red,
+)
+
 __all__ = [
     "get_rank",
     "get_num_ranks",
@@ -32,4 +39,8 @@ __all__ = [
     "wait_le",
     "wait_gt",
     "wait_lt",
+    "MultimemReduceOp",
+    "multimem_ld_reduce",
+    "multimem_st",
+    "multimem_red",
 ]

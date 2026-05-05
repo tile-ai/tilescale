@@ -141,6 +141,8 @@ private:
   bool need_cooperative_groups_{false};
   // whether need curand_kernel.h
   bool need_curand_kernel_h_{false};
+  // whether need multimem.h (NVSwitch multicast instructions)
+  bool need_multimem_h_{false};
   // whether need distributed.h
   bool use_distributed_{use_distributed()};
   // whether need nvshmem.h

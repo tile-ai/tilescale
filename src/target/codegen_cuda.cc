@@ -329,6 +329,10 @@ std::string CodeGenTileLangCUDA::Finish() {
     decl_stream << "#include <tl_templates/cuda/ldst.h>\n";
     decl_stream << "extern \"C\" __constant__ uint64_t meta_data[1024];\n";
   }
+
+  if (need_multimem_h_) {
+    decl_stream << "#include <tl_templates/cuda/multimem.h>\n";
+  }
   decl_stream << "#ifdef ENABLE_BF16\n";
   decl_stream << "#include <tl_templates/cuda/cuda_bf16_fallbacks.cuh>\n";
   decl_stream << "#endif\n";
@@ -2894,6 +2898,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     // Note: tl.put, tl.get, tl.wait are TileOperators handled through
     // remote_copy.cc They are lowered to call_extern with
     // tl::cp_warp/tl::cp_block templates
+    // Detect multimem ops to include the multimem.h header
+    if (op->op.same_as(builtin::call_extern()) && op->args.size() >= 1) {
+      if (auto *str_imm = op->args[0].as<StringImmNode>()) {
+        if (std::string(str_imm->value).find("tl::multimem::") == 0) {
+          this->need_multimem_h_ = true;
+          this->use_distributed_ = true;
+        }
+      }
+    }
     CodeGenC::VisitExpr_(op, os);
   }
 }

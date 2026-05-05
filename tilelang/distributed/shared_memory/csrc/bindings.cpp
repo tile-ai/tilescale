@@ -95,4 +95,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       },
       py::arg("rank"), py::arg("device_ids"), py::arg("buffer_ptrs_gpu_addr"),
       py::arg("all_gathered_handles"));
+
+  // Multicast support detection
+  m.def("_supports_multicast", &supports_multicast,
+        "Check if all GPUs support CUDA multicast (NVSwitch)");
 }

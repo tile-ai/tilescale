@@ -36,3 +36,6 @@ bool supports_vmm_fabric();
 void sync_vmm_handles(
     int rank, const std::vector<int> &device_ids, void **buffer_ptrs_gpu,
     const std::vector<std::optional<pybind11::bytearray>> &all_gathered_handles);
+
+// Multicast support detection
+bool supports_multicast();
