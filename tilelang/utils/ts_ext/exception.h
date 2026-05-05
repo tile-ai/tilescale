@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cuda.h>
 #include <cuda_runtime.h>
 #include <exception>
 #include <string>
@@ -31,6 +32,19 @@ public:
     cudaError_t e = (cmd);                                                     \
     if (e != cudaSuccess) {                                                    \
       throw TSException("CUDA", __FILE__, __LINE__, cudaGetErrorString(e));    \
+    }                                                                          \
+  } while (0)
+#endif
+
+#ifndef CU_CHECK
+#define CU_CHECK(cmd)                                                          \
+  do {                                                                         \
+    CUresult e = (cmd);                                                        \
+    if (e != CUDA_SUCCESS) {                                                   \
+      const char *error_str = NULL;                                            \
+      cuGetErrorString(e, &error_str);                                         \
+      throw TSException("CU", __FILE__, __LINE__,                              \
+                        error_str ? std::string(error_str) : "unknown");       \
     }                                                                          \
   } while (0)
 #endif

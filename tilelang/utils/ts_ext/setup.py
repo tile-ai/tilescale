@@ -31,8 +31,15 @@ library_dirs = [torch_lib_dir]
 
 if cuda_lib and os.path.isdir(cuda_lib):
     libraries.append("cudart")
+    libraries.append("cuda")
     library_dirs.append(cuda_lib)
     extra_link_args.append(f"-Wl,-rpath,{cuda_lib}")
+
+# Also check lib64/stubs for libcuda.so (needed for driver API)
+cuda_stubs = os.path.join(CUDA_HOME, "lib64", "stubs") if CUDA_HOME else None
+if cuda_stubs and os.path.isdir(cuda_stubs):
+    library_dirs.append(cuda_stubs)
+    extra_link_args.append(f"-Wl,-rpath,{cuda_stubs}")
 
 setup(
     name="tilescale_ext",
@@ -45,6 +52,7 @@ setup(
                 "ts_ext_bindings.cpp",
                 "tensor.cpp",
                 "ipc_ops.cpp",
+                "vmm_ops.cpp",
             ],
             include_dirs=include_dirs,
             extra_compile_args=extra_compile_args,

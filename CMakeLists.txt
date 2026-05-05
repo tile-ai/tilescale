@@ -356,6 +356,7 @@ if(USE_CUDA)
       ${CMAKE_CURRENT_SOURCE_DIR}/tilelang/utils/ts_ext/ts_ext_bindings.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/tilelang/utils/ts_ext/tensor.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/tilelang/utils/ts_ext/ipc_ops.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/tilelang/utils/ts_ext/vmm_ops.cpp
     )
 
     # Find libtorch_python.so
@@ -371,14 +372,15 @@ if(USE_CUDA)
     target_include_directories(tilescale_ext_C PRIVATE
       ${TORCH_INCLUDE_DIRS}
       ${CUDAToolkit_INCLUDE_DIRS}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tilelang/utils/ts_ext
     )
 
     if(TORCH_PYTHON_RESULT EQUAL 0 AND EXISTS "${TORCH_PYTHON_LIBRARY}")
       message(STATUS "Found libtorch_python: ${TORCH_PYTHON_LIBRARY}")
-      target_link_libraries(tilescale_ext_C PRIVATE ${TORCH_LIBRARIES} ${TORCH_PYTHON_LIBRARY} CUDA::cudart)
+      target_link_libraries(tilescale_ext_C PRIVATE ${TORCH_LIBRARIES} ${TORCH_PYTHON_LIBRARY} CUDA::cudart CUDA::cuda_driver)
     else()
       message(WARNING "libtorch_python.so not found, extension may have undefined symbols")
-      target_link_libraries(tilescale_ext_C PRIVATE ${TORCH_LIBRARIES} CUDA::cudart)
+      target_link_libraries(tilescale_ext_C PRIVATE ${TORCH_LIBRARIES} CUDA::cudart CUDA::cuda_driver)
     endif()
 
     target_compile_options(tilescale_ext_C PRIVATE -fPIC)

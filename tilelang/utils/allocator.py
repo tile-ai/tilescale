@@ -2,9 +2,19 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import os
 import torch
 import torch.distributed as dist
-from tilescale_ext import tensor_from_ptr, _create_ipc_handle, _sync_ipc_handles
+from tilescale_ext import (
+    tensor_from_ptr,
+    _create_ipc_handle,
+    _sync_ipc_handles,
+    _supports_vmm_fabric,
+    _vmm_malloc,
+    _vmm_free,
+    _create_vmm_handle,
+    _sync_vmm_handles,
+)
 from tilelang.utils.target import parse_device
 import contextlib
 
@@ -67,6 +77,17 @@ if hasattr(_libcudart, "cudaSetDevice"):
     _libcudart.cudaSetDevice.restype = ctypes.c_int
 
 
+def _resolve_use_vmm(use_vmm: bool | None) -> bool:
+    """Resolve whether to use VMM based on env var and hardware support."""
+    env_val = os.environ.get("TILESCALE_USE_VMM", None)
+    if env_val is not None:
+        return env_val == "1"
+    if use_vmm is not None:
+        return use_vmm
+    # Default: opt-in (False) for Step 1
+    return False
+
+
 class BaseAllocator:
     func: callable | None = None
 
@@ -79,10 +100,12 @@ class BaseAllocator:
         num_local_ranks: int | None = None,
         group: dist.ProcessGroup | None = None,
         align: int = 256,
+        use_vmm: bool | None = None,
     ) -> None:
         if size <= 0:
             raise ValueError("size must be > 0")
         self.size = int(size)
+        self._use_vmm = _resolve_use_vmm(use_vmm)
         self._base_ptr = ctypes.c_void_p(0)
         self._ptr = ctypes.c_void_p(0)
         self._device = parse_device(device)
@@ -121,20 +144,29 @@ class BaseAllocator:
             rc = _libcudart.cudaSetDevice(int(self._device))
             if rc != 0:
                 raise RuntimeError(f"cudaSetDevice failed: {rc} {_libcudart.cudaGetErrorString(rc).decode()}")
-        rc = _libcudart.cudaMalloc(ctypes.byref(self._base_ptr), ctypes.c_size_t(self.size))
-        if rc != 0:
-            msg = _libcudart.cudaGetErrorString(rc)
-            raise RuntimeError(f"cudaMalloc failed: {rc} {msg.decode() if msg else ''}")
+
+        if self._use_vmm:
+            ptr_val = _vmm_malloc(self.size)
+            self._base_ptr.value = ptr_val
+        else:
+            rc = _libcudart.cudaMalloc(ctypes.byref(self._base_ptr), ctypes.c_size_t(self.size))
+            if rc != 0:
+                msg = _libcudart.cudaGetErrorString(rc)
+                raise RuntimeError(f"cudaMalloc failed: {rc} {msg.decode() if msg else ''}")
         self._ptr.value = self._base_ptr.value
 
     def _free(self):
         if getattr(self, "_base_ptr", None) and self._base_ptr.value:
-            rc = _libcudart.cudaFree(self._base_ptr)
-            # mark freed even if error to avoid double free in destructor
-            self._base_ptr = ctypes.c_void_p(0)
-            if rc != 0:
-                msg = _libcudart.cudaGetErrorString(rc)
-                raise RuntimeError(f"cudaFree failed: {rc} {msg.decode() if msg else ''}")
+            if getattr(self, "_use_vmm", False):
+                _vmm_free(self._base_ptr.value)
+                self._base_ptr = ctypes.c_void_p(0)
+            else:
+                rc = _libcudart.cudaFree(self._base_ptr)
+                # mark freed even if error to avoid double free in destructor
+                self._base_ptr = ctypes.c_void_p(0)
+                if rc != 0:
+                    msg = _libcudart.cudaGetErrorString(rc)
+                    raise RuntimeError(f"cudaFree failed: {rc} {msg.decode() if msg else ''}")
 
     def _init_table(self):
         device_ids = [
@@ -144,14 +176,21 @@ class BaseAllocator:
         dist.all_gather_object(device_ids, local_device_id, self._group)
         self._device_ids = device_ids
 
-        # Synchronize IPC handles
-        ipc_handles = [
+        # Synchronize handles (VMM or IPC)
+        handles = [
             None,
         ] * self._group.size()
-        local_ipc_handle = _create_ipc_handle(self._base_ptr.value)
-        dist.all_gather_object(ipc_handles, local_ipc_handle, self._group)
+        if self._use_vmm:
+            local_handle = _create_vmm_handle(self._base_ptr.value)
+        else:
+            local_handle = _create_ipc_handle(self._base_ptr.value)
+        dist.all_gather_object(handles, local_handle, self._group)
+
         buffer_ptrs = torch.empty(self._group.size(), dtype=torch.uint64, device="cuda")
-        _sync_ipc_handles(self._local_rank, device_ids, ctypes.c_void_p(buffer_ptrs.data_ptr()).value, ipc_handles, None)
+        if self._use_vmm:
+            _sync_vmm_handles(self._local_rank, device_ids, ctypes.c_void_p(buffer_ptrs.data_ptr()).value, handles)
+        else:
+            _sync_ipc_handles(self._local_rank, device_ids, ctypes.c_void_p(buffer_ptrs.data_ptr()).value, handles, None)
         buffer_ptrs[self._local_rank] = self._base_ptr.value
         self._buffer_ptrs = buffer_ptrs
         self._table_size = 2 + self._group.size()
@@ -249,7 +288,9 @@ def get_allocator(
     local_rank: int = 0,
     num_local_ranks: int = 1,
     group: dist.ProcessGroup | None = None,
+    use_vmm: bool | None = None,
 ) -> BaseAllocator:
     return BaseAllocator(
-        size, device=device, is_distributed=is_distributed, local_rank=local_rank, num_local_ranks=num_local_ranks, group=group
+        size, device=device, is_distributed=is_distributed, local_rank=local_rank,
+        num_local_ranks=num_local_ranks, group=group, use_vmm=use_vmm,
     )

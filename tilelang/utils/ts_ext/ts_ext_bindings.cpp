@@ -46,4 +46,57 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       },
       py::arg("rank"), py::arg("device_ids"), py::arg("buffer_ptrs_gpu_addr"),
       py::arg("all_gathered_handles"), py::arg("root_unique_id_opt"));
+
+  // VMM API
+  m.def("_supports_vmm_fabric", &supports_vmm_fabric,
+        "Check if all GPUs support CUDA VMM fabric handles");
+
+  m.def(
+      "_vmm_malloc",
+      [](size_t size) -> uintptr_t {
+        return reinterpret_cast<uintptr_t>(vmm_malloc(size));
+      },
+      py::arg("size"));
+
+  m.def(
+      "_vmm_free",
+      [](uintptr_t ptr_value) {
+        vmm_free(reinterpret_cast<void *>(ptr_value));
+      },
+      py::arg("ptr_value"));
+
+  m.def(
+      "_create_vmm_handle",
+      [](uintptr_t ptr_value) {
+        void *ptr = reinterpret_cast<void *>(ptr_value);
+        return create_vmm_handle(ptr);
+      },
+      py::arg("ptr_value"));
+
+  m.def(
+      "_open_vmm_handle",
+      [](const py::bytearray &handle_bytes) -> uintptr_t {
+        return reinterpret_cast<uintptr_t>(open_vmm_handle(handle_bytes));
+      },
+      py::arg("handle_bytes"));
+
+  m.def(
+      "_close_vmm_handle",
+      [](uintptr_t ptr_value) {
+        close_vmm_handle(reinterpret_cast<void *>(ptr_value));
+      },
+      py::arg("ptr_value"));
+
+  m.def(
+      "_sync_vmm_handles",
+      [](int rank, const std::vector<int> &device_ids,
+         uintptr_t buffer_ptrs_gpu_addr,
+         const std::vector<std::optional<py::bytearray>> &all_gathered_handles) {
+        void **buffer_ptrs_gpu =
+            reinterpret_cast<void **>(buffer_ptrs_gpu_addr);
+        sync_vmm_handles(rank, device_ids, buffer_ptrs_gpu,
+                         all_gathered_handles);
+      },
+      py::arg("rank"), py::arg("device_ids"), py::arg("buffer_ptrs_gpu_addr"),
+      py::arg("all_gathered_handles"));
 }

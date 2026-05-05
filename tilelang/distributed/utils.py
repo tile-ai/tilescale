@@ -21,7 +21,17 @@ else:
     from cuda import cuda, cudart
 
 import ctypes
-from tilescale_ext import _create_tensor, _create_ipc_handle, _sync_ipc_handles, create_host_device_tensor
+from tilescale_ext import (
+    _create_tensor,
+    _create_ipc_handle,
+    _sync_ipc_handles,
+    _supports_vmm_fabric,
+    _vmm_malloc,
+    _vmm_free,
+    _create_vmm_handle,
+    _sync_vmm_handles,
+    create_host_device_tensor,
+)
 import functools
 from functools import lru_cache
 from threading import Lock
@@ -109,8 +119,28 @@ def get_local_ipc_handle(data: torch.Tensor):
     return handle
 
 
-def create_dist_tensor(local_rank: int, num_local_ranks: int, data: torch.Tensor, rank: int, group: dist.ProcessGroup):
+def _resolve_use_vmm(use_vmm: bool | None) -> bool:
+    """Resolve whether to use VMM based on env var and hardware support."""
+    import os
+    env_val = os.environ.get("TILESCALE_USE_VMM", None)
+    if env_val is not None:
+        return env_val == "1"
+    if use_vmm is not None:
+        return use_vmm
+    return False
+
+
+def create_dist_tensor(
+    local_rank: int,
+    num_local_ranks: int,
+    data: torch.Tensor,
+    rank: int,
+    group: dist.ProcessGroup,
+    use_vmm: bool | None = None,
+):
     assert num_local_ranks == group.size()
+    _use_vmm = _resolve_use_vmm(use_vmm)
+
     # Synchronize device IDs
     device_ids = [
         None,
@@ -118,14 +148,21 @@ def create_dist_tensor(local_rank: int, num_local_ranks: int, data: torch.Tensor
     local_device_id = local_rank
     dist.all_gather_object(device_ids, local_device_id, group)
 
-    # Synchronize IPC handles
-    ipc_handles = [
+    # Synchronize handles (VMM or IPC)
+    handles = [
         None,
     ] * group.size()
-    local_ipc_handle = get_local_ipc_handle(data)
-    dist.all_gather_object(ipc_handles, local_ipc_handle, group)
+    if _use_vmm:
+        local_handle = _create_vmm_handle(ctypes.c_void_p(data.data_ptr()).value)
+    else:
+        local_handle = get_local_ipc_handle(data)
+    dist.all_gather_object(handles, local_handle, group)
+
     buffer_ptrs_gpu = torch.empty(group.size(), dtype=torch.uint64, device="cuda")
-    _sync_ipc_handles(rank, device_ids, ctypes.c_void_p(buffer_ptrs_gpu.data_ptr()).value, ipc_handles, None)
+    if _use_vmm:
+        _sync_vmm_handles(rank, device_ids, ctypes.c_void_p(buffer_ptrs_gpu.data_ptr()).value, handles)
+    else:
+        _sync_ipc_handles(rank, device_ids, ctypes.c_void_p(buffer_ptrs_gpu.data_ptr()).value, handles, None)
     return buffer_ptrs_gpu
 
 
