@@ -12,7 +12,6 @@
 
 #include <sstream>
 
-#include "../target/cuda.h"
 #include "../target/utils.h"
 #include "builtin.h"
 #include "distributed.h"
