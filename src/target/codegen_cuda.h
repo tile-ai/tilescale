@@ -16,6 +16,14 @@
 
 #include "target/source/codegen_c.h"
 
+static inline bool use_distributed() {
+  const char *env = std::getenv("TILELANG_USE_DISTRIBUTED");
+  if (env) {
+    return std::string(env) == "1";
+  }
+  return false;
+}
+
 namespace tvm {
 namespace codegen {
 
@@ -134,6 +142,10 @@ private:
   bool need_curand_kernel_h_{false};
   // whether need cluster.h
   bool need_cluster_h_{false};
+  // whether need distributed templates (TileScale)
+  bool use_distributed_{use_distributed()};
+  // whether need multimem.h (TileScale)
+  bool need_multimem_h_{false};
   // Op attribute map
   OpAttrMap<bool> op_need_warp_shuffle_ =
       Op::GetAttrMap<bool>("cuda.need_warp_shuffle");

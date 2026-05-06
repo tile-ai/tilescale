@@ -16,6 +16,8 @@
 #include <vector>
 
 #include "../op/builtin.h"
+#include "../op/distributed.h"
+#include "../op/sync.h"
 #include "../transform/common/attr.h"
 #include "./ptx.h"
 #include "./utils.h"
@@ -624,6 +626,15 @@ std::string CodeGenTileLangCUDA::Finish() {
   decl_stream << "#include <tl_templates/cuda/ldsm.h>\n";
   decl_stream << "#include <tl_templates/cuda/threadblock_swizzle.h>\n";
   decl_stream << "#include <tl_templates/cuda/debug.h>\n";
+  if (use_distributed_) {
+    decl_stream << "#include <tl_templates/cuda/distributed.h>\n";
+    decl_stream << "#include <tl_templates/cuda/sync.h>\n";
+    decl_stream << "#include <tl_templates/cuda/ldst.h>\n";
+    decl_stream << "extern \"C\" __constant__ uint64_t meta_data[1024];\n";
+  }
+  if (need_multimem_h_) {
+    decl_stream << "#include <tl_templates/cuda/multimem.h>\n";
+  }
   decl_stream << "#ifdef ENABLE_BF16\n";
   decl_stream << "#include <tl_templates/cuda/cuda_bf16_fallbacks.cuh>\n";
   decl_stream << "#endif\n";

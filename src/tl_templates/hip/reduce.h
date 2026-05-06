@@ -73,7 +73,7 @@ struct SharedReduceWarp {
       }
 
       for (int offset = kWarpSize / 2; offset > 0; offset >>= 1) {
-        T other = __shfl_down(partial, offset, kWarpSize);
+        T other = tl::shfl_down(partial, offset, kWarpSize);
         partial = Reducer()(partial, other);
       }
 
@@ -87,13 +87,15 @@ struct SharedReduceWarp {
   }
 };
 
-template <class Reducer, int threads, int scale, int thread_offset = 0>
+template <class Reducer, int threads, int scale, int thread_offset = 0,
+          int batch_size = 1, int workspace_stride = 0>
 struct AllReduce {
   static_assert(threads == 1024 || threads == 512 || threads == 256 ||
                 threads == 128 || threads == 64 || threads == 32 ||
                 threads == 16 || threads == 8 || threads == 4 || threads == 2);
   static_assert(threads % scale == 0);
 
+  // Scalar interface (backward-compatible).
   template <typename T> static __device__ T run(T x, T *red_buf = nullptr) {
     constexpr int offset = threads / 2;
     constexpr int warpSize = 64;
@@ -104,14 +106,243 @@ struct AllReduce {
       __syncthreads();
       x = Reducer()(x, red_buf[threadIdx.x ^ offset]);
     } else {
-      x = Reducer()(x, __shfl_xor(x, offset));
+      x = Reducer()(x, tl::shfl_xor(x, offset));
     }
     if constexpr (offset == scale) {
       return x;
     } else {
-      return AllReduce<Reducer, offset, scale, thread_offset>::run(x, red_buf);
+      return AllReduce<Reducer, offset, scale, thread_offset, batch_size,
+                       workspace_stride>::run(x, red_buf);
+    }
+  }
+
+  // Batch interface (named run_batch to avoid overload-resolution ambiguity).
+  template <typename T>
+  static __device__ void run_batch(T *x, T *red_buf = nullptr) {
+    constexpr int offset = threads / 2;
+    constexpr int warpSize = 64;
+
+    if constexpr (offset >= warpSize) {
+      __syncthreads();
+#pragma unroll
+      for (int i = 0; i < batch_size; i++)
+        red_buf[(threadIdx.x - thread_offset) + i * workspace_stride] = x[i];
+      __syncthreads();
+#pragma unroll
+      for (int i = 0; i < batch_size; i++)
+        x[i] =
+            Reducer()(x[i], red_buf[((threadIdx.x - thread_offset) ^ offset) +
+                                    i * workspace_stride]);
+    } else {
+#pragma unroll
+      for (int i = 0; i < batch_size; i++)
+        x[i] = Reducer()(x[i], tl::shfl_xor(x[i], offset));
+    }
+    if constexpr (offset == scale) {
+      return;
+    } else {
+      AllReduce<Reducer, offset, scale, thread_offset, batch_size,
+                workspace_stride>::run_batch(x, red_buf);
     }
   }
 };
+
+template <int threads, bool reverse = false> struct CumSum1D {
+  static_assert(threads == 1024 or threads == 512 or threads == 256 or
+                threads == 128 or threads == 64);
+  template <typename T, int SEG = 64>
+  static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
+                            int N) {
+    if (N <= 0)
+      return;
+
+    const int tid = threadIdx.x;
+    const int lane = tid % SEG;
+
+    if (tid >= SEG)
+      return;
+
+    T carry = (T)0;
+
+    if (reverse) {
+      const int num_segments = (N + SEG - 1) / SEG;
+      for (int seg = num_segments - 1; seg >= 0; --seg) {
+        const int idx = seg * SEG + lane;
+        T val = (idx < N) ? src[idx] : (T)0;
+
+#pragma unroll
+        for (int off = 1; off < SEG; off <<= 1) {
+          T n = tl::shfl_down(val, off);
+          if (lane < SEG - off)
+            val += n;
+        }
+
+        val += carry;
+
+        if (idx < N)
+          dst[idx] = val;
+
+        T segSum = tl::shfl(val, 0);
+        if (lane == 0)
+          carry = segSum;
+        carry = tl::shfl(carry, 0);
+      }
+    } else {
+      const int num_segments = (N + SEG - 1) / SEG;
+      for (int seg = 0; seg < num_segments; ++seg) {
+        const int idx = seg * SEG + lane;
+        T val = (idx < N) ? src[idx] : (T)0;
+
+#pragma unroll
+        for (int off = 1; off < SEG; off <<= 1) {
+          T n = tl::shfl_up(val, off);
+          if (lane >= off)
+            val += n;
+        }
+
+        val += carry;
+
+        if (idx < N)
+          dst[idx] = val;
+
+        T segSum = tl::shfl(val, SEG - 1);
+        if (lane == SEG - 1)
+          carry = segSum;
+        carry = tl::shfl(carry, SEG - 1);
+      }
+    }
+  }
+};
+
+template <int threads, int Axis = 0, bool reverse = false> struct CumSum2D {
+  static_assert(threads == 1024 or threads == 512 or threads == 256 or
+                threads == 128 or threads == 64);
+  template <typename T, int SEG = 64>
+  static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
+                            int H, int W) {
+
+    constexpr int TILE_H = threads / SEG;
+    const int num_blocks = (H + TILE_H - 1) / TILE_H;
+    const int tid = threadIdx.x;
+    const int lane = tid % SEG;
+    const int row = tid / SEG;
+
+    for (int b = 0; b < num_blocks; ++b) {
+      const int gRow = b * TILE_H + row;
+      if (gRow >= H)
+        return;
+
+      T carry = (T)0;
+
+      if (reverse) {
+        // Start from the last segment for reverse mode
+        for (int seg = (W + SEG - 1) / SEG - 1; seg >= 0; --seg) {
+          const int col = seg * SEG + lane;
+
+          const int real_row = Axis == 1 ? gRow : col;
+          const int real_col = Axis == 1 ? col : gRow;
+
+          T val = (col < W) ? src[real_row * W + real_col] : (T)0;
+
+#pragma unroll
+          for (int off = 1; off < SEG; off <<= 1) {
+            T n = tl::shfl_down(val, off);
+            if (lane < SEG - off)
+              val += n;
+          }
+
+          val += carry;
+
+          if (real_col < W)
+            dst[real_row * W + real_col] = val;
+
+          T segSum = tl::shfl(val, 0);
+          if (lane == 0)
+            carry = segSum;
+          carry = tl::shfl(carry, 0);
+        }
+      } else {
+        for (int seg = 0; seg * SEG < W; ++seg) {
+          const int col = seg * SEG + lane;
+
+          const int real_row = Axis == 1 ? gRow : col;
+          const int real_col = Axis == 1 ? col : gRow;
+
+          T val = (col < W) ? src[real_row * W + real_col] : (T)0;
+
+#pragma unroll
+          for (int off = 1; off < SEG; off <<= 1) {
+            T n = tl::shfl_up(val, off);
+            if (lane >= off)
+              val += n;
+          }
+
+          val += carry;
+
+          if (real_col < W)
+            dst[real_row * W + real_col] = val;
+
+          T segSum = tl::shfl(val, SEG - 1);
+          if (lane == SEG - 1)
+            carry = segSum;
+          carry = tl::shfl(carry, SEG - 1);
+        }
+      }
+    }
+  }
+};
+
+template <typename T, typename ReduceOp>
+TL_DEVICE T warp_reduce(T value, ReduceOp op) {
+  // 5-step butterfly reduction with width=32, matching CUDA's 32-lane warp
+  // semantics on CDNA (wave64) and RDNA (wave32) targets.
+  //
+  // On CDNA (wave64, 64-lane wavefronts) with threads=32 per block:
+  //   Only lanes 0-31 are active; lanes 32-63 hold uninitialised VGPRs.
+  //   The old step `__shfl_xor(value, 32)` without a width argument read
+  //   from those uninitialised lanes, producing NaN or garbage.
+  //   width=32 confines every shuffle to the [0,31] group, preventing this.
+  //
+  // On CDNA with threads=64 (one full wave64):
+  //   width=32 splits the wavefront into two independent 32-lane groups.
+  //   Lane 0 of each group holds the group partial sum, which is exactly what
+  //   kernels that assume logical warp_size=32 expect for their inter-warp
+  //   shared-memory reductions.
+  //
+  // On RDNA (wave32, 32-lane wavefronts):
+  //   width=32 equals the wavefront size, so behaviour is identical to
+  //   omitting the width argument.
+  //
+  // Note: this intentionally preserves 32-lane logical-warp semantics for
+  // backward compatibility.  Full wave64 utilisation (6-step, width=64) would
+  // require restructuring inter-warp shared-memory communication in all
+  // kernels and is deferred to a separate optimisation pass.
+  value = op(value, __shfl_xor(value, 16, 32));
+  value = op(value, __shfl_xor(value, 8, 32));
+  value = op(value, __shfl_xor(value, 4, 32));
+  value = op(value, __shfl_xor(value, 2, 32));
+  value = op(value, __shfl_xor(value, 1, 32));
+  return value;
+}
+
+template <typename T> TL_DEVICE T warp_reduce_sum(T value) {
+  return warp_reduce<T>(value, SumOp());
+}
+
+template <typename T> TL_DEVICE T warp_reduce_max(T value) {
+  return warp_reduce<T>(value, MaxOp());
+}
+
+template <typename T> TL_DEVICE T warp_reduce_min(T value) {
+  return warp_reduce<T>(value, MinOp());
+}
+
+template <typename T> TL_DEVICE T warp_reduce_bitand(T value) {
+  return warp_reduce<T>(value, BitAndOp());
+}
+
+template <typename T> TL_DEVICE T warp_reduce_bitor(T value) {
+  return warp_reduce<T>(value, BitOrOp());
+}
 
 } // namespace tl
