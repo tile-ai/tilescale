@@ -17,6 +17,8 @@
 
 #include "../op/builtin.h"
 
+#include <string>
+
 namespace tvm {
 namespace tl {
 
@@ -99,6 +101,16 @@ bool IsAsyncIntrinsic(const CallNode *call) {
     return true;
   }
 
+  // multimem bulk async ops (shared → mcast_global via bulk_group)
+  if (call->op.same_as(builtin::call_extern()) && call->args.size() >= 1) {
+    if (auto *str_imm = call->args[0].as<StringImmNode>()) {
+      if (std::string(str_imm->value).find("tl::multimem::cp_async_bulk") == 0 ||
+          std::string(str_imm->value).find("tl::multimem::cp_reduce_async_bulk") == 0) {
+        return true;
+      }
+    }
+  }
+
   return false;
 }
 
@@ -143,11 +155,22 @@ public:
 private:
   Stmt operator()(const Stmt &stmt) { return StmtExprMutator::VisitStmt(stmt); }
 
+  static bool IsMultimemBulkCall(const CallNode *call) {
+    if (!call->op.same_as(builtin::call_extern()) || call->args.empty())
+      return false;
+    if (auto *str_imm = call->args[0].as<StringImmNode>()) {
+      std::string name(str_imm->value);
+      return name.find("tl::multimem::cp_async_bulk") == 0 ||
+             name.find("tl::multimem::cp_reduce_async_bulk") == 0;
+    }
+    return false;
+  }
+
   Stmt VisitStmt_(const EvaluateNode *op) final {
     Stmt mutated = StmtExprMutator::VisitStmt_(op);
     const auto *node = mutated.as<EvaluateNode>();
     if (const auto *call = node->value.as<CallNode>()) {
-      if (call->op.same_as(tma_store())) {
+      if (call->op.same_as(tma_store()) || IsMultimemBulkCall(call)) {
         Array<Stmt> seq;
         seq.push_back(mutated);
         seq.push_back(

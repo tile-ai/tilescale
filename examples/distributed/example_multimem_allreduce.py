@@ -30,7 +30,7 @@ tilelang.disable_cache()
 os.environ["NCCL_DEBUG"] = "WARN"
 
 
-def multimem_allreduce_kernel(N, block_N, threads):
+def multimem_allreduce_kernel_one_shot(N, block_N, threads):
     @T.prim_func
     def main(
         mcast_buf: T.Tensor((N,), "float32"),
@@ -68,7 +68,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     # Compile kernel
     kernel = tilelang.compile(
-        multimem_allreduce_kernel(N, BLOCK_N, threads),
+        multimem_allreduce_kernel_one_shot(N, BLOCK_N, threads),
         pass_configs={"tl.disable_tma_lower": True},
     )
     if local_rank == 0 and args.print_source:

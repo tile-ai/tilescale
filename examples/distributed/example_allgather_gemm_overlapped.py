@@ -195,6 +195,7 @@ def ag_gemm_op(
     gemm_stream.wait_stream(ag_stream)
     current_stream = torch.cuda.current_stream()
     current_stream.wait_stream(gemm_stream)
+    dist.barrier()
     return C
 
 
@@ -306,10 +307,10 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num-processes", type=int, default=2, help="Number of processes to spawn (default: 2)")
-    parser.add_argument("--M", type=int, default=8192, help="M dimension")
-    parser.add_argument("--N", type=int, default=28672, help="N dimension")
-    parser.add_argument("--K", type=int, default=8192, help="K dimension")
+    parser.add_argument("--num-processes", type=int, default=8, help="Number of processes to spawn (default: 2)")
+    parser.add_argument("--M", type=int, default=32768, help="M dimension")
+    parser.add_argument("--N", type=int, default=16384, help="N dimension")
+    parser.add_argument("--K", type=int, default=2048, help="K dimension")
     parser.add_argument("--persistent", action="store_true", help="Use persistent kernel")
     args = parser.parse_args()
     num_processes = args.num_processes

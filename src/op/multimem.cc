@@ -82,6 +82,15 @@ MultimemOp::MultimemOp(Array<PrimExpr> args,
         << "multimem_red: dst must be global (multicast) buffer, got '"
         << dst_scope << "' for buffer '" << node->dst->name << "'";
     break;
+  case MultimemMode::kTmaStore:
+  case MultimemMode::kTmaRedStore:
+    ICHECK(src_scope == "shared" || src_scope == "shared.dyn")
+        << "multimem_tma_store: src must be shared memory, got '" << src_scope
+        << "' for buffer '" << node->src->name << "'";
+    ICHECK(dst_scope == "global")
+        << "multimem_tma_store: dst must be global (multicast) buffer, got '"
+        << dst_scope << "' for buffer '" << node->dst->name << "'";
+    break;
   }
 
   data_ = std::move(node);
@@ -227,6 +236,10 @@ LayoutMap MultimemOpNode::InferLayout(const LayoutInferArgs &T,
 // MultimemRewriter
 Stmt MultimemOpNode::Lower(const LowerArgs &T,
                            arith::Analyzer *analyzer) const {
+  if (mode == MultimemMode::kTmaStore || mode == MultimemMode::kTmaRedStore) {
+    return LowerBulkCopy(T, analyzer);
+  }
+
   // Step 1-2: Create SIMT loop and fuse/transform
   auto simt_loop = MakeSIMTLoop(analyzer);
   auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
@@ -263,6 +276,96 @@ Stmt MultimemOpNode::Lower(const LowerArgs &T,
   }
   result = MultimemRewriter(mcast_buf, mode, reduce_op).Rewrite(result);
   return result;
+}
+
+// === LowerBulkCopy ===
+// CTA-collective bulk async store from shared to multicast global.
+// Reuses the 1D address computation pattern from CopyNode::LowerBulkCopy1D,
+// but emits multimem.cp.async.bulk or multimem.cp.reduce.async.bulk PTX.
+Stmt MultimemOpNode::LowerBulkCopy(const LowerArgs &T,
+                                   arith::Analyzer *analyzer) const {
+  bool is_reduce = (mode == MultimemMode::kTmaRedStore);
+  // Both modes: src=shared, dst=mcast_global
+  auto &shared_tensor = src;
+  auto &global_tensor = dst;
+  auto &shared_range = src_range;
+  auto &global_range = dst_range;
+
+  // Compute total elements
+  PrimExpr shared_elements = 1;
+  for (size_t i = 0; i < shared_range.size(); i++) {
+    shared_elements *= shared_range[i]->extent;
+  }
+  PrimExpr elements = analyzer->Simplify(shared_elements);
+  PrimExpr size_bytes = elements * shared_tensor->dtype.bytes();
+
+  // 16-byte alignment check (at compile time if constant)
+  if (auto *imm = size_bytes.as<IntImmNode>()) {
+    ICHECK(imm->value % 16 == 0)
+        << "multimem_tma_store: transfer size must be 16-byte aligned, got "
+        << imm->value;
+  }
+
+  // Compute flat shared offset
+  std::vector<PrimExpr> shared_strides;
+  PrimExpr sh_stride = 1;
+  for (int i = static_cast<int>(shared_tensor->shape.size()) - 1; i >= 0; --i) {
+    shared_strides.insert(shared_strides.begin(), sh_stride);
+    sh_stride *= shared_tensor->shape[i];
+  }
+  PrimExpr shared_offset = 0;
+  for (size_t i = 0; i < shared_range.size(); i++) {
+    shared_offset += shared_range[i]->min * shared_strides[i];
+  }
+
+  // Compute flat global offset
+  std::vector<PrimExpr> global_strides;
+  PrimExpr gl_stride = 1;
+  for (int i = static_cast<int>(global_tensor->shape.size()) - 1; i >= 0; --i) {
+    global_strides.insert(global_strides.begin(), gl_stride);
+    gl_stride *= global_tensor->shape[i];
+  }
+  PrimExpr global_offset = 0;
+  for (size_t i = 0; i < global_range.size(); i++) {
+    global_offset += global_range[i]->min * global_strides[i];
+  }
+
+  // Build address_of(BufferLoad(buffer, {flat_offset}))
+  auto make_addr = [](const Buffer &buf, PrimExpr flat_idx) -> PrimExpr {
+    return Call(DataType::Handle(), builtin::address_of(),
+                {BufferLoad(buf, {flat_idx})});
+  };
+  PrimExpr smem_addr = make_addr(shared_tensor, shared_offset);
+  PrimExpr mcast_addr = make_addr(global_tensor, global_offset);
+
+  // Build function name based on mode and dtype
+  std::string func_name;
+  if (is_reduce) {
+    func_name = "tl::multimem::cp_reduce_async_bulk_";
+    switch (reduce_op) {
+    case 0: func_name += "add_"; break;
+    case 1: func_name += "min_"; break;
+    case 2: func_name += "max_"; break;
+    default: LOG(FATAL) << "Invalid reduce_op: " << reduce_op;
+    }
+    func_name += shared_tensor->dtype.is_float16() ? "f16" :
+                 shared_tensor->dtype.is_bfloat16() ? "bf16" : "f32";
+  } else {
+    func_name = "tl::multimem::cp_async_bulk";
+  }
+
+  Array<PrimExpr> extern_args;
+  extern_args.push_back(StringImm(func_name));
+  extern_args.push_back(mcast_addr);
+  extern_args.push_back(smem_addr);
+  extern_args.push_back(size_bytes);
+
+  Stmt bulk_copy = Evaluate(
+      Call(DataType::Handle(), builtin::call_extern(), extern_args));
+
+  // Gate with tid == 0 (single thread per CTA emits the PTX)
+  bulk_copy = IfThenElse(EQ(T.thread_var, T.thread_bounds->min), bulk_copy);
+  return bulk_copy;
 }
 
 // === Clone ===

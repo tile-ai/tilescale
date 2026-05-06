@@ -344,6 +344,135 @@ PR [#50](https://github.com/tile-ai/tilescale/pull/50) ("Sync mainstream TileLan
 
 ---
 
+## 10. Practical Lessons from PR #58
+
+This section captures the hard-won lessons from the `0.1.7.post1 → 0.1.9` sync (~50 upstream commits, ~80K LOC diff). Unlike PR #50 which cherry-picked individual commits, PR #58 merged the entire upstream delta in one operation — a much more aggressive approach that revealed systematic failure modes.
+
+### 10.1 `src/transform/` and `src/tl_templates/` Are NOT All TileScale-Exclusive
+
+Section 2.3 classifies these directories as "TileScale-specific pass infrastructure" and says "never overwrite". This is **misleading for bulk operations**. In practice:
+
+- **Most files in `src/transform/` exist in both repos** (e.g., `layout_inference.cc`, `loop_partition.cc`, `lower_tile_op.cc`, `inject_pipeline.cc`). They originated from upstream and were modified by both sides.
+- **Only a small subset are truly TileScale-only**: `lower_cpengine_intrin.cc`, `storage_access.cc/h`, `wgmma_sync_rewriter.cc`, `align_dynamic_shared_memory_allocations.cc`, `inject_ptx_async_copy.cc`, `inject_fence_proxy.cc`.
+- **Upstream also adds new transforms** (e.g., `producer_consumer_ws.cc`, `unroll_loop.cc`, `verify_parallel_loop.cc`, `fuse_mbarrier_arrive_expect_tx.cc`) that TileScale should absorb.
+- **The rule**: For each file, check whether it exists in the upstream commit (`git cat-file -e <sha>:<path>`). If it does, `--theirs` (take upstream) is the safe default. Only keep `--ours` for files that are genuinely TileScale-only.
+
+### 10.2 `git merge` vs `git cherry-pick`
+
+- **`git merge` (one-shot)**: Fast but produces ~400 conflicted files. Resolution must be done programmatically (batch `--ours`/`--theirs`). The batch resolution can silently corrupt files that need manual adaptation.
+- **`git cherry-pick` (per-commit)**: Safer, more auditable, but slow for 50+ commits.
+- **For >20 commits**: Consider `git merge --no-commit`, then resolve conflicts with the file-by-file decision table below, then `git commit`.
+
+### 10.3 Mandatory Build-Import-Run Loop
+
+After conflict resolution, the merge is **never** clean on the first try. Follow this loop until both `import tilelang` and a distributed example pass:
+
+```bash
+ninja -C build 2>&1 | grep error:     # fix C++ build errors
+python -c "import tilelang"             # fix Python import errors
+python examples/distributed/example_xxx.py  # fix runtime errors
+```
+
+Common failure categories and their symptoms:
+
+| Symptom | Root Cause | Fix |
+|---------|-----------|-----|
+| `undefined symbol: _ZN3tvm2tl31ApplyMultiVersionBufferRewriterE...` | Stale TileScale `.cc` kept as `--ours`; upstream added function to this file | `git checkout <upstream> -- <file>` |
+| `no matching function for call to 'VectorizeLoop(..., LayoutMap&)'` | Upstream removed/renamed an overload | Check upstream `loop_vectorize.h` for new signatures; adjust callers |
+| `'create_list_of_mbarrier' was not declared` / `'get_mbarrier' was not declared` | TileScale ops registered in old `builtin.cc`; removed in upstream | Add them back to `builtin.cc` and `builtin.h` |
+| `error: 'LoopPragmaUnroll' was not declared` | Upstream renamed to `PragmaUnrollLoop` | Bulk rename |
+| `error: 'atomicadd_elem_op' was not declared; did you mean 'atomic_add_elem_op'?` | Upstream added underscore | Bulk rename |
+| `Module has no function '__tilescale_init_table'` | Upstream `rt_mod_cuda.cc` uses `CUDAModuleCreate` instead of `TileScaleCUDAModuleCreate` | Restore `TileScaleCUDAModuleCreate` calls + include in `rt_mod_cuda.cc` |
+| `'JITKernel' object has no attribute 'initialize'` | Upstream `jit/kernel.py` doesn't have TileScale's `initialize()` | Add back `initialize()` method + `allocator` attribute |
+| `TVMFFIKernelAdapter has no attribute 'init_table'` | Upstream adapter doesn't have `init_table()` | Add back `init_table()` to `tilelang/jit/adapter/tvm_ffi.py` |
+| `'lazy_jit' not found in tilelang.jit` | Upstream `jit/__init__.py` doesn't export `lazy_jit` | Remove from `__init__.py` import, or add back implementation |
+
+### 10.4 The Distributed Codegen Must Be Surgically Preserved
+
+TileScale adds significant infrastructure to CUDA codegen that upstream knows nothing about. After merging upstream codegen files, the following **must** be present:
+
+**In `src/target/codegen_cuda.h`**:
+```cpp
+static inline bool use_distributed() {
+  const char *env = std::getenv("TILELANG_USE_DISTRIBUTED");
+  if (env) return std::string(env) == "1";
+  return false;
+}
+// Inside class CodeGenTileLangCUDA:
+bool use_distributed_{use_distributed()};
+bool need_multimem_h_{false};
+```
+
+**In `src/target/codegen_cuda.cc`**:
+```cpp
+#include "../op/distributed.h"
+#include "../op/sync.h"
+
+// Inside Finish():
+if (use_distributed_) {
+  decl_stream << "#include <tl_templates/cuda/distributed.h>\n";
+  decl_stream << "#include <tl_templates/cuda/sync.h>\n";
+  decl_stream << "#include <tl_templates/cuda/ldst.h>\n";
+  decl_stream << "extern \"C\" __constant__ uint64_t meta_data[1024];\n";
+}
+if (need_multimem_h_) {
+  decl_stream << "#include <tl_templates/cuda/multimem.h>\n";
+}
+```
+
+**In `src/target/rt_mod_cuda.cc`**: Replace upstream `CUDAModuleCreate` with `TileScaleCUDAModuleCreate` and add `#include "../runtime/tilescale_cuda_module.h"`.
+
+### 10.5 TileScale-Specific Python Utilities That Pass Silently
+
+These files exist only in TileScale and were not overwritten by the merge, but their callers in shared modules may have changed:
+
+| File | TileScale Purpose | What Can Break |
+|------|-------------------|----------------|
+| `tilelang/utils/allocator.py` | `BaseAllocator`, `get_allocator()` | `torch.set_default_device` conflicts with `all_gather_object`; `parse_device` must be correct |
+| `tilelang/utils/tensor.py` (line `tensor()` function) | `tilelang.tensor(...)` factory | Lost `tensor()` function if upstream file overwrites it |
+| `tilelang/utils/target.py` (line `parse_device()`) | device string parsing for allocator | `parse_device("cuda")` returning hardcoded 0 instead of `current_device()` |
+| `tilelang/distributed/utils.py` | `init_dist()`, `perf_fn()` | `torch.set_default_device("cuda")` before `init_process_group` causes NCCL device mismatch |
+
+### 10.6 The Device Mismatch Trap
+
+When `init_dist()` calls `torch.set_default_device("cuda")` (without device index), all PyTorch tensors default to `cuda:0`. With newer PyTorch (2.2+) passing `device_id` to `init_process_group`, NCCL enforces that collective tensors match the process group's device. This causes:
+
+```
+Torch.distributed.DistBackendError: Tensor found on device cuda:0 but backend constrained to cuda:1
+```
+
+**Fix**: Call `torch.cuda.set_device(local_rank)` BEFORE `init_process_group`, and use explicit device strings. Also ensure `parse_device("cuda")` returns `torch.cuda.current_device()` rather than hardcoded `0`.
+
+### 10.7 Duplicate Op Registration Detection
+
+After a large merge, upstream may have added op registrations that TileScale's files also register. Check with:
+
+```bash
+python -c "import tilelang" 2>&1 | grep "already registered"
+```
+
+If you see `Global Function 'tl.X' is already registered`, search for duplicate `refl::GlobalDef().def("tl.X", ...)` registrations and remove the TileScale copy (keep the upstream one).
+
+### 10.8 After Merge: Restore Truly TileScale-Only Files from Old Main
+
+After batch resolution, verify these files match the pre-sync TileScale version:
+
+| Category | Key Files |
+|----------|-----------|
+| Distributed C++ ops | `src/op/distributed.cc/h`, `src/op/remote_copy.cc/h`, `src/op/sync.cc/h`, `src/op/multimem.cc/h`, `src/op/multimem_rewriter.h`, `src/op/gemm_py.cc/h` |
+| Distributed runtime | `src/runtime/tilescale_cuda_module.cc/h`, `src/shared_memory/shared_memory.cc` |
+| Distributed templates | `src/tl_templates/cuda/distributed.h`, `sync.h`, `ldst.h`, `multimem.h` |
+| TileScale transforms | `lower_cpengine_intrin.cc`, `storage_access.cc/h`, `wgmma_sync_rewriter.cc`, `align_dynamic_shared_memory_allocations.cc`, `inject_ptx_async_copy.cc`, `inject_fence_proxy.cc` |
+| Python distributed | `tilelang/distributed/**`, `tilelang/language/distributed/**`, `tilelang/utils/allocator.py` |
+| Build config | `src/backend/cuda/CMakeLists.txt` (must include `tilescale_cuda_module.cc` and `shared_memory/shared_memory.cc`) |
+
+```bash
+# Restore a known-good TileScale file
+git show main:<path> > <path>
+```
+
+---
+
 ## 9. Checklist for Each Sync PR
 
 Before opening the PR:
@@ -353,8 +482,13 @@ Before opening the PR:
 - [ ] `CMakeLists.txt` conflict resolved; `tilescale_ext` target intact
 - [ ] `tilelang/__init__.py` still exports distributed namespace
 - [ ] Full build passes
+- [ ] `import tilelang` succeeds with no import errors
+- [ ] `tilelang.distributed` imports successfully
 - [ ] Shared `testing/python/` tests pass
 - [ ] At least one distributed example runs end-to-end
+- [ ] `TileScaleCUDAModuleCreate` used in `rt_mod_cuda.cc` (not `CUDAModuleCreate`)
+- [ ] Distributed template includes present in `codegen_cuda.cc` (`sync.h`, `ldst.h`, `distributed.h`, `multimem.h`, `meta_data`)
+- [ ] No duplicate TVM FFI registrations (`python -c "import tilelang"` clean)
 - [ ] API-breaking upstream changes reflected in TileScale distributed layer if applicable
 - [ ] PR title follows: `[Sync] Merge upstream TileLang <date or version range>`
 - [ ] PR description lists: last-synced upstream SHA, new upstream SHA, major features included, any skipped items with justification

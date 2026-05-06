@@ -417,6 +417,49 @@ private:
   bool has_tma_op_ = false;
 };
 
+static bool ExprUsesBlockIdx(const PrimExpr &expr,
+                             const std::unordered_set<const VarNode *> &block_vars) {
+  bool uses_block_idx = false;
+  PostOrderVisit(expr, [&uses_block_idx, &block_vars](const ObjectRef &node) {
+    if (auto var = node.as<VarNode>()) {
+      if (block_vars.count(var)) {
+        uses_block_idx = true;
+        return;
+      }
+      std::string name_hint = var->name_hint;
+      if (name_hint.find("blockIdx") != std::string::npos) {
+        uses_block_idx = true;
+      }
+    }
+  });
+  return uses_block_idx;
+}
+
+class BlockIdxIfDetector : public StmtVisitor {
+public:
+  static bool Detect(const Stmt &stmt,
+                     const std::unordered_set<const VarNode *> &block_vars) {
+    BlockIdxIfDetector detector(block_vars);
+    detector(stmt);
+    return detector.has_block_idx_if_;
+  }
+
+private:
+  explicit BlockIdxIfDetector(const std::unordered_set<const VarNode *> &block_vars)
+      : block_vars_(block_vars) {}
+
+  void VisitStmt_(const IfThenElseNode *op) final {
+    if (ExprUsesBlockIdx(op->condition, block_vars_)) {
+      has_block_idx_if_ = true;
+      return;
+    }
+    StmtVisitor::VisitStmt_(op);
+  }
+
+  const std::unordered_set<const VarNode *> &block_vars_;
+  bool has_block_idx_if_ = false;
+};
+
 Block MakeGroupBlock(const Stmt &stmt,
                      const Map<String, ObjectRef> &annotations) {
   Block block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{}, /*name_hint=*/"",
@@ -1164,9 +1207,20 @@ public:
 
 private:
   Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tir::attr::thread_extent &&
-        Downcast<IterVar>(op->node)->thread_tag == "threadIdx.x") {
-      thread_iv_ = Downcast<IterVar>(op->node);
+    if (op->attr_key == tir::attr::thread_extent) {
+      IterVar iv = Downcast<IterVar>(op->node);
+      if (iv->thread_tag == "blockIdx.x" || iv->thread_tag == "blockIdx.y" ||
+          iv->thread_tag == "blockIdx.z") {
+        block_vars_.insert(iv->var.get());
+        AttrStmt attr_stmt = Downcast<AttrStmt>(StmtExprMutator::VisitStmt_(op));
+        block_vars_.erase(iv->var.get());
+        return attr_stmt;
+      }
+      if (iv->thread_tag != "threadIdx.x") {
+        return StmtExprMutator::VisitStmt_(op);
+      }
+
+      thread_iv_ = iv;
       need_update_thread_extent_ = false;
       AttrStmt attr_stmt = Downcast<AttrStmt>(StmtExprMutator::VisitStmt_(op));
       if (need_update_thread_extent_) {
@@ -1176,20 +1230,32 @@ private:
       }
       thread_iv_ = {};
       return attr_stmt;
-    } else {
-      return StmtExprMutator::VisitStmt_(op);
     }
+    return StmtExprMutator::VisitStmt_(op);
   }
 
   // If users define a thread binding, we will replace the thread binding with
   // threadIdx.x We require the thread binding is threadIdx.x, and the extent is
   // the same as the thread extent
   Stmt VisitStmt_(const ForNode *op) final {
-    ICHECK(thread_iv_.defined());
+    if (op->kind == ForKind::kThreadBinding && op->thread_binding.defined()) {
+      String thread_tag = op->thread_binding.value()->thread_tag;
+      if (thread_tag == "blockIdx.x" || thread_tag == "blockIdx.y" ||
+          thread_tag == "blockIdx.z") {
+        block_vars_.insert(op->loop_var.get());
+        Stmt body = VisitStmt(op->body);
+        block_vars_.erase(op->loop_var.get());
+        For for_node = tvm::ffi::GetRef<For>(op);
+        for_node.CopyOnWrite()->body = body;
+        return for_node;
+      }
+    }
+
     For for_node = Downcast<For>(StmtExprMutator::VisitStmt_(op));
     if (for_node->kind == ForKind::kThreadBinding) {
       ICHECK(for_node->thread_binding.defined());
       String thread_tag = for_node->thread_binding.value()->thread_tag;
+      ICHECK(thread_iv_.defined());
       ICHECK(thread_tag == "threadIdx.x") << "Only support threadIdx.x";
       Var thread_iv = Downcast<Var>(for_node->loop_var);
       Stmt new_body =
@@ -1207,18 +1273,63 @@ private:
     }
 
     Block block = block_realize->block;
+    block.CopyOnWrite()->body =
+        RewriteBodyRespectingBlockIdxPartitions(block->body);
+    block_realize.CopyOnWrite()->block = block;
+    return block_realize;
+  }
+
+  Stmt RewriteBodyRespectingBlockIdxPartitions(const Stmt &body) {
+    if (!BlockIdxIfDetector::Detect(body, block_vars_)) {
+      return ApplyWarpSpecializationToBody(body);
+    }
+
+    if (auto *seq = body.as<SeqStmtNode>()) {
+      Array<Stmt> new_seq;
+      new_seq.reserve(seq->seq.size());
+      for (const auto &stmt : seq->seq) {
+        if (auto *ite = stmt.as<IfThenElseNode>()) {
+          if (ExprUsesBlockIdx(ite->condition, block_vars_)) {
+            new_seq.push_back(RewriteBlockIdxPartition(ite));
+            continue;
+          }
+        }
+        new_seq.push_back(StmtExprMutator::VisitStmt(stmt));
+      }
+      return SeqStmt(std::move(new_seq));
+    }
+
+    if (auto *ite = body.as<IfThenElseNode>()) {
+      if (ExprUsesBlockIdx(ite->condition, block_vars_)) {
+        return RewriteBlockIdxPartition(ite);
+      }
+    }
+
+    return ApplyWarpSpecializationToBody(body);
+  }
+
+  Stmt RewriteBlockIdxPartition(const IfThenElseNode *ite) {
+    Stmt then_case = ApplyWarpSpecializationToBody(ite->then_case);
+    Optional<Stmt> else_case = std::nullopt;
+    if (ite->else_case.defined()) {
+      else_case = ApplyWarpSpecializationToBody(ite->else_case.value());
+    }
+    return IfThenElse(ite->condition, then_case, else_case);
+  }
+
+  Stmt ApplyWarpSpecializationToBody(const Stmt &body) {
     WarpSpecializedRoleMarker marker(buffer_data_to_buffer_);
-    marker.Prepare(block);
-    marker(block);
+    marker.Prepare(body);
+    marker(body);
     if (!marker.HasProducer()) {
       // Cannot detect any producer here, directly return.
-      return block_realize;
+      return body;
     }
 
     if (disable_warp_specialized_) {
       WSCodeEmitter mbarrier_emitter(true, thread_iv_, buffer_data_to_buffer_,
                                      marker, true);
-      auto code = mbarrier_emitter(block->body);
+      auto code = mbarrier_emitter(body);
       int num_barriers = mbarrier_emitter.num_barriers_;
       Array<PrimExpr> barrier_num_threads;
       barrier_num_threads.reserve(num_barriers);
@@ -1228,15 +1339,13 @@ private:
       }
       Stmt init_barrier = Evaluate(Call(
           DataType::Handle(), create_list_of_mbarrier(), barrier_num_threads));
-      block.CopyOnWrite()->body = SeqStmt({init_barrier, code});
-      block_realize.CopyOnWrite()->block = block;
-      return block_realize;
+      return SeqStmt({init_barrier, code});
     }
     WSCodeEmitter producer(true, thread_iv_, buffer_data_to_buffer_, marker);
     WSCodeEmitter consumer(false, thread_iv_, buffer_data_to_buffer_, marker,
                            false);
-    Stmt producer_code = producer(block->body);
-    Stmt consumer_code = consumer(block->body);
+    Stmt producer_code = producer(body);
+    Stmt consumer_code = consumer(body);
     PrimExpr consumer_thread_extent = thread_iv_->dom->extent;
     PrimExpr producer_thread_extent = thread_iv_->dom->extent;
     // Need one warp-group for bulk-copy only case
@@ -1269,16 +1378,14 @@ private:
 
     Stmt init_barrier = Evaluate(Call(
         DataType::Handle(), create_list_of_mbarrier(), barrier_num_threads));
-    Stmt body = IfThenElse(GE(thread_iv_->var, consumer_thread_extent),
-                           producer_code, consumer_code);
+    Stmt ws_body = IfThenElse(GE(thread_iv_->var, consumer_thread_extent),
+                              producer_code, consumer_code);
     // Add an attr here to handle the partial thread count in ThreadSync pass.
     Array<IntImm> ws_partition = {Downcast<IntImm>(producer_thread_extent),
                                   Downcast<IntImm>(consumer_thread_extent)};
-    body = AttrStmt(ws_partition, attr::kWarpSpecializationScope, 0, body);
+    ws_body = AttrStmt(ws_partition, attr::kWarpSpecializationScope, 0, ws_body);
 
-    block.CopyOnWrite()->body = SeqStmt({init_barrier, body});
-    block_realize.CopyOnWrite()->block = block;
-    return block_realize;
+    return SeqStmt({init_barrier, ws_body});
   }
 
   WarpSpecializedRewriter() = default;
@@ -1286,6 +1393,7 @@ private:
   Map<Var, Buffer> buffer_data_to_buffer_;
   Map<Buffer, Optional<Stmt>> buffer_lca_;
   Map<Buffer, Buffer> buffer_remap_;
+  std::unordered_set<const VarNode *> block_vars_;
   IterVar thread_iv_;
   Optional<PrimExpr> updated_thread_extent_;
   bool need_update_thread_extent_ = false;
