@@ -22,13 +22,7 @@ namespace tl {
 
 using namespace tir;
 
-enum class MultimemMode : int {
-  kLdReduce = 0,
-  kSt = 1,
-  kRed = 2,
-  kTmaStore = 3,    // multimem.cp.async.bulk: shared → mcast_global (plain store)
-  kTmaRedStore = 4, // multimem.cp.reduce.async.bulk: shared → mcast_global (reduce)
-};
+enum class MultimemMode : int { kLdReduce = 0, kSt = 1, kRed = 2 };
 
 /*!
  * \brief Unified multimem operator for NVSwitch SHARP multicast operations.
@@ -78,7 +72,6 @@ private:
   PrimExpr MakePredicate(arith::Analyzer *analyzer, const Array<IterVar> &ivs,
                          Array<PrimExpr> extents, int src_dst) const;
   int GetCoalescedWidth() const;
-  Stmt LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const;
 };
 
 class MultimemOp : public TileOperator {
