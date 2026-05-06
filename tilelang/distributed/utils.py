@@ -62,10 +62,10 @@ def init_dist(local_rank: int, num_local_ranks: int):
     if "device_id" in sig.parameters:
         # noinspection PyTypeChecker
         params["device_id"] = torch.device(f"cuda:{local_rank}")
+    torch.cuda.set_device(local_rank)
     dist.init_process_group(**params)
     torch.set_default_dtype(torch.bfloat16)
-    torch.set_default_device("cuda")
-    torch.cuda.set_device(local_rank)
+    torch.set_default_device(f"cuda:{local_rank}")
 
     return dist.get_rank(), dist.get_world_size(), dist.new_group(list(range(num_local_ranks * num_nodes)))
 
