@@ -33,8 +33,11 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+#include <unordered_set>
+
 #include "../op/builtin.h"
 #include "common/assume.h"
+#include "common/attr.h"
 #include "tir/analysis/var_use_def_analysis.h"
 #include "tvm/node/cast.h"
 #include "tvm/runtime/logging.h"
@@ -62,6 +65,15 @@ public:
     for (auto param : params.value()) {
       non_restrict_params_.push_back(param);
     }
+  }
+
+  void SetClusterDims(Array<Integer> cluster_dims) {
+    cluster_dims_ = std::move(cluster_dims);
+  }
+
+  void SetHostFuncSignature(const tir::PrimFunc &func) {
+    host_params_ = func->params;
+    host_buffer_map_ = func->buffer_map;
   }
 
   tir::Stmt VisitStmt_(const tir::AttrStmtNode *op) final {
@@ -100,39 +112,199 @@ public:
 
 private:
   bool found_device_region_{false};
+  Array<tir::Var> host_params_;
+  Map<tir::Var, tir::Buffer> host_buffer_map_;
   Array<tir::Var> non_restrict_params_;
+  Optional<Array<Integer>> cluster_dims_{std::nullopt};
+  Optional<String> code_block_source_{std::nullopt};
+  Optional<String> code_block_entry_name_{std::nullopt};
 
-  Stmt wrapBodyWithHostSideAssumes(Stmt body) {
+  static void SortDeviceParams(std::vector<tir::Var> *params) {
+    std::sort(params->begin(), params->end(),
+              [](const tir::Var &a, const tir::Var &b) {
+                auto sort_key = [](const tir::Var &var) {
+                  return std::tuple{
+                      !var->dtype.is_handle(),
+                      var->name_hint,
+                  };
+                };
+                return sort_key(a) < sort_key(b);
+              });
+  }
+
+  std::tuple<Array<tir::Var>, Array<tir::Buffer>>
+  CollectSourceKernelSignature() const {
+    std::vector<tir::Var> params;
+    std::unordered_set<std::string> seen_vars;
+
+    auto push = [&](const tir::Var &var) {
+      if (var.defined() && seen_vars.insert(var->name_hint).second) {
+        params.push_back(var);
+      }
+    };
+
+    Array<tir::Buffer> buffers_to_declare;
+    for (const auto &kv : host_buffer_map_) {
+      const tir::Buffer &buf = kv.second;
+      push(buf->data);
+      buffers_to_declare.push_back(buf);
+      for (const PrimExpr &dim : buf->shape) {
+        if (const auto *var = dim.as<tir::VarNode>()) {
+          push(GetRef<tir::Var>(var));
+        }
+      }
+      for (const PrimExpr &stride : buf->strides) {
+        if (const auto *var = stride.as<tir::VarNode>()) {
+          push(GetRef<tir::Var>(var));
+        }
+      }
+      if (const auto *var = buf->elem_offset.as<tir::VarNode>()) {
+        push(GetRef<tir::Var>(var));
+      }
+    }
+
+    SortDeviceParams(&params);
+    return {Array<tir::Var>(params.begin(), params.end()), buffers_to_declare};
+  }
+
+  class SourceKernelAttrExtractor : public tir::StmtMutator {
+  public:
+    static Stmt Extract(Stmt body, Optional<String> *code_block_source,
+                        Optional<String> *code_block_entry_name) {
+      SourceKernelAttrExtractor extractor(code_block_source,
+                                          code_block_entry_name);
+      return extractor(std::move(body));
+    }
+
+  private:
+    explicit SourceKernelAttrExtractor(Optional<String> *code_block_source,
+                                       Optional<String> *code_block_entry_name)
+        : code_block_source_(code_block_source),
+          code_block_entry_name_(code_block_entry_name) {}
+
+    Stmt VisitStmt_(const tir::AttrStmtNode *op) final {
+      if (op->attr_key == tl::attr::kCodeBlockSource) {
+        if (auto str = op->value.as<StringImmNode>()) {
+          *code_block_source_ = str->value;
+        } else {
+          LOG(FATAL) << "Expected `" << tl::attr::kCodeBlockSource
+                     << "` AttrStmt to carry a StringImm value, but got "
+                     << op->value->GetTypeKey();
+        }
+        return VisitStmt(op->body);
+      }
+
+      if (op->attr_key == tl::attr::kCodeBlockEntryName) {
+        if (auto str = op->value.as<StringImmNode>()) {
+          *code_block_entry_name_ = str->value;
+        } else {
+          LOG(FATAL) << "Expected `" << tl::attr::kCodeBlockEntryName
+                     << "` AttrStmt to carry a StringImm value, but got "
+                     << op->value->GetTypeKey();
+        }
+        return VisitStmt(op->body);
+      }
+
+      return tir::StmtMutator::VisitStmt_(op);
+    }
+
+    Optional<String> *code_block_source_;
+    Optional<String> *code_block_entry_name_;
+  };
+
+  // Wrap body with assumes, substituting variables in assumes with the
+  // corresponding variables in the device body based on name_hint matching.
+  // This substitution is necessary because host-side assume variables may be
+  // different Var objects from device-side parameters, even if they have the
+  // same name. We always perform substitution to ensure ConvertSSA sees
+  // consistent variable references.
+  Stmt wrapBodyWithHostSideAssumes(
+      Stmt body, const std::unordered_map<std::string, tir::Var> &name_to_var) {
+    // Build substitution map: assume_var -> body_var
+    // Always substitute if we find a matching name, regardless of whether
+    // it's the same object. This ensures ConvertSSA treats them as the same
+    // variable.
+    auto substitute_func =
+        [&name_to_var](const tir::Var &var) -> Optional<PrimExpr> {
+      auto it = name_to_var.find(var->name_hint);
+      if (it != name_to_var.end()) {
+        return it->second;
+      }
+      return Optional<PrimExpr>();
+    };
+
     for (auto it = host_assumes_.rbegin(); it != host_assumes_.rend(); ++it) {
-      body =
-          AttrStmt((*it)->node, tir::attr::tilelang_assume, (*it)->value, body);
+      // Substitute variables in the assume condition
+      PrimExpr original_node = Downcast<PrimExpr>((*it)->node);
+      PrimExpr substituted_node =
+          tir::Substitute(original_node, substitute_func);
+      body = AttrStmt(substituted_node, tir::attr::tilelang_assume,
+                      (*it)->value, body);
     }
     return body;
   }
 
   tir::Stmt SplitDeviceFunc(tir::Stmt body, tvm::Target device_target) {
+    code_block_source_ = std::nullopt;
+    code_block_entry_name_ = std::nullopt;
+    body = SourceKernelAttrExtractor::Extract(
+        std::move(body), &code_block_source_, &code_block_entry_name_);
 
-    auto [params, buffers_to_declare] =
+    // Normal kernels infer device parameters from use-def of the device body.
+    // Source kernels have no meaningful DSL body, so their device signature
+    // must be reconstructed explicitly from the host PrimFunc signature and
+    // buffer metadata.
+    auto [old_params, buffers_to_declare] =
         [&]() -> std::tuple<Array<tir::Var>, Array<tir::Buffer>> {
+      if (code_block_source_) {
+        return CollectSourceKernelSignature();
+      }
+
       tir::VarUseDefAnalyzer use_def(/*defined_vars=*/{},
                                      /*visit_thread_extent=*/true);
       use_def(body);
 
-      // Sort first by variable type, then by variable name
       std::vector<tir::Var> params{use_def.undefined_.begin(),
                                    use_def.undefined_.end()};
-      std::sort(params.begin(), params.end(),
-                [](const tir::Var &a, const tir::Var &b) {
-                  auto sort_key = [](const tir::Var &var) {
-                    return std::tuple{
-                        !var->dtype.is_handle(),
-                        var->name_hint,
-                    };
-                  };
-                  return sort_key(a) < sort_key(b);
-                });
-      return {params, use_def.undefined_buffers_};
+      SortDeviceParams(&params);
+      return {Array<tir::Var>(params.begin(), params.end()),
+              use_def.undefined_buffers_};
     }();
+
+    // Create new parameter variables for the device function to avoid sharing
+    // Var objects with the host function. This prevents ConvertSSA from
+    // incorrectly renaming variables when it processes multiple functions.
+    Array<tir::Var> params;
+    Map<tir::Var, PrimExpr> var_remap;
+    std::unordered_map<std::string, tir::Var> name_to_var;
+    for (const auto &old_var : old_params) {
+      tir::Var new_var(old_var->name_hint, old_var->type_annotation);
+      params.push_back(new_var);
+      var_remap.Set(old_var, new_var);
+      name_to_var[old_var->name_hint] = new_var;
+    }
+
+    // Substitute old variables with new ones in the body
+    body = tir::Substitute(body, var_remap);
+
+    // Also remap buffers to use new variables
+    Array<tir::Buffer> new_buffers_to_declare;
+    for (const auto &buf : buffers_to_declare) {
+      auto new_shape = buf->shape.Map(
+          [&](const PrimExpr &e) { return tir::Substitute(e, var_remap); });
+      auto new_strides = buf->strides.Map(
+          [&](const PrimExpr &e) { return tir::Substitute(e, var_remap); });
+      auto new_elem_offset = tir::Substitute(buf->elem_offset, var_remap);
+      auto new_data = var_remap.count(buf->data)
+                          ? Downcast<tir::Var>(var_remap[buf->data])
+                          : buf->data;
+      tir::Buffer new_buf(new_data, buf->dtype, new_shape, new_strides,
+                          new_elem_offset, buf->name, buf->data_alignment,
+                          buf->offset_factor, buf->buffer_type,
+                          buf->axis_separators, buf->span);
+      new_buffers_to_declare.push_back(new_buf);
+    }
+    buffers_to_declare = new_buffers_to_declare;
 
     // CodeGenCPU is used for some device-side targets, such as
     // "ext_dev", and expects to be able to return a int32_t status
@@ -156,21 +328,46 @@ private:
       body = tir::DeclBuffer(buf, std::move(body));
     }
 
-    // Copy assumes from host-side to device-side.
-    body = wrapBodyWithHostSideAssumes(body);
+    // Copy assumes from host-side to device-side, with variable substitution.
+    // This must be done after DeclBuffer so that assumes are at the outermost
+    // level of the function body. This ensures ConvertSSA correctly identifies
+    // that assume variables refer to function parameters.
+    body = wrapBodyWithHostSideAssumes(body, name_to_var);
+
+    // Remap non_restrict_params to use new parameter variables
+    Array<tir::Var> remapped_non_restrict_params;
+    for (const auto &old_var : non_restrict_params_) {
+      if (var_remap.count(old_var)) {
+        remapped_non_restrict_params.push_back(
+            Downcast<tir::Var>(var_remap[old_var]));
+      } else {
+        remapped_non_restrict_params.push_back(old_var);
+      }
+    }
 
     tir::PrimFunc device_func(params, body, kernel_ret_type);
-    device_func =
-        WithAttrs(std::move(device_func),
-                  {{tvm::attr::kTarget, device_target},
-                   {tir::attr::kNoAlias, true},
-                   {tir::attr::kIsGlobalFunc, true},
-                   {tl::attr::kNonRestrictParams, non_restrict_params_}});
+    Map<String, ffi::Any> device_attrs = {
+        {tvm::attr::kTarget, device_target},
+        {tir::attr::kNoAlias, true},
+        {tir::attr::kIsGlobalFunc, true},
+        {tl::attr::kNonRestrictParams, remapped_non_restrict_params}};
+    if (cluster_dims_.defined()) {
+      device_attrs.Set("cluster_dims", cluster_dims_.value());
+    }
+    if (code_block_source_) {
+      device_attrs.Set(tl::attr::kCodeBlockSource, code_block_source_.value());
+    }
+    device_func = WithAttrs(std::move(device_func), device_attrs);
 
     GlobalVar kernel_symbol_global = var_supply_();
+    if (code_block_entry_name_) {
+      kernel_symbol_global = GlobalVar(code_block_entry_name_.value());
+    }
+
     (*device_mod_)->Add(kernel_symbol_global, device_func);
+    // Use old_params as call arguments (host-side variables)
     Array<PrimExpr> args =
-        params.Map([](const tir::Var &var) -> PrimExpr { return var; });
+        old_params.Map([](const tir::Var &var) -> PrimExpr { return var; });
 
     if (can_propagate_errors) {
       tir::Var kernel_error_code("kernel_error_code", success->dtype);
@@ -199,12 +396,20 @@ private:
 tir::PrimFunc SplitHostDevice(tir::PrimFunc func, IRModule *device_mod,
                               std::function<GlobalVar()> var_supply) {
   HostDeviceSplitter splitter(device_mod, std::move(var_supply));
+  splitter.SetHostFuncSignature(func);
   // Propagate non-restrict parameter list from host func to device kernels
   if (auto opt = func->GetAttr<Array<tir::Var>>(tl::attr::kNonRestrictParams)) {
     splitter.SetNonRestrictParams(opt.value());
     // Remove the attribute from host-side PrimFunc; it only matters for device
     // codegen.
     func = tvm::WithoutAttr(std::move(func), tl::attr::kNonRestrictParams);
+  }
+  // Propagate cluster_dims from host func to device kernel.
+  // LowerOpaqueBlock sets this attr on the pre-split kernel; after splitting
+  // it must live on the device side so the codegen can emit a cluster launch.
+  if (auto opt = func->GetAttr<Array<Integer>>("cluster_dims")) {
+    splitter.SetClusterDims(opt.value());
+    func = tvm::WithoutAttr(std::move(func), "cluster_dims");
   }
 
   if (auto body = splitter(func->body); !body.same_as(func->body)) {

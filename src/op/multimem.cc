@@ -252,7 +252,7 @@ Stmt MultimemOpNode::Lower(const LowerArgs &T,
   // Step 4: Lower the parallel loop (PartitionLoop + VectorizeLoop)
   auto loop_layout = par_op->GetLoopLayout();
   Stmt result = LowerParallelLoop(par_op->GetRoot(), loop_layout, T.thread_var,
-                                  analyzer, par_op->GetPredicate(T.thread_var));
+                                  analyzer, T.layout_map, par_op->GetPredicate(T.thread_var));
 
   // Step 5: Post-process — replace mcast buffer accesses with multimem
   // call_extern

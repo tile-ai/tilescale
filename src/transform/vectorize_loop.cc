@@ -32,13 +32,18 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
+#include "../op/builtin.h"
+#include "../op/utils.h"
+#include "../target/utils.h"
 #include "arith/scalable_expression.h"
 #include "tir/analysis/check_contains.h"
+#include "tvm/ffi/cast.h"
 
 namespace tvm {
 namespace tl {
@@ -116,6 +121,69 @@ inline PrimExpr BroadcastTo(PrimExpr e, int lanes, bool is_scalable) {
       << " is_scalable=" << e.dtype().is_scalable_vector() << " to " << lanes;
 
   return Broadcast(e, CreateNewLanes(is_scalable, lanes));
+}
+
+/*!
+ * \brief Extract BufferLoad from an expression that may be wrapped in
+ * address_of.
+ */
+inline Optional<BufferLoad> ExtractBufferLoadForAtomic(const PrimExpr &expr) {
+  if (const auto *load = expr.as<BufferLoadNode>()) {
+    return tvm::ffi::GetRef<BufferLoad>(load);
+  }
+  if (const auto *call = expr.as<CallNode>()) {
+    if (call->op.same_as(builtin::address_of()) && !call->args.empty()) {
+      if (const auto *load = call->args[0].as<BufferLoadNode>()) {
+        return tvm::ffi::GetRef<BufferLoad>(load);
+      }
+    }
+    if (call->op.same_as(tl::access_ptr()) && !call->args.empty()) {
+      if (const auto *load = call->args[0].as<BufferLoadNode>()) {
+        return tvm::ffi::GetRef<BufferLoad>(load);
+      }
+    }
+    // Handle tvm_access_ptr: args are (dtype_annotation, data, offset, extent,
+    // access_mask)
+    if (call->op.same_as(builtin::tvm_access_ptr()) && call->args.size() >= 3) {
+      DataType dtype = call->args[0].dtype();
+      Var data_var = Downcast<Var>(call->args[1]);
+      PrimExpr offset = call->args[2];
+      // Create a dummy buffer with the correct dtype and a BufferLoad from data
+      // + offset
+      Buffer dummy_buf(data_var, dtype, {Integer(1)}, {}, Integer(0),
+                       data_var->name_hint, 0, 0, kDefault);
+      return BufferLoad(dummy_buf, {offset});
+    }
+  }
+  return Optional<BufferLoad>();
+}
+
+/*!
+ * \brief Get the vectorized atomic add op based on vector size.
+ */
+inline Op GetVectorizedAtomicOp(int vector_size) {
+  switch (vector_size) {
+  case 4:
+    return atomic_addx4_elem_op();
+  case 2:
+    return atomic_addx2_elem_op();
+  default:
+    return atomic_add_elem_op();
+  }
+}
+
+/*!
+ * \brief Get the max vector size supported by the given dtype for atomic ops.
+ */
+inline int GetMaxAtomicVectorSize(DataType dtype, Target target) {
+  if (dtype.is_float16() || dtype.is_bfloat16()) {
+    return 2;
+  }
+  if (dtype.is_float() && dtype.bits() == 32 &&
+      TargetHasSMVersionGE(target, 90)) {
+    return 4;
+  }
+  return 1;
 }
 
 // Rewrite vectorized allocation access
@@ -421,6 +489,7 @@ public:
       return std::move(var);
     }
   }
+
   // IfThenElse expr
   PrimExpr MutateIfThenElseExpr_(const CallNode *op) {
     PrimExpr cond = this->VisitExpr(op->args[0]);
@@ -449,6 +518,85 @@ public:
       }
     }
   }
+
+  // Address of: remove vectorized var from indices to get base address
+  // e.g., T.address_of(buf[base + vec]) -> T.address_of(buf[base])
+  PrimExpr MutateAddressOfCall_(const CallNode *op) {
+    ICHECK(op->op.same_as(builtin::address_of()));
+    ICHECK_EQ(op->args.size(), 1);
+
+    auto buffer_load = op->args[0].as<BufferLoadNode>();
+    if (!buffer_load) {
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    }
+
+    // Remove the vectorized var from indices by substituting var_ with 0
+    Array<PrimExpr> new_indices;
+    for (const auto &index : buffer_load->indices) {
+      PrimExpr new_index = Substitute(index, {{var_, IntImm(var_->dtype, 0)}});
+      new_indices.push_back(analyzer_.Simplify(new_index));
+    }
+
+    BufferLoad new_load = GetRef<BufferLoad>(buffer_load);
+    if (!new_indices.same_as(buffer_load->indices)) {
+      auto writer = new_load.CopyOnWrite();
+      writer->indices = new_indices;
+    }
+
+    return Call(op->dtype, op->op, {new_load});
+  }
+
+  // tvm_access_ptr: substitute loop var with 0 in offset to get base address
+  // args are (dtype_annotation, data, offset, extent, access_mask)
+  PrimExpr MutateAccessPtrCall_(const CallNode *op) {
+    ICHECK(op->op.same_as(builtin::tvm_access_ptr()));
+    ICHECK_GE(op->args.size(), 5);
+
+    // Only the offset (args[2]) may contain the loop var; substitute it with 0
+    PrimExpr offset = op->args[2];
+    PrimExpr new_offset = Substitute(offset, {{var_, IntImm(var_->dtype, 0)}});
+    new_offset = analyzer_.Simplify(new_offset);
+
+    if (new_offset.same_as(offset)) {
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    }
+
+    Array<PrimExpr> new_args = op->args;
+    new_args.Set(2, new_offset);
+    return Call(op->dtype, op->op, new_args);
+  }
+
+  // tl.access_ptr: substitute loop var with 0 in BufferLoad indices.
+  // args are (base_load, extent, access_mask)
+  PrimExpr MutateTLAccessPtrCall_(const CallNode *op) {
+    ICHECK(op->op.same_as(tl::access_ptr()));
+    ICHECK_GE(op->args.size(), 3);
+
+    auto buffer_load = op->args[0].as<BufferLoadNode>();
+    if (!buffer_load) {
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    }
+
+    Array<PrimExpr> new_indices;
+    for (const auto &index : buffer_load->indices) {
+      PrimExpr new_index = Substitute(index, {{var_, IntImm(var_->dtype, 0)}});
+      new_indices.push_back(analyzer_.Simplify(new_index));
+    }
+
+    if (new_indices.same_as(buffer_load->indices)) {
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    }
+
+    BufferLoad new_load = GetRef<BufferLoad>(buffer_load);
+    auto writer = new_load.CopyOnWrite();
+    writer->indices = new_indices;
+    LegalizeBufferLoadDType(writer);
+
+    Array<PrimExpr> new_args = op->args;
+    new_args.Set(0, new_load);
+    return Call(op->dtype, op->op, new_args);
+  }
+
   // Reinterpret expr
   PrimExpr MutateReinterpretExpr_(const CallNode *op) {
     ICHECK(op->op.same_as(builtin::reinterpret()));
@@ -465,22 +613,163 @@ public:
       }
     }
   }
+  // Atomic add vectorization
+  PrimExpr MutateAtomicAddExpr_(const CallNode *op) {
+    ICHECK(op->op.same_as(atomic_add_elem_op()));
+
+    // Must have at least 2 args (dst_ptr and src)
+    if (op->args.size() < 2) {
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    }
+
+    // Get the vector size from var_lanes_
+    auto lanes_ptr = as_const_int(var_lanes_);
+    if (!lanes_ptr || *lanes_ptr <= 1) {
+      // Not in vectorized context or vector size is 1
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    }
+    int vector_size = static_cast<int>(*lanes_ptr);
+    auto dst = VisitExpr(op->args[0]);
+    auto src = VisitExpr(op->args[1]);
+
+    // If src is not Ramp/Broadcasted, it must be a scalar or something.
+    // Broadcast to vector size if needed
+    if (src.same_as(op->args[1])) {
+      src = BroadcastTo(src, vector_size, src.dtype().is_scalable_vector());
+    }
+
+    // Check if dtype supports this vector size
+    auto dst_buffer_load = ExtractBufferLoadForAtomic(dst);
+    Target target = Target::Current(false);
+    int max_vec_size =
+        GetMaxAtomicVectorSize(dst_buffer_load.value()->buffer->dtype, target);
+    if (vector_size > max_vec_size) {
+      // Vector size not supported for this dtype, cannot vectorize
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    }
+
+    // Return the vectorized atomic op
+    return Call(op->dtype, GetVectorizedAtomicOp(vector_size), {dst, src});
+  }
+
+  static std::optional<int> GetAccessPtrElementBits(const PrimExpr &expr) {
+    const auto *ptr_call = expr.as<CallNode>();
+    if (ptr_call == nullptr) {
+      return std::nullopt;
+    }
+    if (ptr_call->op.same_as(builtin::tvm_access_ptr())) {
+      ICHECK(!ptr_call->args.empty());
+      DataType dtype = ptr_call->args[0].dtype();
+      return dtype.bits() * dtype.lanes();
+    }
+    if (ptr_call->op.same_as(tl::access_ptr())) {
+      ICHECK_GE(ptr_call->args.size(), 3U);
+      const auto *buffer_load = ptr_call->args[0].as<BufferLoadNode>();
+      ICHECK(buffer_load) << "tl.access_ptr arg0 must be BufferLoad";
+      DataType dtype = buffer_load->buffer->dtype;
+      return dtype.bits() * dtype.lanes();
+    }
+    return std::nullopt;
+  }
+
+  static std::optional<int> GetCPAsyncBitsPerCall(const CallNode *op,
+                                                  const PrimExpr &count) {
+    const auto *count_imm = count.as<IntImmNode>();
+    if (count_imm == nullptr) {
+      return std::nullopt;
+    }
+    int scalar_count = static_cast<int>(count_imm->value);
+    if (scalar_count <= 0) {
+      return std::nullopt;
+    }
+    if (op->op.same_as(builtin::ptx_cp_async())) {
+      return scalar_count * 8;
+    }
+    ICHECK(op->op.same_as(tl::ptx_cp_async()));
+    auto dst_elem_bits = GetAccessPtrElementBits(op->args[0]);
+    auto src_elem_bits = GetAccessPtrElementBits(op->args[1]);
+    if (!dst_elem_bits.has_value() || !src_elem_bits.has_value()) {
+      return std::nullopt;
+    }
+    int dst_total_bits = scalar_count * dst_elem_bits.value();
+    int src_total_bits = scalar_count * src_elem_bits.value();
+    ICHECK_EQ(dst_total_bits, src_total_bits)
+        << "tl.ptx_cp_async requires src/dst transfer widths to match, but got "
+        << dst_total_bits << " vs " << src_total_bits << " bits";
+    return dst_total_bits;
+  }
+
+  // Vectorized cp.async widening.
+  // builtin::ptx_cp_async keeps the transfer width in bytes, while
+  // tl::ptx_cp_async keeps it in logical element counts. The generic
+  // vectorization pass widens either form by the vector lane count and lets
+  // the final codegen validate the derived PTX byte width.
+  PrimExpr MutatePTXCPAsyncExpr_(const CallNode *op) {
+    ICHECK(op->op.same_as(builtin::ptx_cp_async()) ||
+           op->op.same_as(tl::ptx_cp_async()));
+    if (op->args.size() != 3 && op->args.size() != 4) {
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    }
+
+    PrimExpr dst = VisitExpr(op->args[0]);
+    PrimExpr src = VisitExpr(op->args[1]);
+    PrimExpr count = VisitExpr(op->args[2]);
+    Optional<PrimExpr> predicate = std::nullopt;
+    if (op->args.size() == 4) {
+      auto pred = VisitExpr(op->args[3]);
+      if (pred.dtype().is_scalable_or_fixed_length_vector()) {
+        need_scalarize_ = true;
+        return tvm::ffi::GetRef<PrimExpr>(op);
+      }
+      predicate = pred;
+    }
+
+    auto lanes_ptr = as_const_int(var_lanes_);
+    if (!lanes_ptr || *lanes_ptr <= 1) {
+      Array<PrimExpr> new_args{dst, src, count};
+      if (predicate.defined()) {
+        new_args.push_back(predicate.value());
+      }
+      if (new_args.same_as(op->args)) {
+        return tvm::ffi::GetRef<PrimExpr>(op);
+      }
+      return Call(op->dtype, op->op, new_args);
+    }
+
+    auto bits_per_call = GetCPAsyncBitsPerCall(op, count);
+    if (!bits_per_call.has_value()) {
+      need_scalarize_ = true;
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    }
+
+    int vector_size = static_cast<int>(*lanes_ptr);
+    int total_bits = bits_per_call.value() * vector_size;
+    if (total_bits % 8 != 0) {
+      need_scalarize_ = true;
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    }
+    int total_bytes = total_bits / 8;
+    if (!IsValidCPAsyncTransferBytes(total_bytes)) {
+      need_scalarize_ = true;
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    }
+
+    int total_count =
+        static_cast<int>(Downcast<IntImm>(count)->value) * vector_size;
+    Array<PrimExpr> new_args{dst, src, IntImm(count.dtype(), total_count)};
+    if (predicate.defined()) {
+      new_args.push_back(predicate.value());
+    }
+    if (new_args.same_as(op->args)) {
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    }
+    return Call(op->dtype, op->op, new_args);
+  }
+
   // Call
   PrimExpr VisitExpr_(const CallNode *op) final {
     if (op->op.same_as(builtin::if_then_else())) {
       return MutateIfThenElseExpr_(op);
-    } else if (op->op.same_as(builtin::call_extern())) {
-      // Check if this is a tl::ld or tl::st call which can be vectorized
-      if (op->args.size() >= 3) {
-        auto func_name_node = op->args[0].as<StringImmNode>();
-        if (func_name_node) {
-          std::string func_name = func_name_node->value;
-          if (func_name.rfind("tl::ld<", 0) == 0 ||
-              func_name.rfind("tl::st<", 0) == 0) {
-            return MutateTlLdStExpr_(op, func_name.rfind("tl::ld<", 0) == 0);
-          }
-        }
-      }
     } else if (op->op.same_as(builtin::texture2d_load())) {
       int lane = 0;
       Array<PrimExpr> fcd = MutateArray({op->args.back()}, &lane);
@@ -498,6 +787,18 @@ public:
       return Call(op->dtype.with_lanes(lane), op->op, new_args);
     } else if (op->op.same_as(builtin::reinterpret())) {
       return MutateReinterpretExpr_(op);
+    } else if (op->op.same_as(atomic_add_elem_op())) {
+      // Handle vectorization of atomic_add_elem_op
+      return MutateAtomicAddExpr_(op);
+    } else if (op->op.same_as(builtin::address_of())) {
+      return MutateAddressOfCall_(op);
+    } else if (op->op.same_as(tl::access_ptr())) {
+      return MutateTLAccessPtrCall_(op);
+    } else if (op->op.same_as(builtin::tvm_access_ptr())) {
+      return MutateAccessPtrCall_(op);
+    } else if (op->op.same_as(builtin::ptx_cp_async()) ||
+               op->op.same_as(tl::ptx_cp_async())) {
+      return MutatePTXCPAsyncExpr_(op);
     }
     auto optional_op = op->op.as<Op>();
     bool vectorizable = optional_op &&
@@ -530,6 +831,7 @@ public:
       }
     }
   }
+
   // BufferLoad
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
     auto load = tvm::ffi::GetRef<BufferLoad>(op);
@@ -547,6 +849,7 @@ public:
 
     return std::move(load);
   }
+
   // Let
   PrimExpr VisitExpr_(const LetNode *op) final {
     PrimExpr value = this->VisitExpr(op->value);
@@ -578,6 +881,7 @@ public:
       }
     }
   }
+
   // BufferStore
   Stmt VisitStmt_(const BufferStoreNode *op) final {
     auto store = tvm::ffi::GetRef<BufferStore>(op);
@@ -634,6 +938,7 @@ public:
 
     return std::move(store);
   }
+
   // For
   Stmt VisitStmt_(const ForNode *op) final {
     if (op->kind == ForKind::kVectorized) {
@@ -653,6 +958,7 @@ public:
                  op->thread_binding, op->annotations);
     }
   }
+
   // IfThenElse
   Stmt VisitStmt_(const IfThenElseNode *op) final {
     ICHECK(!op->condition.dtype().is_scalable_or_fixed_length_vector());
@@ -672,10 +978,12 @@ public:
       return IfThenElse(condition, then_case, else_case);
     }
   }
+
   // While
   Stmt VisitStmt_(const WhileNode *op) final {
     LOG(FATAL) << "A while loop inside a vectorized loop not supported.";
   }
+
   // LetStmt
   Stmt VisitStmt_(const LetStmtNode *op) final {
     PrimExpr value = this->VisitExpr(op->value);
@@ -688,7 +996,6 @@ public:
       // Record mapping from the new var to its bound value
       let_value_binding_[op->var] = op->value;
       let_value_binding_[new_var] = value;
-
       return LetStmt(new_var, value, this->VisitStmt(op->body));
     } else {
       let_var_map_[op->var] = op->var;
@@ -715,140 +1022,6 @@ public:
     return StmtMutator::VisitStmt_(op);
   }
 
-  // Vectorize tl::ld or tl::st call
-  PrimExpr MutateTlLdStExpr_(const CallNode *op, bool is_load) {
-    // Structure: call_extern("tl::ld<...>", address_of(BufferLoad), value, ...)
-    ICHECK(op->args.size() >= 3) << "tl::ld/st expects at least 3 arguments";
-
-    PrimExpr func_name = op->args[0];
-    PrimExpr addr_arg = op->args[1];
-    PrimExpr value_arg = op->args[2];
-
-    // Helper to visit indices and extract Ramp info
-    // Returns: (visited_indices, base_indices, ramp_lanes)
-    auto visit_and_extract_ramp = [this](const Array<PrimExpr> &indices)
-        -> std::tuple<Array<PrimExpr>, Array<PrimExpr>, int> {
-      Array<PrimExpr> visited_indices;
-      Array<PrimExpr> base_indices;
-      int ramp_lanes = 1;
-      for (const auto &idx : indices) {
-        PrimExpr visited = this->VisitExpr(idx);
-        visited_indices.push_back(visited);
-        auto ramp = visited.as<RampNode>();
-        if (ramp && is_one(ramp->stride)) {
-          auto lanes_imm = ramp->lanes.as<IntImmNode>();
-          if (lanes_imm) {
-            ramp_lanes = lanes_imm->value;
-          }
-          base_indices.push_back(ramp->base);
-        } else {
-          base_indices.push_back(visited);
-        }
-      }
-      return {visited_indices, base_indices, ramp_lanes};
-    };
-
-    // Process source address - directly handle address_of(BufferLoad)
-    int src_ramp_lanes = 1;
-    PrimExpr new_addr = addr_arg;
-    auto addr_call = addr_arg.as<CallNode>();
-    if (addr_call && addr_call->op.same_as(builtin::address_of())) {
-      auto buffer_load = addr_call->args[0].as<BufferLoadNode>();
-      if (buffer_load) {
-        auto [visited_indices, base_indices, lanes] =
-            visit_and_extract_ramp(buffer_load->indices);
-        src_ramp_lanes = lanes;
-        // Create new address with base indices only (for vectorized load)
-        BufferLoad new_buffer_load(buffer_load->buffer, base_indices);
-        new_addr =
-            Call(DataType::Handle(), builtin::address_of(), {new_buffer_load});
-      }
-    }
-
-    // Process destination value - directly handle BufferLoad
-    int dst_ramp_lanes = 1;
-    PrimExpr new_value = value_arg;
-    auto value_load = value_arg.as<BufferLoadNode>();
-    if (value_load) {
-      auto [visited_indices, base_indices, lanes] =
-          visit_and_extract_ramp(value_load->indices);
-      dst_ramp_lanes = lanes;
-      // Create new value with base indices only
-      new_value = BufferLoad(value_load->buffer, base_indices);
-    }
-
-    // Determine vectorization lanes
-    int vector_lanes = std::max(src_ramp_lanes, dst_ramp_lanes);
-    if (vector_lanes > 1) {
-      // Determine the vector type based on total bytes
-      // 8 x 16-bit = 128 bits = int4, 4 x 32-bit = 128 bits = int4
-      // 4 x 16-bit = 64 bits = int2, 2 x 32-bit = 64 bits = int2
-      DataType vec_dtype;
-      int elem_bits = 16; // Default assumption for bf16/f16
-
-      // Try to get element dtype from source buffer
-      auto addr_call_check = new_addr.as<CallNode>();
-      if (addr_call_check &&
-          addr_call_check->op.same_as(builtin::address_of())) {
-        auto buffer_load = addr_call_check->args[0].as<BufferLoadNode>();
-        if (buffer_load) {
-          elem_bits = buffer_load->buffer->dtype.bits();
-        }
-      }
-
-      int total_bits = vector_lanes * elem_bits;
-      if (total_bits == 128) {
-        vec_dtype = DataType::Int(32, 4); // int4 equivalent (128 bits)
-      } else if (total_bits == 64) {
-        vec_dtype = DataType::Int(32, 2); // int2 equivalent (64 bits)
-      } else if (total_bits == 32) {
-        vec_dtype = DataType::Int(32);
-      } else {
-        // Can't vectorize to a standard type, fall back to scalarize
-        need_scalarize_ = true;
-        return tvm::ffi::GetRef<PrimExpr>(op);
-      }
-
-      // Reinterpret the value to vector type (e.g., int4 for 8xbf16)
-      PrimExpr vec_value = Call(vec_dtype, builtin::reinterpret(), {new_value});
-      PrimExpr vec_value_slice = vec_value.as<CallNode>()->args[0];
-
-      // Build new args with base addresses and reinterpreted value
-      Array<PrimExpr> new_args;
-      new_args.push_back(func_name);
-      new_args.push_back(new_addr);
-      new_args.push_back(vec_value_slice);
-      // Copy remaining args (sem, scope, etc.)
-      for (size_t i = 3; i < op->args.size(); ++i) {
-        new_args.push_back(this->VisitExpr(op->args[i]));
-      }
-
-      // Return the vectorized call
-      return Call(op->dtype, op->op, new_args);
-    }
-
-    // If we couldn't vectorize but args became vectors, need to scalarize
-    if (new_addr.dtype().is_scalable_or_fixed_length_vector() ||
-        new_value.dtype().is_scalable_or_fixed_length_vector()) {
-      need_scalarize_ = true;
-      return tvm::ffi::GetRef<PrimExpr>(op);
-    }
-
-    // No vectorization needed, return with updated args if changed
-    if (new_addr.same_as(addr_arg) && new_value.same_as(value_arg)) {
-      return tvm::ffi::GetRef<PrimExpr>(op);
-    }
-
-    Array<PrimExpr> new_args;
-    new_args.push_back(func_name);
-    new_args.push_back(new_addr);
-    new_args.push_back(new_value);
-    for (size_t i = 3; i < op->args.size(); ++i) {
-      new_args.push_back(this->VisitExpr(op->args[i]));
-    }
-    return Call(op->dtype, op->op, new_args);
-  }
-
   // scalarize the statement
   Stmt Scalarize(Stmt stmt) {
     Var idx(var_->name_hint + "_s", var_->dtype);
@@ -862,10 +1035,24 @@ public:
         }
       }
     });
+
+    // Check which vars already have LetStmt definitions inside stmt
+    std::unordered_set<const VarNode *> defined_in_stmt;
+    PostOrderVisit(stmt, [&defined_in_stmt](const ObjectRef &node) {
+      if (const auto *let = node.as<LetStmtNode>()) {
+        defined_in_stmt.insert(let->var.get());
+      }
+    });
+
     stmt = Substitute(stmt, {{var_, idx}});
 
     if (!used_let_bound_vars.empty()) {
       for (const auto &v : used_let_bound_vars) {
+        if (defined_in_stmt.count(v.get()) > 0) {
+          // Skip: the original stmt already contains a LetStmt definition for
+          // this var
+          continue;
+        }
         // Bind the existing var v to its value around the stmt scope
         auto new_value = Substitute(let_value_binding_.at(v), {{var_, idx}});
         stmt = LetStmt(v, new_value, stmt);
