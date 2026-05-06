@@ -3,8 +3,16 @@
  * \brief Annotate warp group reg alloc for warp specialization
  */
 
+#include <tvm/ffi/reflection/registry.h>
+#include <tvm/tir/function.h>
+#include <tvm/tir/op.h>
+#include <tvm/tir/stmt_functor.h>
+#include <tvm/tir/transform.h>
+
 #include <unordered_set>
 #include <vector>
+
+#include "../op/builtin.h"
 
 namespace tvm {
 namespace tl {
