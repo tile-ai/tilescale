@@ -222,6 +222,26 @@ def target_is_ampere(target: Target) -> bool:
     return _ffi_api.TargetIsAmpere(target)
 
 
+def parse_device(device: str | torch.device | int | None) -> int:
+    """Parse a device specification and return the device index."""
+    if device is None:
+        if torch.cuda.is_available():
+            return torch.cuda.current_device()
+        return 0
+    if isinstance(device, int):
+        return device
+    if isinstance(device, torch.device):
+        return device.index if device.index is not None else 0
+    if isinstance(device, str):
+        s = device.lower().strip()
+        if not s.startswith("cuda"):
+            raise ValueError(f"Invalid device string: {device!r}")
+        if ":" in s:
+            return int(s.split(":")[1])
+        return 0
+    raise ValueError(f"Invalid device specification: {device!r}")
+
+
 def target_is_hopper(target: Target) -> bool:
     return _ffi_api.TargetIsHopper(target)
 
