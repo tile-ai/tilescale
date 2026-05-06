@@ -1,9 +1,11 @@
 """The profiler and convert to torch utils"""
 
+from __future__ import annotations
 from enum import Enum
 import torch
 from tvm import tir
 import numpy as np
+from tilelang.utils.target import parse_device
 
 
 def _get_float8_dtypes():
@@ -291,3 +293,35 @@ def torch_assert_close(
         )
     else:
         return True
+
+
+def tensor(
+    shape: tuple[int, ...],
+    dtype: torch.dtype,
+    device: str | torch.device | int | None = None,
+    allocator: "BaseAllocator | None" = None,
+    return_peers: bool | None = None,
+) -> torch.Tensor | list[torch.Tensor]:
+    """Allocate a tensor using the given allocator or standard torch allocation.
+
+    Args:
+        shape: The shape of the tensor to allocate.
+        dtype: The data type of the tensor.
+        device: The device to allocate on (if not using allocator).
+        allocator: Optional BaseAllocator for distributed memory allocation.
+        return_peers: If True, return peer tensors for distributed allocation.
+
+    Returns:
+        A torch.Tensor or list of torch.Tensors (if return_peers is True).
+    """
+    if allocator is not None:
+        assert allocator.initialized(), "Allocator is not initialized"
+        if device is not None:
+            device = parse_device(device)
+            assert allocator.device == device, (
+                f"Allocator device must be the same as the device of the tensor, "
+                f"but got {allocator.device} != {device}"
+            )
+        return allocator._allocate_tensor(shape, dtype, return_peers)
+    else:
+        return torch.empty(shape, dtype=dtype, device=device)

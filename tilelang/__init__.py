@@ -158,13 +158,16 @@ if not env.is_light_import():
         build_date,  # noqa: F401
     )
 
-    # TileScale distributed extensions (optional - requires shared_memory C extension)
+    # TileScale tensor utilities
     try:
         from .utils.tensor import tensor  # noqa: F401
+    except ImportError:
+        tensor = None
+
+    # TileScale distributed allocator (requires shared_memory C extension)
+    try:
         from .utils.allocator import get_allocator  # noqa: F401
     except ImportError:
-        # shared_memory C extension not built - distributed features unavailable
-        tensor = None
         get_allocator = None
     from .layout import (
         Layout,  # noqa: F401
