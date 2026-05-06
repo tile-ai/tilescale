@@ -319,33 +319,5 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                         });
 }
 
-TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def(
-      "tl.get_tcgen5_mma_meta",
-      [](int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
-        auto [success, meta] = GetTCGEN5MMAMeta(M, N, K, ab_dtype, c_dtype);
-        Array<Integer> result;
-        if (success) {
-          result.push_back(Integer(meta.atom_m));
-          result.push_back(Integer(meta.atom_n));
-          result.push_back(Integer(meta.atom_k));
-          result.push_back(Integer(meta.enable_ws));
-          result.push_back(Integer(meta.enable_2cta));
-        }
-        return result;
-      });
-  refl::GlobalDef().def(
-      "tl.get_tcgen5_instr_desc",
-      [](int atom_m, int atom_n, int atom_k, DataType ab_dtype,
-         DataType c_dtype, bool a_is_k_major, bool b_is_k_major, int scale_in_a,
-         int scale_in_b) {
-        uint32_t desc = GetTCGEN5InstrDesc(atom_m, atom_n, atom_k, ab_dtype,
-                                           c_dtype, a_is_k_major, b_is_k_major,
-                                           scale_in_a, scale_in_b);
-        return Integer(static_cast<int64_t>(desc));
-      });
-}
-
 } // namespace tl
 } // namespace tvm
