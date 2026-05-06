@@ -30,7 +30,7 @@ tilelang.disable_cache()
 os.environ["NCCL_DEBUG"] = "WARN"
 
 
-def multimem_allreduce_kernel(N, block_N, threads):
+def multimem_allreduce_kernel_one_shot(N, block_N, threads):
     @T.prim_func
     def main(
         mcast_buf: T.Tensor((N,), "float32"),
