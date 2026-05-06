@@ -1653,3 +1653,34 @@ def stg256(dst: BufferLikeType, value: PrimExpr, pred: PrimExpr = None) -> None:
         return tir.call_intrin("handle", tir.op.Op.get("tl.stg256"), ptr, value)
     else:
         return tir.call_intrin("handle", tir.op.Op.get("tl.stg256"), ptr, value, pred)
+
+
+def fence_sys():
+    """Synchronize all threads at the system level (visible in a node).
+
+    Returns
+    -------
+    call : PrimExpr
+        A call to ``tl.fence_sys``.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.fence_sys"))
+
+
+def inc_max_nreg(reg_count: int):
+    """Increment the maximum number of registers to use.
+
+    See Also
+    --------
+    set_max_nreg
+    """
+    return set_max_nreg(reg_count, 1)
+
+
+def dec_max_nreg(reg_count: int):
+    """Decrement the maximum number of registers to use.
+
+    See Also
+    --------
+    set_max_nreg
+    """
+    return set_max_nreg(reg_count, 0)
