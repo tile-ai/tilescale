@@ -1020,7 +1020,7 @@ Stmt CopyNode::LowerNormalCopy(const LowerArgs &T,
                      << "` may cause conflicted write.";
       }
     }
-    vectorized_thread_loop = VectorizeLoop(fused_loop, T.layout_map);
+    vectorized_thread_loop = VectorizeLoop(fused_loop);
     return vectorized_thread_loop;
   } else {
     std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
@@ -1115,12 +1115,12 @@ Stmt CopyNode::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   PrimExpr local_indices_flattened =
       local_tensor.OffsetOf(local_indices_transformed).back();
   if (analyzer->CanProveEqual(matrix_8x8_thread_map, local_layout_thread_map) &&
-      IndicesCanVectorize(local_indices_flattened, col_var->var,
+      IndiceCanVectorize(local_indices_flattened, col_var->var,
                           col_var->dom->extent, 2, analyzer)) {
     is_transposed = false;
   } else if (analyzer->CanProveEqual(matrix_8x8_thread_map_trans,
                                      local_layout_thread_map) &&
-             IndicesCanVectorize(local_indices_flattened, row_var->var,
+             IndiceCanVectorize(local_indices_flattened, row_var->var,
                                  row_var->dom->extent, 2, analyzer)) {
     is_transposed = true;
   } else {
@@ -1137,7 +1137,7 @@ Stmt CopyNode::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     return LowerNormalCopy(T, analyzer);
   }
   PrimExpr flattened_indice = shared_tensor.OffsetOf(shared_indices).back();
-  if (!IndicesCanVectorize(flattened_indice, loop_vars.back()->var,
+  if (!IndiceCanVectorize(flattened_indice, loop_vars.back()->var,
                            loop_vars.back()->dom->extent, 8, analyzer)) {
     // TMA ldmatrix/stmatrix cannot support non-16 bytes continuous layout, will
     // be fallback to normal copy

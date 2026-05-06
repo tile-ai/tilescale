@@ -3,7 +3,6 @@
  * \brief Annotate warp group reg alloc for warp specialization
  */
 
-#include "warp_specialized_rewriter.h"
 #include <unordered_set>
 #include <vector>
 

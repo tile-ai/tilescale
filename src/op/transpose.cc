@@ -174,7 +174,7 @@ Stmt TransposeNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
 
   if (is_cpu_target || IsLocalBuffer(src) || IsLocalBuffer(dst)) {
-    auto vectorized_loop = VectorizeLoop(fused_loop, T.layout_map);
+    auto vectorized_loop = VectorizeLoop(fused_loop);
     return vectorized_loop;
   } else {
     auto par_op = ParallelOp(fused_loop);

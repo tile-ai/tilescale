@@ -651,7 +651,7 @@ private:
 
     auto lowered = tile_op->Lower(
         LowerArgs{target_, thread_bounds, thread_var_->var, callback,
-                  layout_map_, buffer_remap_, let_var_to_expr},
+                  AllocMBarrierCallback{}, layout_map_, buffer_remap_, let_var_to_expr},
         analyzer_);
     return IRMutatorWithAnalyzer::VisitStmt(lowered);
   }

@@ -162,7 +162,7 @@ For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
     body = Substitute(body, thread_offset_map);
   }
 
-  auto for_node = LoopPragmaUnroll(Downcast<For>(body));
+  auto for_node = PragmaUnrollLoop(Downcast<For>(body));
   return for_node;
 }
 
@@ -264,7 +264,7 @@ Fragment PlanLoopPartition(const For &op, int vectorize_size,
   return fragment->BindThreadRange(thread_range);
 }
 
-For LoopPragmaUnroll(For stmt) {
+For PragmaUnrollLoop(For stmt) {
   LoopPramaUnroller unroller;
   For unrolled = Downcast<For>(unroller(std::move(stmt)));
   return unrolled;
