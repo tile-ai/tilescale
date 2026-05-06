@@ -305,6 +305,9 @@ class BaseAllocator:
                     raise RuntimeError(f"cudaFree failed: {rc} {msg.decode() if msg else ''}")
 
     def _init_table(self):
+        # Ensure torch device matches the CUDA device set in _alloc()
+        if self._device is not None:
+            torch.cuda.set_device(self._device)
         device_ids = [
             None,
         ] * self._group.size()
