@@ -278,6 +278,10 @@ cudaver="$(echo "${CUDA_VERSION:-$DEFAULT_CUDA_VERSION}" | cut -d '.' -f-2)"
 v="${cudaver//./-}"
 dnf install -y "cuda-minimal-build-${v}" "cuda-driver-devel-${v}" "cuda-nvrtc-devel-${v}"
 dnf clean all
+
+# CMake's FindCUDAToolkit expects libcuda.so in lib64, but cuda-driver-devel
+# places it in lib64/stubs. Create a symlink so CUDA::cuda_driver is found.
+ln -sf /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/libcuda.so
 """
 # Do not bundle libtvm_ffi.so and libz3.so because they are shipped by the dependency packages.
 repair-wheel-command = "auditwheel -v repair --exclude libtvm_ffi.so --exclude libz3.so --exclude libcuda.so.1 --exclude '/usr/local/cuda*' -w {dest_dir} {wheel}"
