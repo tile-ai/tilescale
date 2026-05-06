@@ -238,7 +238,7 @@ def parse_device(device: str | torch.device | int | None) -> int:
             raise ValueError(f"Invalid device string: {device!r}")
         if ":" in s:
             return int(s.split(":")[1])
-        return 0
+        return torch.cuda.current_device()
     raise ValueError(f"Invalid device specification: {device!r}")
 
 
