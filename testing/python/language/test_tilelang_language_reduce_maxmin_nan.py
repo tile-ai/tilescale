@@ -17,7 +17,6 @@ def _compile(prim_func):
 
 
 def _make_reduce_kernel(reduce_fn, length, dtype, *, nan_propagate):
-
     @T.prim_func
     def kernel(a: T.Tensor((length,), dtype), out: T.Tensor((1,), dtype)):
         with T.Kernel(1, threads=32):

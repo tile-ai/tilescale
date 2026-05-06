@@ -7,3 +7,5 @@ nd
 NotIn
 offen
 te
+dout
+inouts

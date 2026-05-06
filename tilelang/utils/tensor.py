@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 from enum import Enum
+from typing import TYPE_CHECKING
 import torch
 from tvm import tir
 import numpy as np
 from tilelang.utils.target import parse_device
+
+if TYPE_CHECKING:
+    from tilelang.utils.allocator import BaseAllocator  # noqa: F401
 
 
 def _get_float8_dtypes():
@@ -299,7 +303,7 @@ def tensor(
     shape: tuple[int, ...],
     dtype: torch.dtype,
     device: str | torch.device | int | None = None,
-    allocator: "BaseAllocator | None" = None,
+    allocator: BaseAllocator | None = None,
     return_peers: bool | None = None,
 ) -> torch.Tensor | list[torch.Tensor]:
     """Allocate a tensor using the given allocator or standard torch allocation.
@@ -319,8 +323,7 @@ def tensor(
         if device is not None:
             device = parse_device(device)
             assert allocator.device == device, (
-                f"Allocator device must be the same as the device of the tensor, "
-                f"but got {allocator.device} != {device}"
+                f"Allocator device must be the same as the device of the tensor, but got {allocator.device} != {device}"
             )
         return allocator._allocate_tensor(shape, dtype, return_peers)
     else:

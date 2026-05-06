@@ -20,7 +20,6 @@ def _issue1993_dynamic_grid():
 
 @tilelang.jit
 def _issue1993_static_grid():
-
     @T.prim_func
     def kernel(out: T.Tensor[(4,), T.float32]):
         with T.Kernel(0, threads=1) as pid:

@@ -183,7 +183,8 @@ template <> struct LdReduceV2<ReduceOp::MAX, float> {
 
 template <typename DType> struct StV2 {
   TL_DEVICE static void run(void *, const void *) {
-    static_assert(always_false_v<DType>, "tl::multimem::StV2: unsupported dtype");
+    static_assert(always_false_v<DType>,
+                  "tl::multimem::StV2: unsupported dtype");
   }
 };
 
@@ -208,7 +209,7 @@ template <> struct RedV2<ReduceOp::ADD, float> {
   TL_DEVICE static void run(void *mcast_ptr, const void *src) {
     const float *src_f = reinterpret_cast<const float *>(src);
     const char *mc = reinterpret_cast<const char *>(mcast_ptr);
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < 2; i++) {
       unsigned val = __float_as_uint(src_f[i]);
       asm volatile("multimem.red.relaxed.sys.global.add.f32 [%0], %1;"
@@ -223,7 +224,7 @@ template <> struct RedV2<ReduceOp::MIN, float> {
   TL_DEVICE static void run(void *mcast_ptr, const void *src) {
     const float *src_f = reinterpret_cast<const float *>(src);
     const char *mc = reinterpret_cast<const char *>(mcast_ptr);
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < 2; i++) {
       unsigned val = __float_as_uint(src_f[i]);
       asm volatile("multimem.red.relaxed.sys.global.min.f32 [%0], %1;"
@@ -238,7 +239,7 @@ template <> struct RedV2<ReduceOp::MAX, float> {
   TL_DEVICE static void run(void *mcast_ptr, const void *src) {
     const float *src_f = reinterpret_cast<const float *>(src);
     const char *mc = reinterpret_cast<const char *>(mcast_ptr);
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < 2; i++) {
       unsigned val = __float_as_uint(src_f[i]);
       asm volatile("multimem.red.relaxed.sys.global.max.f32 [%0], %1;"

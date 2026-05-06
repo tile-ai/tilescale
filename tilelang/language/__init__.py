@@ -163,6 +163,7 @@ def import_source(source: str | None = None):
     # source is the source code to be imported
     return block_attr({"pragma_import_c": source}) if source is not None else None
 
+
 # Distributed multi-device primitives (NVSHMEM)
 from .distributed.multi_device.nvshmem import *  # noqa: F401
 from .distributed.multi_device.cpengine import *  # noqa: F401
