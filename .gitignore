@@ -133,3 +133,4 @@ maint/host_checks/logs/*
 
 # perf regression test
 .perf_regression/
+nvshmem_issue.md
