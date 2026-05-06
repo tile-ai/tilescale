@@ -26,8 +26,7 @@ from tilelang.profiler import Profiler, TensorSupplyType
 from tilelang.utils.target import determine_target
 from tilelang.contrib import nvcc as tl_nvcc
 from tilelang.transform import PassConfigKey
-from tilelang.utils.allocator import BaseAllocator
-import ctypes
+from tilelang.transform.pass_config import normalize_pass_configs
 import logging
 import os
 
@@ -101,9 +100,7 @@ class JITKernel(Generic[_P, _T]):
         self.target_host = target_host
         self.verbose = verbose
 
-        if pass_configs is None:
-            pass_configs = {}
-        self.pass_configs = pass_configs
+        self.pass_configs = normalize_pass_configs(pass_configs)
 
         self.compile_flags = [compile_flags] if isinstance(compile_flags, str) else compile_flags
 
@@ -146,7 +143,6 @@ class JITKernel(Generic[_P, _T]):
         # The adapter's function is assigned as the callable function for this instance.
         self.adapter = adapter
         self.torch_function = adapter.func
-        self.allocator = None
 
     @classmethod
     def from_database(
@@ -159,7 +155,7 @@ class JITKernel(Generic[_P, _T]):
         target: str | Target,
         target_host: str | Target,
         out_idx: list[int] | int,
-        execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch"],
+        execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"],
         pass_configs: dict[str, Any] | None = None,
         compile_flags: list[str] | None = None,
     ):
@@ -228,22 +224,26 @@ class JITKernel(Generic[_P, _T]):
         target_host = self.target_host
 
         execution_backend = self.execution_backend
-        pass_configs = self.pass_configs or {}
+        pass_configs = dict(self.pass_configs) if self.pass_configs else {}
 
         compile_flags = self.compile_flags
-
         if compile_flags is not None:
             compile_flags_cfg = pass_configs.get(PassConfigKey.TL_DEVICE_COMPILE_FLAGS)
             pass_configs[PassConfigKey.TL_DEVICE_COMPILE_FLAGS] = (
                 compile_flags_cfg + compile_flags if compile_flags_cfg is not None else compile_flags
             )
 
-        compile_flags = self.compile_flags
-
         # Compile the function with TVM, optimizing with shared memory lowering.
         enable_host_codegen = execution_backend == "tvm_ffi"
         enable_device_compile = execution_backend == "tvm_ffi"
-        with tvm.transform.PassContext(opt_level=3, config=pass_configs), self.target:
+
+        # Additional pass instruments
+        pass_instruments = []
+        if pass_configs.get(PassConfigKey.TL_ENABLE_DUMP_IR):
+            dump_ir_path = pass_configs.get(PassConfigKey.TL_DUMP_IR_DIR, "./dump_ir")  # Default dump path
+            pass_instruments.append(tvm.ir.instrument.DumpIR(dump_dir=dump_ir_path))
+
+        with tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=pass_instruments), self.target:
             artifact = tilelang.lower(
                 tilelang_func,
                 target=target,
@@ -462,38 +462,6 @@ class JITKernel(Generic[_P, _T]):
         assert self.artifact.host_mod is not None, "host_mod is not available"
         return str(self.artifact.host_mod)
 
-    def initialize(
-        self,
-        allocator: BaseAllocator,
-        stream: int | None = None,
-    ):
-        """Initialize base addr table for TileScale kernels."""
-
-        assert allocator.initialized(), "Allocator is not initialized"
-
-        stream_val = stream if stream is not None else 0
-
-        if self.execution_backend == "tvm_ffi":
-            # TVM FFI adapter: call init_table method directly
-            # Note: TVM FFI expects plain int pointers, not ctypes objects
-            result = self.adapter.init_table(
-                allocator.table.data_ptr(),
-                allocator.table_size,
-                stream_val,
-            )
-            if result != 0:
-                raise RuntimeError("Initialization failed for TVM FFI adapter")
-        else:
-            # Cython/NVRTC adapter: use ctypes lib interface
-            result = self.adapter.lib.init_table(
-                ctypes.c_void_p(allocator.table.data_ptr()),
-                allocator.table_size,
-                ctypes.c_void_p(stream_val),
-            )
-            if result != 0:
-                error_msg = self.adapter.lib.get_last_error().decode("utf-8")
-                raise RuntimeError(f"Initialization failed: {error_msg}")
-
     def run_once(self, func: Callable | None = None) -> None:
         return self.get_profiler().run_once(func)
 
@@ -674,8 +642,17 @@ class JITKernel(Generic[_P, _T]):
         # rt_module: use export_library to export
         # rt_params: use cloudpickle to serialize
 
-        # Export the compiled kernel function to a shared library file.
-        self.rt_module.export_library(kernel_file)
+        if self.artifact is None or self.artifact.rt_mod is None:
+            raise AttributeError(
+                'Runtime module is not available. Please compile the kernel with `execution_backend="tvm_ffi"` before exporting.'
+            )
+
+        dir_path = os.path.dirname(kernel_file)
+        if dir_path:
+            os.makedirs(dir_path, exist_ok=True)
+
+        self.artifact.rt_mod.export_library(kernel_file)
+        logger.info(f"Kernel library exported to {os.path.abspath(kernel_file)}")
 
     def _get_ptx(self, verbose: bool | None = None) -> str:
         """

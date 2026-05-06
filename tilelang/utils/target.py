@@ -6,6 +6,7 @@ import torch
 from platform import mac_ver
 from typing import Literal
 from tilelang import tvm as tvm
+from tilelang import language as T
 from tilelang import _ffi_api
 from tvm.target import Target
 from tvm.contrib import rocm
@@ -64,10 +65,38 @@ def check_metal_availability() -> bool:
     return arch == "arm64"
 
 
-def normalize_cutedsl_target(target: str | Target | None) -> Target | None:
-    if target is None:
-        return None
+def determine_fp8_type(fp8_format: Literal["e4m3", "e5m2"] = "e4m3") -> str:
+    """
+    Select the correct FP8 dtype string for the current platform.
+    - CUDA defaults to FP8 E4M3FN / E5M2.
+    - ROCm uses FNUZ except gfx950 (OCP), which prefers non-FNUZ when available.
+    """
+    if fp8_format not in {"e4m3", "e5m2"}:
+        raise ValueError(f"Unsupported FP8 format: {fp8_format}")
+    if torch.version.hip is None:
+        return T.float8_e4m3fn if fp8_format == "e4m3" else T.float8_e5m2
+    if not torch.cuda.is_available():
+        return T.float8_e4m3fnuz if fp8_format == "e4m3" else T.float8_e5m2fnuz
+    props = torch.cuda.get_device_properties(0)
+    gcn_arch = getattr(props, "gcnArchName", "")
+    if fp8_format == "e4m3":
+        if gcn_arch.startswith("gfx950"):
+            return T.float8_e4m3fn
+        return T.float8_e4m3fnuz
+    if gcn_arch.startswith("gfx950") and hasattr(T, "float8_e5m2"):
+        return T.float8_e5m2
+    return T.float8_e5m2fnuz
 
+
+def determine_torch_fp8_type(fp8_format: Literal["e4m3", "e5m2"] = "e4m3") -> torch.dtype:
+    dtype_name = determine_fp8_type(fp8_format)
+    torch_dtype = getattr(torch, dtype_name, None)
+    if torch_dtype is None:
+        raise RuntimeError(f"PyTorch does not expose dtype {dtype_name}")
+    return torch_dtype
+
+
+def normalize_cutedsl_target(target: str | Target) -> Target | None:
     if isinstance(target, Target):
         if target.kind.name == "cuda" and "cutedsl" in target.keys:
             return target
@@ -89,25 +118,22 @@ def normalize_cutedsl_target(target: str | Target | None) -> Target | None:
     return None
 
 
-def determine_target(target: str | Target | Literal["auto"] | None = "auto", return_object: bool = False) -> str | Target:
+def determine_target(target: str | Target | Literal["auto"] = "auto", return_object: bool = False) -> str | Target:
     """
     Determine the appropriate target for compilation (CUDA, HIP, or manual selection).
 
     Args:
-        target (str | Target | Literal["auto"] | None): User-specified target.
-            - If "auto" or None, the system will automatically detect whether CUDA or HIP is available.
+        target (Union[str, Target, Literal["auto"]]): User-specified target.
+            - If "auto", the system will automatically detect whether CUDA or HIP is available.
             - If a string or Target, it is directly validated.
 
     Returns:
-        str | Target: The selected target ("cuda", "hip", or a valid Target object).
+        Union[str, Target]: The selected target ("cuda", "hip", or a valid Target object).
 
     Raises:
         ValueError: If no CUDA or HIP is available and the target is "auto".
         AssertionError: If the target is invalid.
     """
-    # Treat None as "auto"
-    if target is None:
-        target = "auto"
 
     return_var: str | Target = target
 
@@ -180,6 +206,10 @@ def target_is_hip(target: Target) -> bool:
     return _ffi_api.TargetIsRocm(target)
 
 
+def target_is_metal(target: Target) -> bool:
+    return _ffi_api.TargetIsMetal(target)
+
+
 def target_is_volta(target: Target) -> bool:
     return _ffi_api.TargetIsVolta(target)
 
@@ -204,6 +234,10 @@ def target_is_cdna(target: Target) -> bool:
     return _ffi_api.TargetIsCDNA(target)
 
 
+def target_is_gfx950(target: Target) -> bool:
+    return _ffi_api.TargetIsGfx950(target)
+
+
 def target_has_async_copy(target: Target) -> bool:
     return _ffi_api.TargetHasAsyncCopy(target)
 
@@ -222,52 +256,3 @@ def target_has_bulk_copy(target: Target) -> bool:
 
 def target_get_warp_size(target: Target) -> int:
     return _ffi_api.TargetGetWarpSize(target)
-
-
-def parse_device(device: str | torch.device | int | None) -> int:
-    """
-    Parse a device specification and return the device index.
-
-    Args:
-        device: Device specification. Can be:
-            - None: Returns current CUDA device index
-            - int: Returns the device index directly
-            - str: Parses strings like "cuda", "cuda:0", "0"
-            - torch.device: Extracts the device index
-
-    Returns:
-        int: The device index
-
-    Raises:
-        ValueError: If the device specification is invalid
-    """
-    if device is None:
-        if torch.cuda.is_available():
-            return torch.cuda.current_device()
-        return 0
-
-    if isinstance(device, int):
-        return device
-
-    if isinstance(device, torch.device):
-        if device.type != "cuda":
-            raise ValueError(f"Only CUDA devices are supported, got {device.type}")
-        return device.index if device.index is not None else 0
-
-    if isinstance(device, str):
-        device = device.strip().lower()
-        if device == "cuda" or device == "gpu":
-            if torch.cuda.is_available():
-                return torch.cuda.current_device()
-            return 0
-        if device.startswith("cuda:"):
-            try:
-                return int(device[5:])
-            except ValueError as e:
-                raise ValueError(f"Invalid device specification: {device}") from e
-        try:
-            return int(device)
-        except ValueError as e:
-            raise ValueError(f"Invalid device specification: {device}") from e
-
-    raise ValueError(f"Invalid device type: {type(device)}")

@@ -1,13 +1,10 @@
 """The profiler and convert to torch utils"""
 
 from __future__ import annotations
-
 from typing import Callable, Any, Literal
 from functools import partial
 import torch
-from contextlib import suppress
 from dataclasses import dataclass
-import tvm
 from tilelang.utils.tensor import (
     get_tensor_supply,
     TensorSupplyType,
@@ -17,24 +14,7 @@ from tilelang.utils.tensor import (
 from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter import BaseKernelAdapter
 from tilelang.profiler.bench import do_bench
-from tilelang import env
-
-import logging
-
-
-def _use_nvshmem():
-    """Check if NVSHMEM is enabled in the environment."""
-    val = str(env.USE_NVSHMEM).lower()
-    return val in ("1", "true", "yes", "on")
-
-
-def _use_distributed():
-    """Check if distributed mode is enabled in the environment."""
-    val = str(env.USE_DISTRIBUTED).lower()
-    return val in ("1", "true", "yes", "on")
-
-
-logger = logging.getLogger(__name__)
+from tvm import tir
 
 
 @dataclass
@@ -78,78 +58,40 @@ class Profiler:
         self.adapter = adapter
         return self
 
-    def init_distributed(self):
-        import os
-        import datetime
-
-        WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-        RANK = int(os.environ.get("RANK", 0))
-        LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
-
-        torch.cuda.set_device(LOCAL_RANK)
-        torch.distributed.init_process_group(
-            backend="nccl",
-            world_size=WORLD_SIZE,
-            rank=RANK,
-            timeout=datetime.timedelta(seconds=1800),
-        )
-        assert torch.distributed.is_initialized()
-        TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
-
-        torch.cuda.synchronize()
-        if _use_nvshmem():
-            try:
-                import pynvshmem
-            except ImportError as e:
-                raise ValueError("pynvshmem is not installed but required for distributed inputs") from e
-            pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
-
-    def _get_inputs(self, with_output=False):
+    def _get_inputs(self, with_output=False, dynamic_symbolic_constraints: dict[str, int] | None = None):
         ins = []
         for i in range(len(self.params)):
             if with_output or i not in self.result_idx:
-                ins.append(self.supply(self.params[i]))
+                param = self.params[i]
+                if dynamic_symbolic_constraints:
+                    param = self._substitute_dynamic_symbols(param, dynamic_symbolic_constraints)
+                ins.append(self.supply(param))
         return ins
 
-    def _get_distributed_inputs(self, with_output=False):
-        if not _use_nvshmem():
-            raise ValueError("NVSHMEM is required for distributed inputs but USE_NVSHMEM is False")
+    def _substitute_dynamic_symbols(self, param: KernelParam, constraints: dict[str, int]) -> KernelParam:
+        """Substitute dynamic symbolic variables in param shape with concrete values.
 
-        try:
-            import pynvshmem
-        except ImportError as e:
-            raise ValueError("pynvshmem is not installed but required for distributed inputs") from e
+        Args:
+            param: The kernel parameter with potentially dynamic shape
+            constraints: A dict mapping symbolic variable names to concrete int values
 
-        ins = []
-        for i in range(len(self.params)):
-            if with_output or i not in self.result_idx:
-                shape = list(map(int, self.params[i].shape))
-                tensor = pynvshmem.nvshmem_create_tensor(shape, self.params[i].dtype)
-                if self.supply_type == TensorSupplyType.Integer:
-                    is_unsigned = self.params[i].is_unsigned()
-                    is_float8 = self.params[i].is_float8()
-                    if is_unsigned:
-                        tensor[:] = torch.randint(low=0, high=3, size=shape, device=tensor.device, dtype=tensor.dtype)
-                    elif is_float8:
-                        tensor[:] = torch.randint(low=-128, high=128, size=shape, device=tensor.device, dtype=torch.int8).to(
-                            dtype=tensor.dtype
-                        )
-                    else:
-                        tensor[:] = torch.randint(low=-2, high=3, size=shape, device=tensor.device, dtype=tensor.dtype)
-                elif self.supply_type == TensorSupplyType.Uniform:
-                    tensor[:] = torch.empty(*shape, device=tensor.device, dtype=tensor.dtype).uniform_(-1.0, 1.0)
-                elif self.supply_type == TensorSupplyType.Normal:
-                    tensor[:] = torch.empty(*shape, device=tensor.device, dtype=tensor.dtype).normal_(-1.0, 1.0)
-                elif self.supply_type == TensorSupplyType.Randn:
-                    tensor[:] = torch.randn(*shape, device=tensor.device).to(dtype=tensor.dtype)
-                elif self.supply_type == TensorSupplyType.Zero:
-                    tensor[:] = torch.zeros(*shape, device=tensor.device, dtype=tensor.dtype)
-                elif self.supply_type == TensorSupplyType.One:
-                    tensor[:] = torch.ones(*shape, device=tensor.device, dtype=tensor.dtype)
+        Returns:
+            A new KernelParam with substituted shape
+        """
+        new_shape = []
+        for dim in param.shape:
+            if isinstance(dim, tir.Var):
+                var_name = dim.name
+                if var_name in constraints:
+                    new_shape.append(constraints[var_name])
                 else:
-                    raise ValueError(f"Unknown supply type: {self.supply_type}")
-                ins.append(tensor)
-        return ins
+                    raise ValueError(
+                        f"Dynamic symbolic variable '{var_name}' not found in constraints. "
+                        f"Available constraints: {list(constraints.keys())}"
+                    )
+            else:
+                new_shape.append(dim)
+        return KernelParam(dtype=param.dtype, shape=new_shape)
 
     def _get_params(self, with_output=False):
         params = []
@@ -175,11 +117,7 @@ class Profiler:
             rtol: Relative tolerance for comparison
             max_mismatched_ratio: Maximum allowed ratio of mismatched elements
         """
-        if _use_distributed():
-            self.init_distributed()
-            ins = self._get_distributed_inputs()
-        else:
-            ins = self._get_inputs() if input_tensors is None else input_tensors
+        ins = self._get_inputs() if input_tensors is None else input_tensors
         ref_outs = reference_program(*ins)
         torch.cuda.synchronize()
         lib_outs = self.func(*ins)
@@ -214,14 +152,6 @@ class Profiler:
             if lhs is not None and rhs is not None:
                 # in case of numsplit template, the ref output may be None
                 # which means the value is invalid, so we skip the comparison
-                def is_float8(tensor: torch.Tensor) -> bool:
-                    return tensor.dtype in {
-                        torch.float8_e5m2,
-                        torch.float8_e5m2fnuz,
-                        torch.float8_e4m3fn,
-                        torch.float8_e4m3fnuz,
-                    }
-
                 torch_assert_close(
                     lhs if not is_float8_dtype(lhs.dtype) else lhs.to(torch.float32),
                     rhs if not is_float8_dtype(rhs.dtype) else rhs.to(torch.float32),
@@ -270,11 +200,7 @@ class Profiler:
             repeat: Number of times to repeat the consistency check
         """
         # Used to check no race condition inside the kernel
-        if _use_distributed():
-            self.init_distributed()
-            ins = self._get_distributed_inputs()
-        else:
-            ins = self._get_inputs()
+        ins = self._get_inputs()
         ref_outs = self.func(*ins)
 
         for _ in range(repeat):
@@ -292,32 +218,18 @@ class Profiler:
             func = self.__call__
         return func(*ins)
 
-    def determine_profiler(self, func: Callable | None = None):
-        """Determines which profiler backend to use based on function type.
-
-        Args:
-            func: Function to be profiled
-            profiler: Explicitly specified profiler type or "auto" for automatic detection
-
-        Returns:
-            str: The determined profiler type ("torch" or "tvm")
-        """
-        if isinstance(func, tvm.runtime.Module):
-            return "tvm"
-        else:
-            return "torch"
-
     def do_bench(
         self,
         func: Callable | None = None,
         warmup: int = 25,
         rep: int = 100,
-        n_warmup: int = 1,
-        n_repeat: int = 1,
+        n_warmup: int = 0,
+        n_repeat: int = 0,
         input_tensors: list[torch.Tensor] = None,
-        backend: Literal["event", "cupti"] = "event",
+        backend: Literal["event", "cupti", "cudagraph"] = "event",
         quantiles: list[float] | None = None,
         return_mode: Literal["min", "max", "mean", "median"] = "mean",
+        dynamic_symbolic_constraints: dict[str, int] | None = None,
     ) -> float:
         """Benchmarks the execution time of a given function.
 
@@ -327,51 +239,35 @@ class Profiler:
             rep: Number of repetitions for timing
             n_warmup: Number of warmup iterations
             n_repeat: Number of timing iterations
-            profiler: Which profiling backend to use
+            backend: Which profiling backend to use - "event", "cupti", or "cudagraph"
             input_tensors: Optional pre-generated input tensors
+            dynamic_symbolic_constraints: Optional dict mapping dynamic symbolic variable
+                names to concrete int values. Use this when benchmarking kernels with
+                dynamic shapes, e.g., {"m": 2048, "n": 1024}
 
         Returns:
             float: Average execution time in milliseconds
         """
-        profiler = self.determine_profiler(func)
-        if profiler == "torch":
-            if func is None:
-                assert self.adapter is not None, "benchmarking function should be provided"
-                func = self.adapter
-            if _use_distributed():
-                self.init_distributed()
-                ins = self._get_distributed_inputs() if input_tensors is None else input_tensors
-            else:
-                ins = self._get_inputs() if input_tensors is None else input_tensors
-            bench_func = partial(func, *ins)
-            return do_bench(
-                bench_func,
-                warmup=warmup,
-                rep=rep,
-                _n_warmup=n_warmup,
-                _n_repeat=n_repeat,
-                quantiles=quantiles,
-                backend=backend,
-                return_mode=return_mode,
-            )
-        elif profiler == "tvm":
-            assert func is not None, "func should not be None"
-            assert isinstance(func, tvm.runtime.Module), f"func should be a TVM module, but got {type(func)}"
-
-            ins = self._get_inputs(with_output=True) if input_tensors is None else input_tensors
-            target = "cuda"
-
-            with suppress(Exception):
-                target = self.mod.imported_modules[0].type_key
-
-            assert target in ["cuda", "hip"], f"Unknown target: {target}"
-
-            device = tvm.cuda(0) if target == "cuda" else tvm.rocm(0)
-            time_evaluator = self.mod.time_evaluator(self.mod.entry_name, device, number=rep, repeat=n_repeat)
-            # Transform Latency to ms
-            return time_evaluator(*ins).mean * 1e3
+        if func is None:
+            assert self.adapter is not None, "benchmarking function should be provided"
+            func = self.adapter
+        if input_tensors is not None:
+            ins = input_tensors
+        elif dynamic_symbolic_constraints is not None:
+            ins = self._get_inputs(dynamic_symbolic_constraints=dynamic_symbolic_constraints)
         else:
-            raise ValueError(f"Unknown profiler: {profiler}")
+            ins = self._get_inputs()
+        bench_func = partial(func, *ins)
+        return do_bench(
+            bench_func,
+            warmup=warmup,
+            rep=rep,
+            _n_warmup=n_warmup,
+            _n_repeat=n_repeat,
+            quantiles=quantiles,
+            backend=backend,
+            return_mode=return_mode,
+        )
 
     @property
     def func(self):

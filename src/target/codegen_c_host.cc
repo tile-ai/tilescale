@@ -58,6 +58,17 @@ void CodeGenCHost::Init(bool output_ssa, bool emit_asserts,
   // snprintf for richer assert messages with actual values
   decl_stream << "#include <stdio.h>\n";
   decl_stream << "#include <stdbool.h>\n";
+
+  decl_stream << "#ifdef __OBJC__\n";
+  decl_stream << "#include \"tvm/runtime/device_api.h\"\n";
+  decl_stream << "#include \"tvm/ffi/function.h\"\n";
+
+  decl_stream << "#include <Metal/Metal.h>\n";
+  decl_stream << "#include <Foundation/Foundation.h>\n";
+
+  decl_stream << "#include <torch/mps.h>\n";
+  decl_stream << "#endif\n";
+
   CodeGenCHost::InitGlobalContext();
   tvm::codegen::CodeGenC::Init(output_ssa);
 }
@@ -92,15 +103,17 @@ void CodeGenCHost::AddFunction(const tvm::GlobalVar &gvar,
         << "CodeGenCHost: The entry func must have the global_symbol "
            "attribute, "
         << "but function " << gvar << " only has attributes " << func->attrs;
-    function_names_.push_back(tvm::ffi::symbol::tvm_ffi_main);
-    stream << "// CodegenC: NOTE: Auto-generated entry function\n";
-    PrintFuncPrefix(stream);
-    PrintType(func->ret_type, stream);
-    stream << " " << tvm::ffi::symbol::tvm_ffi_main
-           << "(void* self, void* args,int num_args, void* result) {\n";
-    stream << "  return " << static_cast<std::string>(global_symbol.value())
-           << "(self, args, num_args, result);\n";
-    stream << "}\n";
+    if (global_symbol.value() != tvm::ffi::symbol::tvm_ffi_main) {
+      function_names_.push_back(tvm::ffi::symbol::tvm_ffi_main);
+      stream << "// CodegenC: NOTE: Auto-generated entry function\n";
+      PrintFuncPrefix(stream);
+      PrintType(func->ret_type, stream);
+      stream << " " << tvm::ffi::symbol::tvm_ffi_main
+             << "(void* self, void* args,int num_args, void* result) {\n";
+      stream << "  return " << static_cast<std::string>(global_symbol.value())
+             << "(self, args, num_args, result);\n";
+      stream << "}\n";
+    }
     has_main_func_ = true;
   }
 }
@@ -269,6 +282,9 @@ void CodeGenCHost::PrintCallPacked(const tvm::tir::CallNode *op) {
   std::string args_stack = PrintExpr(op->args[1]);
   this->PrintIndent();
   std::string result = name_supply_->FreshName("result");
+  if (is_in_metal_context) {
+    this->stream << "__block ";
+  }
   this->stream << "TVMFFIAny " << result << ";\n";
   this->PrintIndent();
   // must make sure type_index is set to none
@@ -277,6 +293,23 @@ void CodeGenCHost::PrintCallPacked(const tvm::tir::CallNode *op) {
   this->stream << result << ".zero_padding = 0;\n";
   this->PrintIndent();
   this->stream << result << ".v_int64 = 0;\n";
+
+  int metal_scope;
+  std::string metal_result;
+  if (is_in_metal_context) {
+    metal_result = name_supply_->FreshName("metal_ret");
+    this->PrintLine("__block int ", metal_result, " = 0;");
+    this->PrintLine("auto serialQueue = torch::mps::get_dispatch_queue();");
+    this->PrintLine("dispatch_sync(serialQueue, ^() {");
+    metal_scope = this->BeginScope();
+
+    this->PrintLine("const id<MTLCommandBuffer> commandBuffer = "
+                    "torch::mps::get_command_buffer();");
+    this->PrintLine(
+        "const auto f = tvm::ffi::Function::GetGlobal(\"metal.SetStream\");");
+    this->PrintLine("(*f)(static_cast<TVMStreamHandle>(commandBuffer));");
+  }
+
   this->PrintIndent();
   if (op->op.same_as(builtin::tvm_call_packed_lowered())) {
     this->stream << "if (TVMFFIFunctionCall(" << packed_func_name << ", ";
@@ -286,11 +319,20 @@ void CodeGenCHost::PrintCallPacked(const tvm::tir::CallNode *op) {
   this->stream << "(TVMFFIAny*) " << args_stack << ", " << num_args << ", "
                << "&" << result << ") != 0) {\n";
   int func_call_scope = this->BeginScope();
-  this->PrintIndent();
-  this->stream << "return -1;\n";
+  if (is_in_metal_context) {
+    this->PrintLine(metal_result, " = -1;");
+  } else {
+    this->PrintLine("return -1;");
+  }
   this->EndScope(func_call_scope);
-  this->PrintIndent();
-  this->stream << "}\n";
+
+  this->PrintLine("}");
+
+  if (is_in_metal_context) {
+    this->EndScope(metal_scope);
+    this->PrintLine("});");
+    this->PrintLine("if (", metal_result, " != 0) return ", metal_result, ";");
+  }
 }
 
 std::string CodeGenCHost::GetPackedName(const tvm::tir::CallNode *op) {
@@ -333,7 +375,14 @@ void CodeGenCHost::VisitExpr_(const tvm::tir::CallNode *op,
       LOG(FATAL) << "Unknown stack alloca type " << type;
     }
     this->PrintIndent();
-    this->stream << "TVMFFIAny " << stack_name << "[" << size << "];\n";
+    if (type == "tvm_ffi_any") {
+      // TMA descriptors are materialized through tvm_ffi_any stack allocas and
+      // must satisfy CUDA's 64-byte alignment requirement for CUtensorMap.
+      this->stream << "__attribute__((aligned(64))) TVMFFIAny " << stack_name
+                   << "[" << size << "];\n";
+    } else {
+      this->stream << "TVMFFIAny " << stack_name << "[" << size << "];\n";
+    }
     os << stack_name;
   } else if (op->op.same_as(builtin::tvm_call_packed_lowered())) {
     this->PrintCallPacked(op);
@@ -403,6 +452,18 @@ void CodeGenCHost::VisitStmt_(const tvm::tir::AssertStmtNode *op) { // NOLINT(*)
   this->PrintStmt(op->body);
 }
 
+void CodeGenCHost::VisitStmt_(const tvm::tir::AttrStmtNode *op) {
+  bool enter_metal_ctx = op->attr_key == "metal_context";
+  if (enter_metal_ctx) {
+    ICHECK(!is_in_metal_context) << "Nested metal context";
+    is_in_metal_context = true;
+  }
+  tvm::codegen::CodeGenC::VisitStmt_(op);
+  if (enter_metal_ctx) {
+    is_in_metal_context = false;
+  }
+}
+
 void CodeGenCHost::VisitExpr_(const tvm::tir::MinNode *op,
                               std::ostream &os) { // NOLINT(*)
   PrintTernaryCondExpr(op, "<", os);
@@ -442,6 +503,10 @@ using tvm::ffi::String;
 
 // Build function that mirrors TVM's host C codegen, registered under a
 // TileLang-specific name.
+// NOTE(chaofan): Different from codegen_c / BuildTileLangC, this CodeGen class
+// is only used to generate C host code for TileLang when the host codegen is
+// enabled. If you use TileLang to generate CPU code (in this case, C is the
+// device code) , it will be generated by BuildTileLangC.
 ::tvm::ffi::Module BuildTileLangCHost(::tvm::IRModule mod,
                                       ::tvm::Target target) {
   bool output_ssa = false;
@@ -473,7 +538,7 @@ using tvm::ffi::String;
   std::vector<std::pair<::tvm::GlobalVar, ::tvm::tir::PrimFunc>> funcs;
   for (auto [gvar, base_func] : mod->functions) {
     ICHECK(base_func->IsInstance<::tvm::tir::PrimFuncNode>())
-        << "CodegenCHost: Can only take PrimFunc";
+        << "TileLangCodegenCHost: Can only take PrimFunc";
     auto prim_func = ::tvm::Downcast<::tvm::tir::PrimFunc>(base_func);
     funcs.push_back({gvar, prim_func});
   }
@@ -504,7 +569,7 @@ using tvm::ffi::String;
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("target.build.tilelang_c", BuildTileLangCHost);
+  refl::GlobalDef().def("target.build.tilelang_c_host", BuildTileLangCHost);
 }
 
 } // namespace tl

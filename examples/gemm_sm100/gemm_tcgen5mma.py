@@ -38,9 +38,9 @@ def matmul(
             C_shared = T.alloc_shared((block_M, block_N), out_dtype)
 
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
-                T.copy(A[by * block_M, k * block_K], A_shared)
-                T.copy(B[bx * block_N, k * block_K], B_shared)
-                T.gemm(A_shared, B_shared, C_tmem, trans_A, trans_B, mbar=mbar, wg_wait=-1, clear_accum=k == 0)
+                T.copy(A[by * block_M, k * block_K], A_shared)  # not trans_A
+                T.copy(B[bx * block_N, k * block_K], B_shared)  # trans_B
+                T.tcgen05_gemm(A_shared, B_shared, C_tmem, trans_A, trans_B, mbar=mbar, clear_accum=k == 0)
                 T.mbarrier_wait_parity(mbar, k % 2)
 
             T.copy(C_tmem, C_local)
@@ -52,10 +52,10 @@ def matmul(
 
 
 M, N, K = 4096, 4096, 8192
-block_M, block_N, block_K = 128, 256, 128
+block_M, block_N, block_K = 128, 128, 128
 trans_A, trans_B = False, True
 in_dtype, out_dtype, accum_dtype = T.bfloat16, T.bfloat16, T.float
-num_stages = 2
+num_stages = 0 if block_N >= 256 or block_M >= 256 or block_K >= 256 else 2
 threads = 256
 
 func = matmul(M, N, K, block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype, accum_dtype, num_stages, threads)
@@ -63,10 +63,7 @@ jit_kernel = tilelang.compile(
     func,
     out_idx=[2],
     target="cuda",
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    },
+    pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
 )
 
 print(jit_kernel.get_kernel_source())

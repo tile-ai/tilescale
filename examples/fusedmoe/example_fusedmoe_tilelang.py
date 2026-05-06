@@ -8,7 +8,7 @@ from tilelang.autotuner import *
 from example_fusedmoe_torch import *
 
 
-@tilelang.jit(pass_configs={"tl.disable_tma_lower": True, "tl.disable_warp_specialized": True})
+@tilelang.jit(pass_configs={"tl.disable_warp_specialized": True})
 def moe_forward_tilelang_shared(
     d_hidden,
     d_expert,
@@ -93,7 +93,7 @@ def moe_forward_tilelang_shared(
     return kernel_shared
 
 
-@tilelang.jit(pass_configs={"tl.disable_tma_lower": True, "tl.disable_warp_specialized": True})
+@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True})
 def moe_forward_tilelang_routed(
     d_hidden,
     d_expert,
@@ -106,8 +106,6 @@ def moe_forward_tilelang_routed(
     block_dexpert=128,
     threads=256,
     num_stages=1,
-    k_pack=1,
-    coalesced_width=None,
 ):
     scale = 1.44269504  # log2(e)
 
@@ -155,7 +153,7 @@ def moe_forward_tilelang_routed(
             gate_logits_local = T.alloc_fragment((block_token, block_dexpert), dtype=accum_dtype)
             up_logits_local = T.alloc_fragment((block_token, block_dexpert), dtype=accum_dtype)
 
-            T.use_swizzle(10, enable=True)
+            T.use_swizzle(10)
 
             m_start_padded = bx * block_token
 
@@ -172,24 +170,21 @@ def moe_forward_tilelang_routed(
                 T.copy(
                     input[m_start : m_start + block_token, k * block_dhidden : (k + 1) * block_dhidden],
                     input_shared,
-                    coalesced_width=coalesced_width,
                 )
                 T.copy(
                     routed_expert_gate[
                         cur_group_idx, by * block_dexpert : (by + 1) * block_dexpert, k * block_dhidden : (k + 1) * block_dhidden
                     ],
                     routed_expert_gate_shared,
-                    coalesced_width=coalesced_width,
                 )
-                T.gemm(input_shared, routed_expert_gate_shared, gate_logits_local, k_pack=k_pack, transpose_B=True)
+                T.gemm(input_shared, routed_expert_gate_shared, gate_logits_local, transpose_B=True)
                 T.copy(
                     routed_expert_up[
                         cur_group_idx, by * block_dexpert : (by + 1) * block_dexpert, k * block_dhidden : (k + 1) * block_dhidden
                     ],
                     routed_expert_up_shared,
-                    coalesced_width=coalesced_width,
                 )
-                T.gemm(input_shared, routed_expert_up_shared, up_logits_local, k_pack=k_pack, transpose_B=True)
+                T.gemm(input_shared, routed_expert_up_shared, up_logits_local, transpose_B=True)
 
             for i, j in T.Parallel(block_token, block_dexpert):
                 gate_logits_local[i, j] = gate_logits_local[i, j] * (1.0 / (1.0 + T.exp2(-gate_logits_local[i, j] * scale)))
@@ -205,7 +200,7 @@ def moe_forward_tilelang_routed(
             routed_expert_down_shared = T.alloc_shared((block_dhidden, block_dexpert), dtype=dtype)
             output_local = T.alloc_fragment((block_token, block_dhidden), dtype=accum_dtype)
 
-            T.use_swizzle(10, enable=True)
+            T.use_swizzle(10)
 
             m_start_padded = bx * block_token
 
@@ -221,16 +216,14 @@ def moe_forward_tilelang_routed(
                 T.copy(
                     up_logits[m_start : m_start + block_token, k * block_dexpert : (k + 1) * block_dexpert],
                     up_logits_shared,
-                    coalesced_width=coalesced_width,
                 )
                 T.copy(
                     routed_expert_down[
                         cur_group_idx, by * block_dhidden : (by + 1) * block_dhidden, k * block_dexpert : (k + 1) * block_dexpert
                     ],
                     routed_expert_down_shared,
-                    coalesced_width=coalesced_width,
                 )
-                T.gemm(up_logits_shared, routed_expert_down_shared, output_local, k_pack=k_pack, transpose_B=True)
+                T.gemm(up_logits_shared, routed_expert_down_shared, output_local, transpose_B=True)
 
             for i, j in T.Parallel(block_token, block_dhidden):
                 if i < actual_rows:
@@ -479,8 +472,6 @@ def custom_kernel(data: Tuple[torch.Tensor, Dict, Dict]) -> torch.Tensor:
         block_dexpert=128,
         threads=256,
         num_stages=1,
-        k_pack=1,
-        coalesced_width=2,
     )
 
     moe = MoE(config, shared_kernel, routed_kernel, weights, padding_M=128)
@@ -503,13 +494,8 @@ def main(d_hidden=7168, d_expert=2048, n_routed_experts=8, n_shared_experts=1, n
     }
 
     data = generate_input(**config)
-
-    torch.cuda.synchronize()
     ref_output = ref_kernel(clone_data(data)).to(torch.float32)
-    torch.cuda.synchronize()
     tilelang_output = custom_kernel(clone_data(data)).to(torch.float32)
-    torch.cuda.synchronize()
-
     torch.testing.assert_close(ref_output, tilelang_output, atol=1e-2, rtol=1e-2)
     print("✅ Tilelang and Torch match")
 
@@ -554,8 +540,6 @@ def run_regression_perf(
         block_dexpert=128,
         threads=256,
         num_stages=1,
-        k_pack=1,
-        coalesced_width=2,
     )
 
     moe = MoE(config, shared_kernel, routed_kernel, weights, padding_M=128)
@@ -627,8 +611,11 @@ def run_regression_perf(
             moe.expert_output_routed,
         )
 
-    return do_bench(run_routed_kernel_only, backend="cupti")
+    shared_latency = do_bench(run_shared_kernel_only, backend="cupti")
+    routed_latency = do_bench(run_routed_kernel_only, backend="cupti")
+    return (shared_latency + routed_latency) / 2
 
 
 if __name__ == "__main__":
+    tilelang.disable_cache()
     main()

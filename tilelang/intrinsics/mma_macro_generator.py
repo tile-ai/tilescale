@@ -46,17 +46,24 @@ class TensorCoreIntrinEmitter:
         "bfloat16": "bf16",
         "float32": "fp32",
         "float64": "fp64",
+        "int4": "int4",
         "int8": "int8",
+        "uint8": "uint8",
         "int32": "int32",
         "float8_e4m3": "e4m3",
         "float8_e4m3fn": "e4m3",
         "float8_e4m3fnuz": "e4m3",
         "float8_e5m2": "e5m2",
         "float8_e5m2fnuz": "e5m2",
+        "float6_e2m3fn": "e2m3",
+        "float6_e3m2fn": "e3m2",
+        "float4_e2m1fn": "e2m1",
     }
 
     # Represent the thread binding in the form of (tx, warp_n, warp_m)
-    is_m_first = False
+    is_m_first: bool = False
+    warp_rows: int = 1
+    warp_cols: int = 1
 
     def __init__(
         self,
@@ -86,15 +93,15 @@ class TensorCoreIntrinEmitter:
         self.warp_row_tiles = warp_row_tiles
         self.warp_col_tiles = warp_col_tiles
         self.chunk = chunk
-        self._initialize_k_dim(a_dtype)
+        self._initialize_k_dim(self.a_dtype)
         # For FP64, MMA shape is m8n8k4; adjust instance dims early
-        if DataType(a_dtype).bits == 64:
+        if DataType(self.a_dtype).bits == 64:
             # Override default M/N dims for fp64 MMA
             self.M_DIM = 8
             # n_dim will be set to 8 in _initialize_micro_size via k_dim==4
-        self._initialize_abbrev(a_dtype, b_dtype, accum_dtype)
         self._initialize_micro_size(self.M_DIM, self.k_dim)
         self._initialize_local_size(self.M_DIM, self.n_dim, self.k_dim, self.WARP_SIZE)
+        self._initialize_abbrev(self.a_dtype, self.b_dtype, accum_dtype)
         self._initialize_mma_prefix(self.k_dim)
         self._initialize_is_m_first(is_m_first)
 
@@ -111,7 +118,7 @@ class TensorCoreIntrinEmitter:
     def _initialize_k_dim(self, a_dtype=T.float16):
         if isinstance(a_dtype, str):
             a_dtype = DataType(a_dtype)
-        self.k_dim = 256 // a_dtype.bits
+        self.k_dim = min(256 // a_dtype.bits, self.chunk)
 
     def _initialize_local_size(self, m_dim=16, n_dim=16, k_dim=16, warp_size=32):
         self.local_size_a = (m_dim * k_dim) // warp_size
@@ -124,10 +131,9 @@ class TensorCoreIntrinEmitter:
         self.accum_dtype_abbrv = self._get_dtype_abbrv(accum_dtype)
 
     def _get_dtype_abbrv(self, dtype: str) -> str:
-        try:
-            return self.dtype_abbrv[dtype]
-        except KeyError as err:
-            raise ValueError(f"Unsupported dtype: {dtype}") from err
+        if dtype not in self.dtype_abbrv:
+            raise ValueError(f"Unsupported dtype: {dtype}")
+        return self.dtype_abbrv[dtype]
 
     def _initialize_mma_prefix(self, k_dim: int = 16):
         if k_dim == 4:
@@ -141,9 +147,19 @@ class TensorCoreIntrinEmitter:
             self.mma_prefix = "m16n8k16"
         elif k_dim == 32:
             # typically used for int8/fp8
+            # sometimes int4/uint4 is also supported
             self.mma_prefix = "m16n8k32"
+        elif k_dim == 64:
+            # typically used for int4/uint4
+            self.mma_prefix = "m16n8k64"
+        elif k_dim == 128:
+            # typically used for int2/uint2
+            self.mma_prefix = "m16n8k128"
+        elif k_dim == 256:
+            # typically used for uint1
+            self.mma_prefix = "m16n8k256"
         else:
-            raise ValueError("Unsupported k_dim")
+            raise ValueError(f"Unsupported k_dim {k_dim}")
 
     def _initialize_micro_size(self, m_dim: int = 16, k_dim: int = 16):
         warp_row_tiles = self.warp_row_tiles
@@ -233,7 +249,8 @@ class TensorCoreIntrinEmitter:
 
     def ldmatrix_a(self, A_local_buf: Buffer, A_shared_buf: Buffer | BufferRegion, ki: PrimExpr, rk: PrimExpr | None = 0):
         # Fast path for fp64: no ldmatrix support, do direct per-lane loads
-        if DataType(self.a_dtype).bits == 64:
+        a_dtype = self.a_dtype
+        if DataType(a_dtype).bits == 64:
             warp_row_tiles = self.warp_row_tiles
             warp_rows = self.warp_rows
             chunk = self.chunk
@@ -248,6 +265,7 @@ class TensorCoreIntrinEmitter:
             A_buf = A_region.buffer
             A_base0 = A_region.region[-2].min
             A_base1 = A_region.region[-1].min
+            A_other = [r.min for r in A_region.region[:-2]]
 
             @T.macro
             def _warp_ld_a_fp64(
@@ -264,9 +282,9 @@ class TensorCoreIntrinEmitter:
                     mi = tx // micro_size_k
                     mk = tx % micro_size_k
                     if a_transposed:
-                        A_local_buf[i * local_size_a] = A_buf[A_base0 + wk + mk, A_base1 + wi + mi]
+                        A_local_buf[i * local_size_a] = A_buf[tuple(A_other) + (A_base0 + wk + mk, A_base1 + wi + mi)]
                     else:
-                        A_local_buf[i * local_size_a] = A_buf[A_base0 + wi + mi, A_base1 + wk + mk]
+                        A_local_buf[i * local_size_a] = A_buf[tuple(A_other) + (A_base0 + wi + mi, A_base1 + wk + mk)]
 
             return _warp_ld_a_fp64(A_local_buf, A_region, ki, thread_binding, rk)
 
@@ -276,7 +294,6 @@ class TensorCoreIntrinEmitter:
         micro_size_x = self.micro_size_x
         micro_size_k = self.micro_size_k
         local_size_a = self.local_size_a
-        a_dtype = self.a_dtype
         a_transposed = self.a_transposed
         # ldmatrix cannot be used for int8 + trans case.
         ldmatrix_available = not (DataType(a_dtype).bits != 16 and a_transposed)
@@ -301,6 +318,7 @@ class TensorCoreIntrinEmitter:
         A_buf = A_region.buffer
         A_base0 = A_region.region[-2].min
         A_base1 = A_region.region[-1].min
+        A_other = [r.min for r in A_region.region[:-2]]
         A_stride_last = A_buf.shape[-1]
 
         @T.macro
@@ -316,34 +334,35 @@ class TensorCoreIntrinEmitter:
             trans = self.a_transposed
 
             for i in T.serial(warp_rows):
-                # Assign A_shared_buf_elem
                 wi, wk = warp_m * warp_row_tiles + i * micro_size_x, rk * chunk + ki * micro_size_k
-                A_shared_buf_elem = A_buf[A_base0 + wk, A_base1 + wi] if a_transposed else A_buf[A_base0 + wi, A_base1 + wk]
 
                 if ldmatrix_available:
+                    row_off, col_off = get_ldmatrix_offset("A", tx, 0, stride, a_dtype, a_transposed)
+                    src_indices = (
+                        tuple(A_other) + (A_base0 + wk + row_off, A_base1 + wi + col_off)
+                        if a_transposed
+                        else tuple(A_other) + (A_base0 + wi + row_off, A_base1 + wk + col_off)
+                    )
                     T.ptx_ldmatrix(
-                        a_dtype,
                         T.bool(trans),
                         4,
-                        ".b16",
-                        A_local_buf.data,
-                        i * local_size_a,
-                        T.address_of(A_shared_buf_elem),
-                        get_ldmatrix_offset("A", tx, 0, stride, a_dtype, a_transposed),
+                        T.access_ptr(A_buf[src_indices], "r", extent=8),
+                        T.access_ptr(A_local_buf[i * local_size_a], "w", extent=8),
                     )
                 else:
                     for j in T.serial(local_size_a):
                         mi, mk = mma_load_layout(tx, j)
                         if a_transposed:
-                            A_local_buf[i * local_size_a + j] = A_buf[A_base0 + wk + mk, A_base1 + wi + mi]
+                            A_local_buf[i * local_size_a + j] = A_buf[tuple(A_other) + (A_base0 + wk + mk, A_base1 + wi + mi)]
                         else:
-                            A_local_buf[i * local_size_a + j] = A_buf[A_base0 + wi + mi, A_base1 + wk + mk]
+                            A_local_buf[i * local_size_a + j] = A_buf[tuple(A_other) + (A_base0 + wi + mi, A_base1 + wk + mk)]
 
         return _warp_ldmatrix_a(A_local_buf, A_region, ki, thread_binding, rk)
 
     def ldmatrix_b(self, B_local_buf: Buffer, B_shared_buf: Buffer | BufferRegion, ki: PrimExpr, rk: PrimExpr | None = 0):
         # Fast path for fp64: no ldmatrix support, do direct per-lane loads
-        if DataType(self.b_dtype).bits == 64:
+        b_dtype = self.b_dtype
+        if DataType(b_dtype).bits == 64:
             warp_col_tiles = self.warp_col_tiles
             warp_cols = self.warp_cols
             chunk = self.chunk
@@ -358,6 +377,7 @@ class TensorCoreIntrinEmitter:
             B_buf = B_region.buffer
             B_base0 = B_region.region[-2].min
             B_base1 = B_region.region[-1].min
+            B_other = [r.min for r in B_region.region[:-2]]
 
             @T.macro
             def _warp_ld_b_fp64(
@@ -374,9 +394,9 @@ class TensorCoreIntrinEmitter:
                     mi = tx // micro_size_k
                     mk = tx % micro_size_k
                     if b_transposed:
-                        B_local_buf[j * local_size_b] = B_buf[B_base0 + wi + mi, B_base1 + wk + mk]
+                        B_local_buf[j * local_size_b] = B_buf[tuple(B_other) + (B_base0 + wi + mi, B_base1 + wk + mk)]
                     else:
-                        B_local_buf[j * local_size_b] = B_buf[B_base0 + wk + mk, B_base1 + wi + mi]
+                        B_local_buf[j * local_size_b] = B_buf[tuple(B_other) + (B_base0 + wk + mk, B_base1 + wi + mi)]
 
             return _warp_ld_b_fp64(B_local_buf, B_region, ki, thread_binding, rk)
 
@@ -386,7 +406,6 @@ class TensorCoreIntrinEmitter:
         micro_size_y = self.micro_size_y
         micro_size_k = self.micro_size_k
         local_size_b = self.local_size_b
-        b_dtype = self.b_dtype
         b_transposed = self.b_transposed
         thread_binding = self.get_thread_binding()
 
@@ -395,6 +414,7 @@ class TensorCoreIntrinEmitter:
         B_buf = B_region.buffer
         B_base0 = B_region.region[-2].min
         B_base1 = B_region.region[-1].min
+        B_other = [r.min for r in B_region.region[:-2]]
         B_stride_last = B_buf.shape[-1]
         replicate_b = self.n_dim == 16
         # ldmatrix cannot be used for int8 + trans case.
@@ -433,17 +453,18 @@ class TensorCoreIntrinEmitter:
                 )
 
                 if ldmatrix_available:
-                    B_shared_buf_elem = B_buf[B_base0 + wi, B_base1 + wk] if b_transposed else B_buf[B_base0 + wk, B_base1 + wi]
-
+                    num = 4 if replicate_b else 2
+                    row_off, col_off = get_ldmatrix_offset("B", tx, 0, stride, b_dtype, b_transposed)
+                    src_indices = (
+                        tuple(B_other) + (B_base0 + wi + row_off, B_base1 + wk + col_off)
+                        if b_transposed
+                        else tuple(B_other) + (B_base0 + wk + row_off, B_base1 + wi + col_off)
+                    )
                     T.ptx_ldmatrix(
-                        b_dtype,
                         T.bool(trans),
-                        4 if replicate_b else 2,
-                        ".b16",
-                        B_local_buf.data,
-                        i * local_size_b,
-                        T.address_of(B_shared_buf_elem),
-                        get_ldmatrix_offset("B", tx, 0, stride, b_dtype, b_transposed),
+                        num,
+                        T.access_ptr(B_buf[src_indices], "r", extent=2 * num),
+                        T.access_ptr(B_local_buf[i * local_size_b], "w", extent=2 * num),
                     )
 
                 else:
@@ -452,9 +473,9 @@ class TensorCoreIntrinEmitter:
                     for j in T.serial(local_size_b):
                         mi, mk = mma_load_layout(tx, j)
                         if b_transposed:
-                            B_local_buf[i * local_size_b + j] = B_buf[B_base0 + wi + mi, B_base1 + wk + mk]
+                            B_local_buf[i * local_size_b + j] = B_buf[tuple(B_other) + (B_base0 + wi + mi, B_base1 + wk + mk)]
                         else:
-                            B_local_buf[i * local_size_b + j] = B_buf[B_base0 + wk + mk, B_base1 + wi + mi]
+                            B_local_buf[i * local_size_b + j] = B_buf[tuple(B_other) + (B_base0 + wk + mk, B_base1 + wi + mi)]
 
         return _warp_ldmatrix_b(B_local_buf, B_shared_buf, ki, thread_binding, rk)
 
@@ -848,9 +869,9 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
         self.local_size_out = (m_dim * n_dim) // warp_size
 
     def _initialize_abbrev(self, a_dtype, b_dtype, accum_dtype):
-        self.a_dtype_abbrv = self.dtype_abbrv[a_dtype]
-        self.b_dtype_abbrv = self.dtype_abbrv[b_dtype]
-        self.accum_dtype_abbrv = self.dtype_abbrv[accum_dtype]
+        self.a_dtype_abbrv = self._get_dtype_abbrv(a_dtype)
+        self.b_dtype_abbrv = self._get_dtype_abbrv(b_dtype)
+        self.accum_dtype_abbrv = self._get_dtype_abbrv(accum_dtype)
 
     def _initialize_mma_prefix(self, k_dim=16):
         if k_dim == 16:
@@ -908,20 +929,19 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
             tx, _, warp_m = self.extract_thread_binding(thread_binding)
             if transform_kind_a == TransformKind.NonTransform:
                 for i in T.serial(warp_rows):
+                    row_off, col_off = get_ldmatrix_offset("A", tx, 0, stride, a_dtype, a_transposed)
                     T.ptx_ldmatrix(
-                        a_dtype,
                         T.bool(False),
                         4,
-                        ".b16",
-                        A_local_buf.data,
-                        i * local_size_a,
-                        T.address_of(
+                        T.access_ptr(
                             A_shared_buf[
-                                warp_m * warp_row_tiles + i * micro_size_x,
-                                rk * chunk + ki * micro_size_k,
-                            ]
+                                warp_m * warp_row_tiles + i * micro_size_x + row_off,
+                                rk * chunk + ki * micro_size_k + col_off,
+                            ],
+                            "r",
+                            extent=8,
                         ),
-                        get_ldmatrix_offset("A", tx, 0, stride, a_dtype, a_transposed),
+                        T.access_ptr(A_local_buf[i * local_size_a], "w", extent=8),
                     )
             elif transform_kind_a == TransformKind.InterWarpTransform:
                 for i in T.serial(warp_rows):
@@ -936,18 +956,12 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
                         (ri) % micro_size_x,
                         (rj) % micro_size_k,
                     )
-                    args = (ni, nj, nii, njj) if transform_kind_a > 0 else (ri, rj)
-                    A_shared_elem = A_shared_buf[args]
-
+                    row_off, col_off = get_ldmatrix_offset("A", tx, 0, stride, a_dtype, a_transposed)
                     T.ptx_ldmatrix(
-                        a_dtype,
                         T.bool(False),
                         4,
-                        ".b16",
-                        A_local_buf.data,
-                        i * local_size_a,
-                        T.address_of(A_shared_elem),
-                        get_ldmatrix_offset("A", tx, 0, stride, a_dtype, a_transposed),
+                        T.access_ptr(A_shared_buf[ni, nj, nii + row_off, njj + col_off], "r", extent=8),
+                        T.access_ptr(A_local_buf[i * local_size_a], "w", extent=8),
                     )
             elif transform_kind_a == TransformKind.IntraWarpTransform:
                 for i in T.serial(warp_rows):
@@ -962,17 +976,13 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
                         (ri) % micro_size_x,
                         (rj) % micro_size_k,
                     )
-                    A_shared_elem = A_shared_buf[ni, nj, nii, njj]
-
+                    row_off = (tx * local_size_a) // stride
+                    col_off = (tx * local_size_a) % stride
                     T.ptx_ldmatrix(
-                        a_dtype,
                         T.bool(False),
                         4,
-                        ".b16",
-                        A_local_buf.data,
-                        i * local_size_a,
-                        T.address_of(A_shared_elem),
-                        tx * local_size_a,
+                        T.access_ptr(A_shared_buf[ni, nj, nii + row_off, njj + col_off], "r", extent=8),
+                        T.access_ptr(A_local_buf[i * local_size_a], "w", extent=8),
                     )
             elif transform_kind_a == TransformKind.LDMatrixTransform:
                 for j in T.serial(warp_rows):
@@ -1021,17 +1031,12 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
                         warp_n * warp_col_tiles + j * micro_size_y,
                         rk * chunk + ki * micro_size_k,
                     )
-                    B_shared_elem = B_shared_buf[ri, rj]
-
+                    row_off, col_off = get_ldmatrix_offset("B", tx, 0, stride, b_dtype, b_transposed)
                     T.ptx_ldmatrix(
-                        b_dtype,
                         T.bool(False),
                         4,
-                        ".b16",
-                        B_local_buf.data,
-                        j * local_size_b,
-                        T.address_of(B_shared_elem),
-                        get_ldmatrix_offset("B", tx, 0, stride, b_dtype, b_transposed),
+                        T.access_ptr(B_shared_buf[ri + row_off, rj + col_off], "r", extent=8),
+                        T.access_ptr(B_local_buf[j * local_size_b], "w", extent=8),
                     )
             elif transform_kind_b == TransformKind.InterWarpTransform:
                 for j in T.serial(warp_cols):
@@ -1046,17 +1051,12 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
                         (ri) % micro_size_y,
                         (rj) % micro_size_k,
                     )
-                    B_shared_elem = B_shared_buf[ni, nj, nii, njj]
-
+                    row_off, col_off = get_ldmatrix_offset("B", tx, 0, stride, b_dtype, b_transposed)
                     T.ptx_ldmatrix(
-                        b_dtype,
                         T.bool(False),  # TODO(lei): should be optimized
                         4,
-                        ".b16",
-                        B_local_buf.data,
-                        j * local_size_b,
-                        T.address_of(B_shared_elem),
-                        get_ldmatrix_offset("B", tx, 0, stride, b_dtype, b_transposed),
+                        T.access_ptr(B_shared_buf[ni, nj, nii + row_off, njj + col_off], "r", extent=8),
+                        T.access_ptr(B_local_buf[j * local_size_b], "w", extent=8),
                     )
             elif transform_kind_b == TransformKind.IntraWarpTransform:
                 for j in T.serial(warp_cols):
@@ -1071,17 +1071,13 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
                         (ri) % micro_size_y,
                         (rj) % micro_size_k,
                     )
-                    B_shared_elem = B_shared_buf[ni, nj, nii, njj]
-
+                    row_off = (tx * local_size_b) // stride
+                    col_off = (tx * local_size_b) % stride
                     T.ptx_ldmatrix(
-                        b_dtype,
                         T.bool(False),  # TODO(lei): should be optimized
                         4,
-                        ".b16",
-                        B_local_buf.data,
-                        j * local_size_b,
-                        T.address_of(B_shared_elem),
-                        tx * local_size_b,
+                        T.access_ptr(B_shared_buf[ni, nj, nii + row_off, njj + col_off], "r", extent=8),
+                        T.access_ptr(B_local_buf[j * local_size_b], "w", extent=8),
                     )
             elif transform_kind_b == TransformKind.LDMatrixTransform:
                 local_size_dequantize = local_size_b // num_elems_per_byte
@@ -1146,210 +1142,6 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
                     i * local_size_a,
                     B_local_buf.data,
                     j * local_size_b + lift(local_size_b) // 2,
-                    C_local_buf.data,
-                    i * warp_cols * local_size_out + j * local_size_out + lift(local_size_out) // 2,
-                    T.bool(False),
-                )
-
-        return _warp_mma(A_local_buf, B_local_buf, C_local_buf)
-
-
-class INT4TensorCoreIntrinEmitter(TensorCoreIntrinEmitter):
-    def mma(self, A_local_buf, B_local_buf, C_local_buf):
-        warp_rows = self.warp_rows
-        warp_cols = self.warp_cols
-        local_size_a = self.local_size_a
-        local_size_b = self.local_size_b
-        local_size_out = self.local_size_out
-        a_dtype_abbrv = "int4"
-        b_dtype_abbrv = "int4"
-        accum_dtype = self.accum_dtype
-        accum_dtype_abbrv = accum_dtype
-        mma_prefix = "m16n8k32"
-
-        @T.macro
-        def _warp_mma(A_local_buf, B_local_buf, C_local_buf):
-            for i, j in T.grid(warp_rows, warp_cols):
-                """
-                A[16, 32], B[16, 32], C[16, 16]
-                A_local_size -> 16
-                B_local_size -> 16
-                C_local_size -> 8
-                For each m16n8k32 inst
-                For A: m16k32 consume 16 int4 elements -> 8 A_local_size
-                For A: n8k32 consume 8 int4 elements -> 4 B_local_size
-                For C: m16n8 consume 4 int32 elements -> 4 C_local_size
-                """
-
-                # A[0:16, 0:16] * B[0:8, 0:16] -> C[0:16, 0:8]
-                T.ptx_mma(
-                    accum_dtype,
-                    mma_prefix,
-                    "row",
-                    "col",
-                    a_dtype_abbrv,
-                    b_dtype_abbrv,
-                    accum_dtype_abbrv,
-                    A_local_buf.data,
-                    i * local_size_a,
-                    B_local_buf.data,
-                    j * local_size_b,
-                    C_local_buf.data,
-                    i * warp_cols * local_size_out + j * local_size_out,
-                    T.bool(False),
-                )
-
-                # A[0:16, 0:16] * B[8:16, 0:16] -> C[0:16, 8:16]
-                T.ptx_mma(
-                    accum_dtype,
-                    mma_prefix,
-                    "row",
-                    "col",
-                    a_dtype_abbrv,
-                    b_dtype_abbrv,
-                    accum_dtype_abbrv,
-                    A_local_buf.data,
-                    i * local_size_a,
-                    B_local_buf.data,
-                    j * local_size_b + lift(local_size_b) // 2,
-                    C_local_buf.data,
-                    i * warp_cols * local_size_out + j * local_size_out + lift(local_size_out) // 2,
-                    T.bool(False),
-                )
-
-                # A[0:16, 16:32] * B[0:8, 16:32] -> C[0:16, 0:8]
-                T.ptx_mma(
-                    accum_dtype,
-                    mma_prefix,
-                    "row",
-                    "col",
-                    a_dtype_abbrv,
-                    b_dtype_abbrv,
-                    accum_dtype_abbrv,
-                    A_local_buf.data,
-                    i * local_size_a + lift(local_size_a) // 2,
-                    B_local_buf.data,
-                    j * local_size_b + lift(local_size_b) // 4,
-                    C_local_buf.data,
-                    i * warp_cols * local_size_out + j * local_size_out,
-                    T.bool(False),
-                )
-
-                # A[0:16, 16:32] * B[8:16, 16:32] -> C[0:16, 8:16]
-                T.ptx_mma(
-                    accum_dtype,
-                    mma_prefix,
-                    "row",
-                    "col",
-                    a_dtype_abbrv,
-                    b_dtype_abbrv,
-                    accum_dtype_abbrv,
-                    A_local_buf.data,
-                    i * local_size_a + lift(local_size_b) // 2,
-                    B_local_buf.data,
-                    j * local_size_b + lift(local_size_b) // 2 + lift(local_size_b) // 4,
-                    C_local_buf.data,
-                    i * warp_cols * local_size_out + j * local_size_out + lift(local_size_out) // 2,
-                    T.bool(False),
-                )
-
-        return _warp_mma(A_local_buf, B_local_buf, C_local_buf)
-
-
-class INT4TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitterWithLadderTransform):
-    def mma(self, A_local_buf, B_local_buf, C_local_buf):
-        warp_rows = self.warp_rows
-        warp_cols = self.warp_cols
-        local_size_a = self.local_size_a
-        local_size_b = self.local_size_b
-        local_size_out = self.local_size_out
-        a_dtype_abbrv = "int4"
-        b_dtype_abbrv = "int4"
-        accum_dtype = self.accum_dtype
-        accum_dtype_abbrv = T.int32
-        mma_prefix = "m16n8k32"
-
-        @T.macro
-        def _warp_mma(A_local_buf, B_local_buf, C_local_buf):
-            for i, j in T.grid(warp_rows, warp_cols):
-                """
-                A[16, 32], B[16, 32], C[16, 16]
-                A_local_size -> 16
-                B_local_size -> 16
-                C_local_size -> 8
-                For each m16n8k32 inst
-                For A: m16k32 consume 16 int4 elements -> 8 A_local_size
-                For A: n8k32 consume 8 int4 elements -> 4 B_local_size
-                For C: m16n8 consume 4 int32 elements -> 4 C_local_size
-                """
-
-                # A[0:16, 0:16] * B[0:8, 0:16] -> C[0:16, 0:8]
-                T.ptx_mma(
-                    accum_dtype,
-                    mma_prefix,
-                    "row",
-                    "col",
-                    a_dtype_abbrv,
-                    b_dtype_abbrv,
-                    accum_dtype_abbrv,
-                    A_local_buf.data,
-                    i * local_size_a,
-                    B_local_buf.data,
-                    j * local_size_b,
-                    C_local_buf.data,
-                    i * warp_cols * local_size_out + j * local_size_out,
-                    T.bool(False),
-                )
-
-                # A[0:16, 0:16] * B[8:16, 0:16] -> C[0:16, 8:16]
-                T.ptx_mma(
-                    accum_dtype,
-                    mma_prefix,
-                    "row",
-                    "col",
-                    a_dtype_abbrv,
-                    b_dtype_abbrv,
-                    accum_dtype_abbrv,
-                    A_local_buf.data,
-                    i * local_size_a,
-                    B_local_buf.data,
-                    j * local_size_b + lift(local_size_b) // 2,
-                    C_local_buf.data,
-                    i * warp_cols * local_size_out + j * local_size_out + lift(local_size_out) // 2,
-                    T.bool(False),
-                )
-
-                # A[0:16, 16:32] * B[0:8, 16:32] -> C[0:16, 0:8]
-                T.ptx_mma(
-                    accum_dtype,
-                    mma_prefix,
-                    "row",
-                    "col",
-                    a_dtype_abbrv,
-                    b_dtype_abbrv,
-                    accum_dtype_abbrv,
-                    A_local_buf.data,
-                    i * local_size_a + lift(local_size_a) // 2,
-                    B_local_buf.data,
-                    j * local_size_b + lift(local_size_b) // 4,
-                    C_local_buf.data,
-                    i * warp_cols * local_size_out + j * local_size_out,
-                    T.bool(False),
-                )
-
-                # A[0:16, 16:32] * B[8:16, 16:32] -> C[0:16, 8:16]
-                T.ptx_mma(
-                    accum_dtype,
-                    mma_prefix,
-                    "row",
-                    "col",
-                    a_dtype_abbrv,
-                    b_dtype_abbrv,
-                    accum_dtype_abbrv,
-                    A_local_buf.data,
-                    i * local_size_a + lift(local_size_b) // 2,
-                    B_local_buf.data,
-                    j * local_size_b + lift(local_size_b) // 2 + lift(local_size_b) // 4,
                     C_local_buf.data,
                     i * warp_cols * local_size_out + j * local_size_out + lift(local_size_out) // 2,
                     T.bool(False),

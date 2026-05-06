@@ -118,7 +118,24 @@ struct CUDAWarpIntrinsic {
 
 static PrimExpr DispatchCUDAWarpActiveMask(const PrimExpr &e) {
   const CallNode *call = e.as<CallNode>();
-  return Call(call->dtype, Op::Get("tir.cuda.__activemask"), call->args);
+  return Call(call->dtype, Op::Get("tir.cuda.__activemask"), call->args,
+              call->annotations);
+}
+
+static PrimExpr DispatchCUDAIsFinite(const PrimExpr &e) {
+  const CallNode *call = e.as<CallNode>();
+  ICHECK(call != nullptr);
+  ICHECK_EQ(call->args.size(), 1U);
+
+  DataType arg_dtype = call->args[0].dtype();
+  if (arg_dtype.is_float() &&
+      (arg_dtype.bits() == 32 || arg_dtype.bits() == 64)) {
+    Array<PrimExpr> new_args = {StringImm("isfinite"), call->args[0]};
+    return Call(call->dtype, builtin::call_pure_extern(), new_args,
+                call->annotations);
+  }
+
+  return e;
 }
 
 template <typename T> static PrimExpr DispatchCUDAShuffle(const PrimExpr &e) {
@@ -127,12 +144,16 @@ template <typename T> static PrimExpr DispatchCUDAShuffle(const PrimExpr &e) {
   ICHECK_EQ(call->args.size(), 5); // mask, value, warp_id, width, warp_size
   Array<PrimExpr> cuda_args{
       {call->args[0], call->args[1], call->args[2], call->args[3]}};
-  return Call(call->dtype, T()(call->dtype, Downcast<Op>(call->op)), cuda_args);
+  return Call(call->dtype, T()(call->dtype, Downcast<Op>(call->op)), cuda_args,
+              call->annotations);
 }
 
 TVM_REGISTER_OP("tir.rsqrt")
     .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
                                DispatchPureExtern<CUDAMath>);
+
+TVM_REGISTER_OP("tir.isfinite")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", DispatchCUDAIsFinite);
 
 } // namespace intrin
 } // namespace codegen

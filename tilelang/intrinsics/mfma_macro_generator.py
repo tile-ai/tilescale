@@ -4,13 +4,16 @@ import tilelang.language as T
 from tvm import DataType
 from tvm import tir
 from tvm.ir import Range
+from tvm.target import Target
 from tvm.tir import PrimExpr, IndexMap, Buffer, Var, BufferRegion, BufferLoad
 from tvm.runtime import convert
 from .utils import mfma_store_index_map
 from typing import Literal, Callable
+import warnings
 
+from tilelang.utils.target import target_is_gfx950, determine_target
 from tilelang.utils import is_fragment
-from tilelang.utils.language import get_buffer_region_from_load
+from tilelang.language.utils import get_buffer_region_from_load
 from .mfma_layout import (
     shared_16x4_to_local_64x1_layout_A,
     shared_4x16_to_local_64x1_layout_B,
@@ -20,6 +23,8 @@ from .mfma_layout import (
     shared_16x32_to_local_64x8_layout_B,
     shared_16x64_to_local_64x16_layout_A,
     shared_16x64_to_local_64x16_layout_B,
+    shared_32x32_to_local_64x16_layout_A,
+    shared_32x32_to_local_64x16_layout_B,
     thread_id_shared_access_64x1_to_16x4_layout_A,
     thread_id_shared_access_64x1_to_4x16_layout_B,
     thread_id_shared_access_64x4_to_16x16_layout_A,
@@ -28,6 +33,8 @@ from .mfma_layout import (
     thread_id_shared_access_64x8_to_16x32_layout_B,
     thread_id_shared_access_64x16_to_16x64_layout_A,
     thread_id_shared_access_64x16_to_16x64_layout_B,
+    thread_id_shared_access_64x16_to_32x32_layout_A,
+    thread_id_shared_access_64x16_to_32x32_layout_B,
 )
 
 lift = convert
@@ -38,8 +45,6 @@ class MatrixCoreIntrinEmitter:
     To eliminate Python syntax within TIR Macro.
     """
 
-    M_DIM = 16
-    N_DIM = 16
     WARP_SIZE = 64
     dtype_abbrv = {
         "float16": "fp16",
@@ -49,7 +54,9 @@ class MatrixCoreIntrinEmitter:
         "int32": "int32",
         "float8_e4m3": "e4m3",
         "float8_e5m2": "e5m2",
+        "float8_e4m3fn": "e4m3fn",
         "float8_e4m3fnuz": "e4m3fnuz",
+        "float8_e5m2fnuz": "e5m2fnuz",
     }
 
     # k_pack represents the number of elements in a vectorized instruction
@@ -77,24 +84,31 @@ class MatrixCoreIntrinEmitter:
         is_m_first: bool | None = False,
         b_preshuffle: bool | None = False,
         thread_var: Var | None = None,
+        target: Target | None = None,
+        mfma_shape: tuple[int, int, int] | None = None,
     ):
         self.a_dtype = a_dtype
         self.b_dtype = b_dtype
         self.accum_dtype = accum_dtype
         self.a_transposed = a_transposed
         self.b_transposed = b_transposed
+        if target is None:
+            warnings.warn("Target is not provided, using auto detection", stacklevel=2)
+            target = determine_target("auto", return_object=True)
+        self.target = target
         # Hint Information
         self.block_row_warps = block_row_warps
         self.block_col_warps = block_col_warps
         self.warp_row_tiles = warp_row_tiles
         self.warp_col_tiles = warp_col_tiles
         self.chunk = chunk
-        self._initialize_k_dim(a_dtype)
+        self._initialize_k_pack(k_pack)
+        self._initialize_mfma_shape(mfma_shape, a_dtype)
+        self._normalize_gfx950_f16_bf16_kpack()
         self._initialize_abbrev(a_dtype, b_dtype, accum_dtype)
         self._initialize_local_size(self.M_DIM, self.N_DIM, self.k_dim, self.WARP_SIZE)
         self._initialize_mfma_prefix(self.k_dim)
         self._initialize_micro_size(self.M_DIM, self.N_DIM, self.k_dim)
-        self._initialize_k_pack(k_pack)
         self._initialize_is_m_first(is_m_first)
         self._initialize_b_preshuffle(b_preshuffle)
 
@@ -105,17 +119,36 @@ class MatrixCoreIntrinEmitter:
         self.num_elems_per_byte = num_elems_per_byte
         self.thread_var = thread_var
 
-    def _initialize_k_dim(self, a_dtype=T.float16):
+    def _initialize_mfma_shape(self, mfma_shape: tuple[int, int, int] | None, a_dtype):
+        """Set ``(M_DIM, N_DIM, k_dim)`` from an explicit shape or auto-detect.
+
+        Supported shapes on CDNA4 (gfx950) for int8:
+            (16, 16, 32)  — ``v_mfma_i32_16x16x32_i8``  (default, CDNA3-compatible)
+            (16, 16, 64)  — ``v_mfma_i32_16x16x64_i8``  (doubled K throughput)
+            (32, 32, 32)  — ``v_mfma_i32_32x32x32_i8``  (doubled MN throughput)
+        """
+        if mfma_shape is not None:
+            self.M_DIM, self.N_DIM, self.k_dim = mfma_shape
+            return
+
+        # Auto-detect: same logic as the old _initialize_k_dim, defaulting to 16x16.
+        self.M_DIM = 16
+        self.N_DIM = 16
         if isinstance(a_dtype, str):
-            if a_dtype in ["float8_e4m3fnuz", T.int8]:
+            if a_dtype in ["float8_e4m3fn", "float8_e4m3fnuz", "float8_e5m2", "float8_e5m2fnuz", T.int8]:
                 self.k_dim = 32
                 return
             a_dtype = DataType(a_dtype)
 
         if a_dtype.bits == 32:
             self.k_dim = 4
-        elif a_dtype.bits in {16, 8}:
+        elif a_dtype.bits == 16:
             self.k_dim = 16
+        elif a_dtype.bits == 8:
+            if target_is_gfx950(self.target):
+                self.k_dim = 32
+            else:
+                self.k_dim = 16
         else:
             raise ValueError(f"Unsupported a_dtype = {a_dtype}")
 
@@ -140,16 +173,34 @@ class MatrixCoreIntrinEmitter:
             "float32": "f32",
             "int8": "i8",
             "int32": "i32",
+            "float8_e4m3fn": "fp8",
             "float8_e4m3fnuz": "fp8",
+            # ROCm treats E5M2 as BF8 in MFMA intrinsics.
+            "float8_e5m2": "bf8",
+            "float8_e5m2fnuz": "bf8",
         }[in_dtype]
 
         if in_dtype_abbrv == "fp8":
             self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}_fp8_fp8"
+        elif in_dtype_abbrv == "bf8":
+            self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}_bf8_bf8"
         elif in_dtype_abbrv == "i8":
             self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}_i8"
         elif in_dtype_abbrv == "bf16":
             # HIP intrinsic uses ...x{K}bf16_1k without an underscore before bf16
-            self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}bf16_1k"
+            if k_dim == 32:
+                # GFX950: __builtin_amdgcn_mfma_f32_16x16x32_bf16
+                self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}_bf16"
+            else:
+                # CDNA2/3: __builtin_amdgcn_mfma_f32_16x16x16bf16_1k
+                self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}bf16_1k"
+        elif in_dtype_abbrv == "f16":
+            # HIP 950 have _ before f16
+            if k_dim == 32:
+                # GFX950: __builtin_amdgcn_mfma_f32_16x16x32_f16
+                self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}_f16"
+            else:
+                self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}{in_dtype_abbrv}"
         else:
             self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}{in_dtype_abbrv}"
 
@@ -162,6 +213,17 @@ class MatrixCoreIntrinEmitter:
         if k_pack is not None:
             self.k_pack = k_pack
 
+    def _normalize_gfx950_f16_bf16_kpack(self):
+        is_f16_or_bf16 = self.a_dtype in {T.float16, T.bfloat16} and self.b_dtype in {T.float16, T.bfloat16}
+        # https://github.com/triton-lang/triton/blob/v3.6.0/third_party/amd/backend/compiler.py#L85-L89
+        if target_is_gfx950(self.target) and is_f16_or_bf16 and self.k_dim == 16 and self.k_pack == 2:
+            warnings.warn(
+                "On gfx950 with f16/bf16, remapping (k_dim=16, k_pack=2) to (k_dim=32, k_pack=1).",
+                stacklevel=3,
+            )
+            self.k_dim = 32
+            self.k_pack = 1
+
     def _initialize_is_m_first(self, is_m_first: bool | None = False):
         if is_m_first is not None:
             self.is_m_first = is_m_first
@@ -173,9 +235,17 @@ class MatrixCoreIntrinEmitter:
     def get_ldmatrix_index_map(self, is_b=False):
         k_dim = self.k_dim * self.k_pack
         transposed = self.a_transposed if not is_b else self.b_transposed
+        mn_dim = self.N_DIM if is_b else self.M_DIM
+
+        # 32x32 MFMA instructions use a different set of layout maps.
+        if mn_dim == 32:
+            return self._get_ldmatrix_index_map_32(is_b, k_dim, transposed)
+
         if k_dim == 4:
-            index_map = shared_16x4_to_local_64x1_layout_A
-            reverse_index_map = thread_id_shared_access_64x1_to_16x4_layout_A
+            index_map = shared_4x16_to_local_64x1_layout_B if transposed else shared_16x4_to_local_64x1_layout_A
+            reverse_index_map = (
+                thread_id_shared_access_64x1_to_4x16_layout_B if transposed else thread_id_shared_access_64x1_to_16x4_layout_A
+            )
             if is_b:
                 index_map = shared_16x4_to_local_64x1_layout_A if transposed else shared_4x16_to_local_64x1_layout_B
                 reverse_index_map = (
@@ -219,9 +289,45 @@ class MatrixCoreIntrinEmitter:
 
         return index_map, reverse_index_map
 
+    def _get_ldmatrix_index_map_32(self, is_b, k_dim, transposed):
+        """Index maps for 32x32xK MFMA instructions (M_DIM=N_DIM=32).
+
+        For int8 with mfma_shape=(32,32,32): k_dim*k_pack=32, local_size=16
+        so the tile is 32×32 → 64×16 thread/local layout.
+        """
+        # For 32x32 MFMA, the A/B layouts have tile dim 32 on the MN side.
+        # The maps are symmetric: A[row=M, col=K] and B[row=K, col=N] use the
+        # same underlying 32xK↔64×local layout, just with axes swapped for transpose.
+        if k_dim != 32:
+            raise ValueError(f"32x32 MFMA with effective k_dim={k_dim} is not supported yet; only k_dim=32 (k_dim*k_pack) is implemented.")
+        # k_dim=32 → shared_32x32_to_local_64x16
+        if not is_b:
+            # A: non-transposed = [M=32, K=32], transposed = [K=32, M=32]
+            if transposed:
+                index_map = shared_32x32_to_local_64x16_layout_B
+                reverse_index_map = thread_id_shared_access_64x16_to_32x32_layout_B
+            else:
+                index_map = shared_32x32_to_local_64x16_layout_A
+                reverse_index_map = thread_id_shared_access_64x16_to_32x32_layout_A
+        else:
+            # B: transposed = [N=32, K=32], non-transposed = [K=32, N=32]
+            if transposed:
+                index_map = shared_32x32_to_local_64x16_layout_A
+                reverse_index_map = thread_id_shared_access_64x16_to_32x32_layout_A
+            else:
+                index_map = shared_32x32_to_local_64x16_layout_B
+                reverse_index_map = thread_id_shared_access_64x16_to_32x32_layout_B
+        return index_map, reverse_index_map
+
     def get_store_index_map(self, inverse: bool = False) -> IndexMap:
         warp_size, local_size_c = self.WARP_SIZE, self.local_size_out
-        index_map = IndexMap.from_func(mfma_store_index_map, index_dtype=T.int32)
+        if self.M_DIM == 32:
+            from .utils import mfma_store_index_map_32x32
+
+            map_func = mfma_store_index_map_32x32
+        else:
+            map_func = mfma_store_index_map
+        index_map = IndexMap.from_func(map_func, index_dtype=T.int32)
         if not inverse:
             return index_map
         inverse_index_map = index_map.inverse([warp_size, local_size_c])
@@ -281,6 +387,8 @@ class MatrixCoreIntrinEmitter:
         A_buf = A_region.buffer
         A_base0 = A_region.region[-2].min
         A_base1 = A_region.region[-1].min
+        # Leading dimensions (e.g. pipeline stage axis) – empty for 2-D buffers
+        A_other = [r.min for r in A_region.region[:-2]]
 
         @T.macro
         def _warp_ldmatrix_a(
@@ -296,13 +404,13 @@ class MatrixCoreIntrinEmitter:
                     for local_id in T.vectorized(k_pack * local_size_a):
                         row, col = T.meta_var(reverse_index_map(tx, local_id))
                         l, r = (rk * chunk + ki * (k_pack * micro_size_k), warp_m * warp_row_tiles + i * micro_size_x)
-                        A_local_buf[i * k_pack * local_size_a + local_id] = A_buf[A_base0 + l + row, A_base1 + r + col]
+                        A_local_buf[i * k_pack * local_size_a + local_id] = A_buf[tuple(A_other) + (A_base0 + l + row, A_base1 + r + col)]
             else:
                 for i in T.serial(warp_rows):
                     for local_id in T.vectorized(k_pack * local_size_a):
                         row, col = T.meta_var(reverse_index_map(tx, local_id))
                         l, r = (warp_m * warp_row_tiles + i * micro_size_x, rk * chunk + ki * (k_pack * micro_size_k))
-                        A_local_buf[i * k_pack * local_size_a + local_id] = A_buf[A_base0 + l + row, A_base1 + r + col]
+                        A_local_buf[i * k_pack * local_size_a + local_id] = A_buf[tuple(A_other) + (A_base0 + l + row, A_base1 + r + col)]
 
         return _warp_ldmatrix_a(A_local_buf, A_shared_buf, ki, thread_binding, rk)
 
@@ -323,6 +431,8 @@ class MatrixCoreIntrinEmitter:
         B_buf = B_region.buffer
         B_base0 = B_region.region[-2].min
         B_base1 = B_region.region[-1].min
+        # Leading dimensions (e.g. pipeline stage axis) – empty for 2-D buffers
+        B_other = [r.min for r in B_region.region[:-2]]
 
         @T.macro
         def _warp_ldmatrix_b(
@@ -341,7 +451,7 @@ class MatrixCoreIntrinEmitter:
                             warp_n * warp_col_tiles + j * micro_size_y,
                             rk * chunk + ki * (k_pack * micro_size_k),
                         )
-                        B_local_buf[j * k_pack * local_size_b + local_id] = B_buf[B_base0 + l + row, B_base1 + r + col]
+                        B_local_buf[j * k_pack * local_size_b + local_id] = B_buf[tuple(B_other) + (B_base0 + l + row, B_base1 + r + col)]
 
             else:
                 for j in T.serial(warp_cols):
@@ -351,7 +461,7 @@ class MatrixCoreIntrinEmitter:
                             rk * chunk + ki * (k_pack * micro_size_k),
                             warp_n * warp_col_tiles + j * micro_size_y,
                         )
-                        B_local_buf[j * k_pack * local_size_b + local_id] = B_buf[B_base0 + l + row, B_base1 + r + col]
+                        B_local_buf[j * k_pack * local_size_b + local_id] = B_buf[tuple(B_other) + (B_base0 + l + row, B_base1 + r + col)]
 
         return _warp_ldmatrix_b(B_local_buf, B_shared_buf, ki, thread_binding, rk)
 
@@ -408,6 +518,13 @@ class MatrixCoreIntrinEmitter:
         C_buf_dims = len(C_buf.shape)
         assert C_buf_dims in {2, 4}, "C_buf should be 2D or 4D"
 
+        if M_DIM == 32:
+            from .mfma_layout import thread_id_shared_access_64x16_to_32x32_layout_C_m_n
+
+            _store_map = thread_id_shared_access_64x16_to_32x32_layout_C_m_n
+        else:
+            _store_map = mfma_store_index_map
+
         # STS
         # MFMA Store must be in simulated instead of TVM Intrins
         # As TVM Intrins is like a hack that the threadIdx.x should be always
@@ -417,7 +534,7 @@ class MatrixCoreIntrinEmitter:
             tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
             for i, j in T.grid(warp_rows, warp_cols):
                 for local_id in T.vectorized(local_size_out):
-                    row, col = T.meta_var(mfma_store_index_map(tx, local_id))
+                    row, col = T.meta_var(_store_map(tx, local_id))
                     if C_buf_dims == 2:
                         C_buf[(warp_m * warp_rows + i) * M_DIM + row, (warp_n * warp_cols + j) * N_DIM + col] = C_local_buf[
                             i * (warp_cols * local_size_out) + j * local_size_out + local_id
@@ -432,7 +549,7 @@ class MatrixCoreIntrinEmitter:
             tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
             for i, j in T.grid(warp_rows, warp_cols):
                 for local_id in T.vectorized(local_size_out):
-                    row, col = T.meta_var(mfma_store_index_map(tx, local_id))
+                    row, col = T.meta_var(_store_map(tx, local_id))
                     C_buf[
                         (pid_m * BLOCK_M + warp_m * warp_rows + i) * M_DIM + row, (pid_n * BLOCK_N + warp_n * warp_cols + j) * N_DIM + col
                     ] = C_local_buf[i * warp_cols * local_size_out + j * local_size_out + local_id]
@@ -480,8 +597,16 @@ class MatrixCoreIntrinEmitter:
         transform_func_sr_b: Callable = None
 
         k_dim = self.k_dim * self.k_pack
+        mn_dim = self.M_DIM  # M_DIM == N_DIM for all supported shapes
 
-        if k_dim == 4:
+        if mn_dim == 32:
+            if k_dim != 32:
+                raise ValueError(
+                    f"make_mfma_load_layout: 32x32 MFMA with effective k_dim={k_dim} is not supported; only k_dim=32 is implemented."
+                )
+            transform_func_sr_a = shared_32x32_to_local_64x16_layout_A
+            transform_func_sr_b = shared_32x32_to_local_64x16_layout_A
+        elif k_dim == 4:
             transform_func_sr_a = shared_16x4_to_local_64x1_layout_A
             transform_func_sr_b = shared_16x4_to_local_64x1_layout_A
         elif k_dim == 16:
@@ -687,6 +812,8 @@ class MatrixCorePreshuffleIntrinEmitter(MatrixCoreIntrinEmitter):
         a_preshuffle: bool | None = False,
         b_preshuffle: bool | None = False,
         thread_var: Var | None = None,
+        target: Target | None = None,
+        mfma_shape: tuple[int, int, int] | None = None,
     ):
         super().__init__(
             a_dtype=a_dtype,
@@ -704,12 +831,14 @@ class MatrixCorePreshuffleIntrinEmitter(MatrixCoreIntrinEmitter):
             k_pack=k_pack,
             is_m_first=is_m_first,
             thread_var=thread_var,
+            mfma_shape=mfma_shape,
+            target=target,
         )
         self._initialize_preshuffle(a_preshuffle, b_preshuffle)
 
-    def _initialize_preshuffle(self, a_preshuffle: bool, b_preshuffle: bool):
-        if a_preshuffle is not None:
-            self.a_preshuffle = a_preshuffle
+    def _initialize_preshuffle(self, a_preshuffle: bool | None, b_preshuffle: bool | None):
+        # Parent does not set a_preshuffle; default False when omitted.
+        self.a_preshuffle = False if a_preshuffle is None else a_preshuffle
         if b_preshuffle is not None:
             self.b_preshuffle = b_preshuffle
 
@@ -720,10 +849,10 @@ class MatrixCorePreshuffleIntrinEmitter(MatrixCoreIntrinEmitter):
         local_size_a = self.local_size_a
         k_pack = self.k_pack
         is_transposed = self.a_transposed
-        current_frame = T.KernelLaunchFrame.Current()
-        thread_binding = current_frame.get_thread_binding()
+        thread_binding = self.get_thread_binding()
         _, reverse_index_map = self.get_ldmatrix_index_map(is_b=False)
-        is_global = pid_m is not None and pid_n is not None
+        # A-side global load only depends on the row block id (pid_m)
+        is_global = pid_m is not None
 
         # no preshuffle, use the default implementation
         if self.a_preshuffle is False:
@@ -775,7 +904,6 @@ class MatrixCorePreshuffleIntrinEmitter(MatrixCoreIntrinEmitter):
                         )
                         A_local_buf[i * k_pack * local_size_a + local_id] = A_shared_buf[l, r, row, col]
             else:
-                print(self.a_preshuffle)
                 for i in T.serial(warp_rows):
                     for local_id in T.vectorized(k_pack * local_size_a):
                         row, col = T.meta_var(reverse_index_map(tx, local_id))
@@ -795,13 +923,13 @@ class MatrixCorePreshuffleIntrinEmitter(MatrixCoreIntrinEmitter):
         local_size_b = self.local_size_b
         k_pack = self.k_pack
         is_transposed = self.b_transposed
-        current_frame = T.KernelLaunchFrame.Current()
-        thread_binding = current_frame.get_thread_binding()
+        thread_binding = self.get_thread_binding()
         _, reverse_index_map = self.get_ldmatrix_index_map(is_b=True)
-        is_global = pid_m is not None and pid_n is not None
+        # B-side global load only depends on the column block id (pid_n)
+        is_global = pid_n is not None
 
         if self.b_preshuffle is False:
-            return super().ldmatrix_b(B_local_buf, B_buf, ki, rk, pid_m, pid_n)
+            return super().ldmatrix_b(B_local_buf, B_buf, ki, rk)
 
         @T.macro
         def _warp_ldmatrix_b_global(

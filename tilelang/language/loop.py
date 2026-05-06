@@ -5,12 +5,18 @@ from typing import Any
 from tvm import tir
 from tvm.tir import IntImm
 import tvm.script.ir_builder.tir as tb_tir
-from .v2.builder import SerialForWithStep, UnrollForWithStep
+from .eager.builder import SerialForWithStep, UnrollForWithStep
 from tilelang import _ffi_api
 from tvm.script.ir_builder.tir import frame
 
 
-def Parallel(*extents: tir.PrimExpr, coalesced_width: int | None = None):
+def Parallel(
+    *extents: int | tir.PrimExpr,
+    coalesced_width: int | None = None,
+    loop_layout: Any | None = None,
+    prefer_async: bool | None = None,
+    annotations: dict[str, Any] | None = None,
+) -> frame.ForFrame:
     """Tools to construct nested parallel for loop.
        This can be used to create element-wise tensor expression.
 
@@ -22,23 +28,71 @@ def Parallel(*extents: tir.PrimExpr, coalesced_width: int | None = None):
     coalesced_width : Optional[int]
         The coalesced width of the parallel loop.
 
+    loop_layout : Optional[Fragment]
+        A layout annotation for the parallel loop nest, expressed as a
+        ``T.Fragment``. When provided, it is attached as the
+        ``"parallel_loop_layout"`` annotation on the outermost parallel loop.
+        For a k-dimensional ``T.Parallel(...)`` nest, the fragment's
+        ``InputDim`` must equal ``k``.
+
+    prefer_async : Optional[bool]
+        Optional hint for PTX async-copy rewrite in this parallel loop subtree.
+        When set to ``True``, it requests cp.async injection even outside
+        pipelined loops. ``False``/``None`` keeps default behavior.
+        Internally lowered as loop annotation ``"parallel_prefer_async"``.
+
+    annotations : Optional[Dict[str, Any]]
+        Optional user-provided loop annotations attached to the outermost
+        generated parallel loop. For example:
+        ``{"parallel_async_without_async_commit_wait": True}``.
+
+    Notes on layout constraints
+    ---------------------------
+    TileLang validates parallel loop layout annotations during
+    ``tl.transform.LayoutInference`` with ``ParallelLoopLayoutValidator``.
+    The key constraints are:
+
+    - Every parallel loop must be covered by a layout annotation after
+      layout inference. For a nested parallel nest, this annotation must live
+      on the outermost loop; inner parallel loops must not carry the layout
+      annotation themselves.
+    - For a nest depth of ``k``, the layout must satisfy
+      ``InputDim == k``.
+    - Violations (missing annotation on the outermost loop, annotations on
+      inner loops, or mismatched ``InputDim``) cause a compilation error.
+
+    Rationale: inner loops cannot control/annotate their outer loops, while the
+    outermost loop can manage its inner nest. Therefore the layout is placed on
+    the outermost loop so lowering passes can rewrite the entire region.
+
+    To make this easy, ``T.Parallel`` attaches any provided ``loop_layout``
+    to the outermost generated loop only. If you omit ``loop_layout``, the
+    compiler will try to infer a valid layout and attach it during the
+    LayoutInference pass.
+
     Returns
     -------
     res : frame.ForFrame
         The ForFrame.
     """
-    annotations: dict[str, Any] = {}
+    merged_annotations: dict[str, Any] = dict(annotations) if annotations is not None else {}
     if coalesced_width is not None:
-        annotations.update({"coalesced_width": coalesced_width})
-    return _ffi_api.Parallel(extents, annotations)  # type: ignore[attr-defined] # pylint: disable=no-member
+        merged_annotations["coalesced_width"] = coalesced_width
+    if loop_layout is not None:
+        # Pass through to C++ as the standard parallel loop layout key.
+        # The builder will attach it only on the outermost parallel loop.
+        merged_annotations["parallel_loop_layout"] = loop_layout
+    if prefer_async is not None:
+        merged_annotations["parallel_prefer_async"] = prefer_async
+    return _ffi_api.Parallel(extents, merged_annotations)  # type: ignore[attr-defined] # pylint: disable=no-member
 
 
 def Persistent(
     domain: list[tir.PrimExpr],
     wave_size: tir.PrimExpr,
     index: tir.PrimExpr,
-    group_size: tir.PrimExpr | None = 8,
-):
+    group_size: tir.PrimExpr | int | None = 8,
+) -> frame.ForFrame:
     """Tools to construct persistent for loop.
 
     Parameters
@@ -57,13 +111,13 @@ def Persistent(
 
 def Pipelined(
     start: tir.PrimExpr,
-    stop: tir.PrimExpr = None,
+    stop: tir.PrimExpr | None = None,
     num_stages: int = 0,
     order: list[int] | None = None,
     stage: list[int] | None = None,
     sync: list[list[int]] | None = None,
     group: list[list[int]] | None = None,
-):
+) -> frame.ForFrame:
     """Tools to construct pipelined for loop.
 
     Parameters
@@ -96,7 +150,11 @@ def Pipelined(
 
 
 def serial(
-    start: tir.PrimExpr, stop: tir.PrimExpr | None = None, step: tir.PrimExpr | None = None, *, annotations: dict[str, Any] | None = None
+    start: tir.PrimExpr,
+    stop: tir.PrimExpr | None = None,
+    step: tir.PrimExpr | None = None,
+    *,
+    annotations: dict[str, Any] | None = None,
 ) -> frame.ForFrame:
     """The serial For statement.
 
@@ -206,7 +264,7 @@ def Serial(
     step: tir.PrimExpr | None = None,
     *,
     annotations: dict[str, Any] | None = None,
-):
+) -> frame.ForFrame:
     """Alias of T.serial."""
 
     return serial(start, stop, step, annotations=annotations)
@@ -220,7 +278,45 @@ def Unroll(
     explicit: bool = False,
     unroll_factor: int | None = None,
     annotations: dict[str, Any] | None = None,
-):
+) -> frame.ForFrame:
     """Alias of T.unroll."""
 
     return unroll(start, stop, step, explicit=explicit, unroll_factor=unroll_factor, annotations=annotations)
+
+
+def vectorized(
+    start: tir.PrimExpr,
+    stop: tir.PrimExpr | None = None,
+    *,
+    annotations: dict[str, Any] | None = None,
+) -> frame.ForFrame:
+    """The vectorized For statement.
+
+    Parameters
+    ----------
+    start : PrimExpr
+        The minimum value of iteration.
+
+    stop : PrimExpr
+        The maximum value of iteration.
+
+    annotations : Dict[str, Any]
+        The optional annotations of the For statement.
+
+    Returns
+    -------
+    res : frame.ForFrame
+        The ForFrame.
+    """
+    return tb_tir.vectorized(start, stop, annotations=annotations)
+
+
+def Vectorized(
+    start: tir.PrimExpr,
+    stop: tir.PrimExpr | None = None,
+    *,
+    annotations: dict[str, Any] | None = None,
+) -> frame.ForFrame:
+    """Alias of T.vectorized."""
+
+    return vectorized(start, stop, annotations=annotations)

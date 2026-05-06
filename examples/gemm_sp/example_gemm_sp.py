@@ -6,7 +6,7 @@ import tilelang.language as T
 from tilelang.layout import make_cutlass_metadata_layout
 from tilelang.utils.sparse import compress, randn_semi_sparse
 from tilelang.contrib import nvcc
-from triton.testing import do_bench
+from tilelang.profiler import do_bench
 
 import torch
 
@@ -97,13 +97,11 @@ def matmul_sp_fp16(M, N, K, accum_dtype, block_M, block_N, block_K, num_stages, 
     return gemm_sp_fp16
 
 
-def main(m=16384, n=16384, k=16384, accum_dtype=None, cfg="4090"):
-    if accum_dtype is None:
-        accum_dtype = T.float
-    kernel = matmul_sp_fp16(m, n, k, accum_dtype, **DEFAULT_CONFIG[cfg][accum_dtype])
+def main(M=1024, N=1024, K=1024, accum_dtype=T.float, cfg="h20"):
+    kernel = matmul_sp_fp16(M, N, K, accum_dtype, **DEFAULT_CONFIG[cfg][accum_dtype])
 
-    a = randn_semi_sparse(m, k, device="cuda", dtype=torch.half)
-    b = torch.randn(k, n, device="cuda", dtype=torch.half)
+    a = randn_semi_sparse(M, K, device="cuda", dtype=torch.half)
+    b = torch.randn(K, N, device="cuda", dtype=torch.half)
 
     a_sparse, e = compress(a, transposed=False, block_k=DEFAULT_CONFIG[cfg][accum_dtype]["block_K"], arch=arch)
     c = kernel(a_sparse, e, b)
@@ -117,7 +115,7 @@ def main(m=16384, n=16384, k=16384, accum_dtype=None, cfg="4090"):
     latency = do_bench(lambda: kernel(a_sparse, e, b))
     ref_latency = do_bench(lambda: a @ b)
 
-    total_flops = 2 * m * n * k
+    total_flops = 2 * M * N * K
     tflops = total_flops / latency / 1e9
     ref_tflops = total_flops / ref_latency / 1e9
     print(f"Sparse TFLOPS: {tflops:.2f}, Latency: {latency / 1e3} s")
@@ -129,8 +127,7 @@ if __name__ == "__main__":
     parser.add_argument("--m", type=int, default=16384, help="Matrix dimension M")
     parser.add_argument("--n", type=int, default=16384, help="Matrix dimension N")
     parser.add_argument("--k", type=int, default=16384, help="Matrix dimension K")
-    parser.add_argument("--accum_dtype", type=str, default="float", choices=["float", "float16"], help="Accumulation datatype")
+    parser.add_argument("--accum_dtype", type=str, default=T.float, choices=[T.float, T.float16], help="Accumulation datatype")
     parser.add_argument("--cfg", type=str, choices=["4090", "h20"], default="4090")
     args = parser.parse_args()
-    accum_dtype = T.float if args.accum_dtype == "float" else T.float16
-    main(args.m, args.n, args.k, accum_dtype, args.cfg)
+    main(M=args.m, N=args.n, K=args.k, accum_dtype=args.accum_dtype, cfg=args.cfg)

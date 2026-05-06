@@ -5,7 +5,6 @@ and performance optimization through configuration search.
 """
 
 from __future__ import annotations
-
 from dataclasses import dataclass
 
 import tilelang
@@ -100,6 +99,21 @@ def get_available_cpu_count() -> int:
     return cpu_count or 1
 
 
+def _normalize_value(value, sort_dict_items: bool = False):
+    if isinstance(value, torch.Tensor):
+        return ("tensor", str(value.dtype), tuple(value.shape), value.stride())
+    if isinstance(value, Var):
+        return str(value)
+    if isinstance(value, (list, tuple)):
+        return tuple(_normalize_value(v, sort_dict_items=sort_dict_items) for v in value)
+    if isinstance(value, dict):
+        items = ((str(k), _normalize_value(v, sort_dict_items=sort_dict_items)) for k, v in value.items())
+        if sort_dict_items:
+            return tuple(sorted(items))
+        return {k: v for k, v in items}
+    return value
+
+
 class AutoTuner:
     """Auto-tuner for tilelang programs.
 
@@ -114,11 +128,10 @@ class AutoTuner:
     compile_args = CompileArgs()
     profile_args = ProfileArgs()
 
-    _kernel_parameters: tuple[str, ...] | None = None
+    _kernel_parameters: tuple[tuple[Any, ...], tuple[tuple[str, Any], ...]] | None = None
     _function_parameters: dict[str, Any] | None = None
     _lock = threading.Lock()  # For thread safety
     _memory_cache = {}  # In-memory cache dictionary
-    cache_dir: Path = Path(env.TILELANG_CACHE_DIR) / "autotuner"
 
     def __init__(self, fn: Callable, configs):
         self.fn = fn
@@ -127,6 +140,16 @@ class AutoTuner:
         self.jit_input_tensors = None
         self.ref_input_tensors = None
         self.jit_compile = None
+
+    @classmethod
+    def _get_cache_dir(cls) -> Path:
+        from tilelang.cache.kernel_cache import KernelCache
+
+        return Path(KernelCache._get_namespace_root()) / "autotuner"
+
+    @property
+    def cache_dir(self) -> Path:
+        return self._get_cache_dir()
 
     @classmethod
     def from_kernel(cls, kernel: Callable, configs):
@@ -209,6 +232,7 @@ class AutoTuner:
         skip_check: bool = False,
         manual_check_prog: Callable = None,
         cache_input_tensors: bool = False,
+        backend: Literal["event", "cupti", "cudagraph"] = "event",
     ):
         """Set profiling arguments for the auto-tuner.
 
@@ -225,7 +249,7 @@ class AutoTuner:
             warmup: Number of warmup iterations.
             rep: Number of repetitions for timing.
             timeout: Maximum time per configuration.
-
+            backend: Profiler backend - "event" (CUDA events), "cupti", or "cudagraph".
         Returns:
             AutoTuner: Self for method chaining.
         """
@@ -249,6 +273,7 @@ class AutoTuner:
             warmup=warmup,
             rep=rep,
             timeout=timeout,
+            backend=backend,
         )
 
         # If a custom `supply_prog` is provided, the profiler's `supply_type` setting
@@ -258,22 +283,13 @@ class AutoTuner:
 
         return self
 
-    def set_kernel_parameters(self, k_parameters: tuple[str, ...], f_parameters: dict[str, Any]):
+    def set_kernel_parameters(self, k_parameters: tuple[tuple[Any, ...], tuple[tuple[str, Any], ...]], f_parameters: dict[str, Any]):
         # for cache key generation
         self._kernel_parameters = k_parameters
         self._function_parameters = f_parameters
 
     def generate_cache_key(self, parameters: dict[str, Any], extra_parameters: dict[str, Any]) -> AutotuneResult | None:
         """Generate a cache key for the auto-tuning process."""
-
-        def _normalize_param(value):
-            if isinstance(value, Var):
-                return str(value)
-            if isinstance(value, (list, tuple)):
-                return [_normalize_param(v) for v in value]
-            if isinstance(value, dict):
-                return {str(k): _normalize_param(v) for k, v in value.items()}
-            return value
 
         # extract parameters from the function signature
         op_parameters = []
@@ -282,7 +298,7 @@ class AutoTuner:
                 op_parameters.append(default_value.default)
 
         if self._kernel_parameters is not None:
-            op_parameters += _normalize_param(self._kernel_parameters)
+            op_parameters += _normalize_value(self._kernel_parameters)
 
         func_source = inspect.getsource(self.fn)
         key_data = {
@@ -341,7 +357,9 @@ class AutoTuner:
                 extra_parameters[var_name] = cell.cell_contents
 
         if isinstance(self.configs, Callable):
-            self.configs = self.configs(*self._kernel_parameters)
+            kernel_args, kernel_kwargs = self._kernel_parameters
+            kernel_kwargs = dict(kernel_kwargs)
+            self.configs = self.configs(*kernel_args, **kernel_kwargs)
 
         key = self.generate_cache_key(parameters, extra_parameters)
 
@@ -389,6 +407,7 @@ class AutoTuner:
             rtol = profile_args.rtol
             atol = profile_args.atol
             max_mismatched_ratio = profile_args.max_mismatched_ratio
+            backend = profile_args.backend
 
             profiler = jit_kernel.get_profiler(tensor_supply_type=supply_type)
 
@@ -449,11 +468,17 @@ class AutoTuner:
                     profiler.assert_allclose(
                         ref_prog, input_tensors=self.jit_input_tensors, rtol=rtol, atol=atol, max_mismatched_ratio=max_mismatched_ratio
                     )
-            latency = profiler.do_bench(warmup=warmup, rep=rep, input_tensors=self.jit_input_tensors)
+            latency = profiler.do_bench(warmup=warmup, rep=rep, input_tensors=self.jit_input_tensors, backend=backend)
 
             if self.ref_latency_cache is None and ref_prog is not None:
                 self.ref_input_tensors = ref_input_tensors_supply()
-                self.ref_latency_cache = profiler.do_bench(ref_prog, n_warmup=warmup, n_repeat=rep, input_tensors=self.ref_input_tensors)
+                self.ref_latency_cache = profiler.do_bench(
+                    ref_prog,
+                    n_warmup=warmup,
+                    n_repeat=rep,
+                    input_tensors=self.ref_input_tensors,
+                    backend=backend,
+                )
 
             return latency, self.ref_latency_cache
 
@@ -672,21 +697,52 @@ class AutoTuneImpl(Generic[_P, _T]):
         autotuner.run = partial(autotuner.run, self.warmup, self.rep, self.timeout)
         return autotuner
 
-    def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> JITKernel:
-        key_args_tuple = args
-        key_kwargs_tuple = tuple(sorted(kwargs.items()))
-        key = (key_args_tuple, key_kwargs_tuple)
+    def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> JITKernel | _T:
+        return_kernel = kwargs.pop("__return_kernel", False)
+
+        mode = self.jit_impl.initialize_jit_mode(*args, **kwargs)
+
+        norm_args = _normalize_value(args, sort_dict_items=True)
+        norm_kwargs = _normalize_value(kwargs, sort_dict_items=True)
+        key = (norm_args, norm_kwargs)
         if key not in self._tuner_cache:
+            if mode == "lazy":
 
-            def jit_compile(**config_arg):
-                return self.jit_impl(*args, **kwargs, __tune_params=config_arg)
+                def jit_compile(**config_arg):
+                    return self.jit_impl(*args, **kwargs, __tune_params=config_arg)
 
-            autotuner = self.get_tunner()
-            autotuner.jit_compile = jit_compile
-            autotuner.set_kernel_parameters(key, self.jit_impl.signature.parameters)
+                autotuner = self.get_tunner()
+                autotuner.jit_compile = jit_compile
+                autotuner.set_kernel_parameters(key, self.jit_impl.signature.parameters)
+            else:
+
+                def jit_compile(**config_arg):
+                    merged = dict(kwargs)
+                    merged.update(config_arg)
+                    return self.jit_impl.compile(*args, **merged)
+
+                autotuner = self.get_tunner()
+                autotuner.jit_compile = jit_compile
+                autotuner.set_kernel_parameters(key, self.jit_impl.signature.parameters)
+
             artifact = autotuner.run()
-            self._tuner_cache[key] = artifact.kernel
-        return self._tuner_cache[key]
+            self._tuner_cache[key] = artifact.kernel, artifact.config
+
+        best_kernel, best_config = self._tuner_cache[key]
+
+        if mode == "lazy":
+            return best_kernel
+        else:
+            if return_kernel:
+                return best_kernel
+            exec_kwargs = dict(kwargs)
+            if best_config is not None:
+                exec_kwargs.update(best_config)
+            _, kernel_args = self.jit_impl.func.parse_args(*args, **exec_kwargs)
+            return best_kernel(*kernel_args.values())
+
+    def compile(self, *args: _P.args, **kwargs: _P.kwargs) -> JITKernel:
+        return self(*args, **kwargs, __return_kernel=True)
 
 
 def autotune(  # This is the new public interface

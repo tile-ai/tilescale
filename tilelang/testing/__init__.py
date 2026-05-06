@@ -1,11 +1,11 @@
 import sys
-import os
 import inspect
 import pytest
 import random
 import torch
 import numpy as np
 from tilelang.contrib import nvcc
+from tilelang.utils.target import determine_target, target_is_gfx950
 from tvm.testing.utils import requires_cuda, requires_package, requires_llvm, requires_metal, requires_rocm, _compose
 
 from tilelang.utils.tensor import torch_assert_close as torch_assert_close
@@ -17,23 +17,33 @@ __all__ = [
     "requires_metal",
     "requires_rocm",
     "requires_llvm",
-    "requires_distributed",
+    "requires_gfx950",
     "main",
     "requires_cuda_compute_version",
     "process_func",
     "regression",
 ] + [f"requires_cuda_compute_version_{op}" for op in ("ge", "gt", "le", "lt", "eq")]
 
-__all__ = [
-    "requires_package",
-    "requires_cuda",
-    "requires_metal",
-    "requires_rocm",
-    "requires_llvm",
-    "requires_distributed",
-    "main",
-    "requires_cuda_compute_version",
-] + [f"requires_cuda_compute_version_{op}" for op in ("ge", "gt", "le", "lt", "eq")]
+
+def _check_is_gfx950() -> bool:
+    try:
+        target = determine_target("auto", return_object=True)
+        return target_is_gfx950(target)
+    except (ValueError, RuntimeError):
+        return False
+
+
+def requires_gfx950(func):
+    """Skip the test unless the ROCm device is gfx950 (CDNA4 / MI350)."""
+    is_gfx950 = _check_is_gfx950()
+    marks = [
+        pytest.mark.skipif(
+            not is_gfx950,
+            reason="Requires gfx950 (CDNA4/MI350)",
+        ),
+        *requires_rocm.marks(),
+    ]
+    return _compose([func], marks)
 
 
 # pytest.main() wrapper to allow running single test file
@@ -135,22 +145,3 @@ def requires_cuda_compute_version_lt(major_version, minor_version=0):
 
 def requires_cuda_compute_version_le(major_version, minor_version=0):
     return requires_cuda_compute_version(major_version, minor_version, mode="le")
-
-
-# Whether TILELANG_USE_DISTRIBUTED is enabled in the environment
-_distributed_enabled = os.environ.get("TILELANG_USE_DISTRIBUTED", "0").lower() in ("1", "true", "on")
-
-
-def requires_distributed(func):
-    """Mark a test as requiring distributed mode (TILELANG_USE_DISTRIBUTED=1).
-
-    Adds both:
-    - pytest.mark.distributed  → so CI can select these tests via ``-m distributed``
-    - pytest.mark.skipif       → so the test is skipped when the env var is unset
-    """
-    func = pytest.mark.distributed(func)
-    func = pytest.mark.skipif(
-        not _distributed_enabled,
-        reason="Requires TILELANG_USE_DISTRIBUTED=1",
-    )(func)
-    return func

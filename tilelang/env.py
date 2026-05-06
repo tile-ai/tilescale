@@ -1,4 +1,5 @@
 from __future__ import annotations
+import importlib.metadata
 import sys
 import os
 import pathlib
@@ -44,6 +45,28 @@ for lib in TL_LIBS:
         sys.path.insert(0, lib)
 
 
+def _get_package_version(pkg: str) -> str | None:
+    try:
+        return importlib.metadata.version(pkg)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _is_running_autodd() -> bool:
+    """Detect if we are running under `python -m tilelang.autodd`."""
+    orig_argv = getattr(sys, "orig_argv", None)
+    if orig_argv is None:
+        return False
+    if "-mtilelang.autodd" in orig_argv:
+        return True
+    pos = orig_argv.index("-m") if "-m" in orig_argv else -1
+    if pos != -1 and pos + 1 < len(orig_argv):
+        module_name = orig_argv[pos + 1]
+        if module_name == "tilelang.autodd" or module_name.startswith("tilelang.autodd."):
+            return True
+    return False
+
+
 def _find_cuda_home() -> str:
     """Find the CUDA install path.
 
@@ -66,8 +89,19 @@ def _find_cuda_home() -> str:
             else:
                 cuda_home = os.path.dirname(os.path.dirname(nvcc_path))
 
-        else:
+        elif _get_package_version("nvidia-cuda-nvcc") is not None:
             # Guess #3
+            # from pypi package nvidia-cuda-nvcc, only nvidia-cuda-nvcc>=13.0 works.
+            # nvidia-cuda-nvcc-cu12, etc. only installs `ptxas`, not `nvcc`
+            for file in importlib.metadata.files("nvidia-cuda-nvcc") or []:
+                if file.name == "nvcc" or file.name == "nvcc.exe":
+                    cuda_home = str(pathlib.Path(file.locate()).parent.parent)
+                    break
+            else:
+                raise AssertionError("`nvidia-cuda-nvcc` installed but no `nvcc` found")
+
+        else:
+            # Guess #4
             if sys.platform == "win32":
                 cuda_homes = glob.glob("C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v*.*")
                 cuda_home = "" if len(cuda_homes) == 0 else cuda_homes[0]
@@ -78,9 +112,9 @@ def _find_cuda_home() -> str:
                 elif os.path.exists("/opt/nvidia/hpc_sdk/Linux_x86_64"):
                     cuda_home = "/opt/nvidia/hpc_sdk/Linux_x86_64"
 
-            # Validate found path
-            if cuda_home is None or not os.path.exists(cuda_home):
-                cuda_home = None
+        # Validate found path
+        if cuda_home is None or not os.path.exists(cuda_home):
+            cuda_home = None
 
     return cuda_home if cuda_home is not None else ""
 
@@ -234,10 +268,9 @@ class Environment:
         "TILELANG_DISABLE_CACHE", "0"
     )  # disable kernel cache, usually for unit testing / debugging, high priority
     TILELANG_CLEAR_CACHE = EnvVar("TILELANG_CLEAR_CACHE", "0")  # DEPRECATED! clear cache automatically if set
-
-    # Kernel selection options
-    # Default to GEMM v2; set to "1"/"true"/"yes"/"on" to force v1
-    TILELANG_USE_GEMM_V1 = EnvVar("TILELANG_USE_GEMM_V1", "0")
+    TILELANG_CLEANUP_TEMP_FILES = EnvVar(
+        "TILELANG_CLEANUP_TEMP_FILES", "0"
+    )  # cleanup temporary compiler files/dirs after compilation (default: keep for debugging)
 
     # Auto-tuning settings
     TILELANG_AUTO_TUNING_DISABLE_CACHE = EnvVar("TILELANG_AUTO_TUNING_DISABLE_CACHE", "0")
@@ -254,78 +287,6 @@ class Environment:
     # TVM integration
     SKIP_LOADING_TILELANG_SO = EnvVar("SKIP_LOADING_TILELANG_SO", "0")
     TVM_IMPORT_PYTHON_PATH = EnvVar("TVM_IMPORT_PYTHON_PATH", None)
-
-    # NVSHMEM paths - auto-detect from pip-installed nvidia-nvshmem-cu12 or NVSHMEM_HOME
-    _nvshmem_include_dir: str | None = None
-    _nvshmem_lib_path: str | None = None
-
-    @property
-    def USE_NVSHMEM(self) -> bool:
-        """Return True if NVSHMEM is enabled (dynamically reads env var)."""
-        return os.environ.get("TILELANG_USE_NVSHMEM", "0").lower() in ("1", "true", "on")
-
-    @property
-    def USE_DISTRIBUTED(self) -> bool:
-        """Return True if distributed mode is enabled (dynamically reads env var)."""
-        return os.environ.get("TILELANG_USE_DISTRIBUTED", "0").lower() in ("1", "true", "on")
-
-    @property
-    def NVSHMEM_INCLUDE_DIR(self) -> str | None:
-        """Get NVSHMEM include directory, auto-detecting if needed."""
-        if self._nvshmem_include_dir is None and self.USE_DISTRIBUTED:
-            self._nvshmem_include_dir, self._nvshmem_lib_path = Environment._find_nvshmem_paths()
-        return self._nvshmem_include_dir
-
-    @property
-    def NVSHMEM_LIB_PATH(self) -> str | None:
-        """Get NVSHMEM library path, auto-detecting if needed."""
-        if self._nvshmem_lib_path is None and self.USE_DISTRIBUTED:
-            self._nvshmem_include_dir, self._nvshmem_lib_path = Environment._find_nvshmem_paths()
-        return self._nvshmem_lib_path
-
-    @staticmethod
-    def _find_nvshmem_paths():
-        """Find NVSHMEM include and library paths from source build, env vars, or pip package."""
-        include_dir = None
-        lib_path = None
-
-        # First priority: NVSHMEM_HOME or NVSHMEM_SRC environment variables
-        nvshmem_home = os.environ.get("NVSHMEM_HOME", "")
-        if nvshmem_home and os.path.exists(nvshmem_home):
-            include_dir = os.path.join(nvshmem_home, "include")
-            lib_path = os.path.join(nvshmem_home, "lib")
-        else:
-            nvshmem_src = os.environ.get("NVSHMEM_SRC", "")
-            if nvshmem_src and os.path.exists(nvshmem_src):
-                include_dir = os.path.join(nvshmem_src, "build/src/include")
-                lib_path = os.path.join(nvshmem_src, "build/src/lib")
-
-        # Second priority: Check 3rdparty/nvshmem_src in the project
-        if include_dir is None:
-            # Check relative to THIRD_PARTY_ROOT
-            nvshmem_3rdparty = os.path.join(THIRD_PARTY_ROOT, "nvshmem_src")
-            if os.path.exists(nvshmem_3rdparty):
-                candidate_inc = os.path.join(nvshmem_3rdparty, "build/src/include")
-                candidate_lib = os.path.join(nvshmem_3rdparty, "build/src/lib")
-                if os.path.exists(candidate_inc) and os.path.exists(candidate_lib):
-                    include_dir = candidate_inc
-                    lib_path = candidate_lib
-
-        # Third priority: pip-installed nvidia-nvshmem-cu12 (but has header compatibility issues)
-        if include_dir is None:
-            try:
-                import nvidia.nvshmem
-
-                nvshmem_pip_home = nvidia.nvshmem.__path__[0]
-                pip_include = os.path.join(nvshmem_pip_home, "include")
-                pip_lib = os.path.join(nvshmem_pip_home, "lib")
-                if os.path.exists(pip_include) and os.path.exists(pip_lib):
-                    include_dir = pip_include
-                    lib_path = pip_lib
-            except ImportError:
-                pass
-
-        return include_dir, lib_path
 
     def _initialize_torch_cuda_arch_flags(self) -> None:
         """
@@ -359,13 +320,8 @@ class Environment:
     def is_print_on_compilation_enabled(self) -> bool:
         return self.TILELANG_PRINT_ON_COMPILATION.lower() in ("1", "true", "yes", "on")
 
-    def use_gemm_v1(self) -> bool:
-        """Return True if GEMM v1 should be used based on env.
-
-        Controlled by `TILELANG_USE_GEMM_V1`. Truthy values are one of
-        {"1", "true", "yes", "on"} (case-insensitive).
-        """
-        return str(self.TILELANG_USE_GEMM_V1).lower() in ("1", "true", "yes", "on")
+    def should_cleanup_temp_files(self) -> bool:
+        return str(self.TILELANG_CLEANUP_TEMP_FILES).lower() in ("1", "true", "yes", "on")
 
     def get_default_target(self) -> str:
         """Get default compilation target from environment."""
@@ -378,6 +334,17 @@ class Environment:
     def get_default_verbose(self) -> bool:
         """Get default verbose flag from environment."""
         return self.TILELANG_DEFAULT_VERBOSE.lower() in ("1", "true", "yes", "on")
+
+    def is_running_autodd(self) -> bool:
+        """Return True if we are running under `python -m tilelang.autodd`."""
+        # means we are running under `python -m tilelang.autodd`
+        return _is_running_autodd()
+
+    def is_light_import(self) -> bool:
+        """Return True if we are running in light import mode."""
+        # means we are running under `python -m tilelang.autodd` or some
+        # other scripts that only require the minimal environment variables.
+        return self.is_running_autodd()
 
 
 # Instantiate as a global configuration object
@@ -439,9 +406,6 @@ if os.environ.get("TL_TEMPLATE_PATH", None) is None:
         os.environ["TL_TEMPLATE_PATH"] = env.TILELANG_TEMPLATE_PATH = tl_template_path
     else:
         logger.warning(TL_TEMPLATE_NOT_FOUND_MESSAGE)
-
-# NVSHMEM paths are now lazily initialized via properties in Environment class
-# when USE_DISTRIBUTED is enabled. No need for eager initialization here.
 
 # Export static variables after initialization.
 CUTLASS_INCLUDE_DIR = env.CUTLASS_INCLUDE_DIR

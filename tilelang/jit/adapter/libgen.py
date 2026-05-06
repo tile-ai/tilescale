@@ -12,7 +12,7 @@ from tilelang import tvm as tvm
 from tilelang.transform import PassConfigKey
 from tilelang.contrib.nvcc import get_nvcc_compiler, get_target_arch, get_target_compute_version
 from tilelang.contrib.rocm import find_rocm_path, get_rocm_arch
-from tilelang import env
+from tilelang.env import TILELANG_TEMPLATE_PATH
 
 from .utils import is_cpu_target, is_cuda_target, is_hip_target
 
@@ -50,8 +50,6 @@ class LibraryGenerator:
         return ctypes.CDLL(lib_path)
 
     def compile_lib(self, timeout: float = None):
-        disable_rdc = self.pass_configs.get(PassConfigKey.TL_DISABLE_RDC, False)
-
         target = self.target
         verbose = self.verbose
         if is_cuda_target(target):
@@ -64,6 +62,8 @@ class LibraryGenerator:
             enable_fast_math = self.pass_configs.get(PassConfigKey.TL_ENABLE_FAST_MATH, False)
 
             ptxas_usage_level = self.pass_configs.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL, None)
+            if ptxas_usage_level is not None:
+                ptxas_usage_level = int(ptxas_usage_level)
             verbose_ptxas_output = self.pass_configs.get(PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT, False)
 
             command = [
@@ -117,22 +117,14 @@ class LibraryGenerator:
 
             command = [get_cplus_compiler(), "-std=c++17", "-fPIC", "-shared", src.name]
             command += [
-                "-I" + env.TILELANG_TEMPLATE_PATH,
+                "-I" + TILELANG_TEMPLATE_PATH,
             ]
         else:
             raise ValueError(f"Unsupported target: {target}")
 
         command += [
-            "-I" + env.TILELANG_TEMPLATE_PATH,
+            "-I" + TILELANG_TEMPLATE_PATH,
         ]
-
-        if env.USE_NVSHMEM and is_cuda_target(target):
-            assert env.NVSHMEM_INCLUDE_DIR is not None, "env.NVSHMEM_INCLUDE_DIR is not set"
-            assert env.NVSHMEM_LIB_PATH is not None, "env.NVSHMEM_LIB_PATH is not set"
-            command += ["-diag-suppress=20013"]
-            if not disable_rdc:
-                command += ["-rdc=true"]
-            command += ["-I" + env.NVSHMEM_INCLUDE_DIR, "-L" + env.NVSHMEM_LIB_PATH, "-lnvshmem_host", "-lnvshmem_device"]
 
         if self.compile_flags:
             command += [item for flag in self.compile_flags for item in flag.split() if item not in command]
@@ -141,6 +133,7 @@ class LibraryGenerator:
 
         src.write(self.lib_code)
         src.flush()
+
         try:
             if verbose:
                 print(f"compile_lib compilation command: {' '.join(command)}")

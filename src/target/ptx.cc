@@ -35,20 +35,25 @@ namespace codegen {
 // PTX related data structures and functions.
 namespace ptx {
 
+// clang-format off
 static const char *enum_to_str[] = {
     "kInt4",        "kUInt4",         "kInt8",    "kUInt8",    "kInt16",
     "kUInt16",      "kInt32",         "kUInt32",  "kInt64",    "kUInt64",
     "kFloat8_e4m3", "kFloat8_e5m2",   "kFloat16", "kBFloat16", "kFloat16x2",
     "kFloat32",     "kTensorFloat32", "kFloat64", "kBit1",     "kBit8",
-    "kBit16",       "kBit32",         "kBit64"};
+    "kBit16",       "kBit32",         "kBit64",   "kFloat6_e2m3fn",
+    "kFloat6_e3m2fn", "kFloat4_e2m1fn"};
 
 static const char *dtype_str[] = {
     ".s4",   ".u4",  ".s8",   ".u8",   ".s16", ".u16",  ".s32",   ".u32",
     ".s64",  ".u64", ".e4m3", ".e5m2", ".f16", ".bf16", ".f16x2", ".f32",
-    ".tf32", ".f64", ".b1",   ".b8",   ".b16", ".b32",  ".b64"};
+    ".tf32", ".f64", ".b1",   ".b8",   ".b16", ".b32",  ".b64",
+    ".e2m3", ".e3m2", ".e2m1"};
 static const uint32_t num_bits[] = {4,  4,  8, 8, 16, 16, 32, 32,
                                     64, 64, 8, 8, 16, 16, 32, 32,
-                                    32, 64, 1, 8, 16, 32, 64};
+                                    32, 64, 1, 8, 16, 32, 64,
+                                    6,  6,  4};
+// clang-format on
 
 /*!
  * \brief Create PTX data type from string.
@@ -74,10 +79,18 @@ DataType DTypeFromString(const std::string str) {
     return DataType::kInt64;
   } else if (str == "uint64" || str == ".u64") {
     return DataType::kUInt64;
-  } else if (str == "float8_e4m3" || str == "e4m3" || str == ".e4m3") {
+  } else if (str == "float8_e4m3" || str == "float8_e4m3fn" || str == "e4m3" ||
+             str == ".e4m3") {
     return DataType::kFloat8_e4m3;
-  } else if (str == "float8_e5m2" || str == "e5m2" || str == ".e5m2") {
+  } else if (str == "float8_e5m2" || str == "float8_e5m2fn" || str == "e5m2" ||
+             str == ".e5m2") {
     return DataType::kFloat8_e5m2;
+  } else if (str == "float6_e2m3fn" || str == "e2m3" || str == ".e2m3") {
+    return DataType::kFloat6_e2m3fn;
+  } else if (str == "float6_e3m2fn" || str == "e3m2" || str == ".e3m2") {
+    return DataType::kFloat6_e3m2fn;
+  } else if (str == "float4_e2m1fn" || str == "e2m1" || str == ".e2m1") {
+    return DataType::kFloat4_e2m1fn;
   } else if (str == "float16" || str == "fp16" || str == ".f16") {
     return DataType::kFloat16;
   } else if (str == "bfloat16" || str == "bf16") {
@@ -1341,9 +1354,13 @@ std::string PrintCpAsyncAssembly(const std::string &shared_ptr,
 )";
   Replacer replacer;
   replacer.register_rule("{smem_addr}",
-                         shared_ptr + " + " + shared_elem_offset);
+                         shared_elem_offset.empty()
+                             ? shared_ptr
+                             : shared_ptr + " + " + shared_elem_offset);
   replacer.register_rule("{global_ptr}",
-                         global_ptr + " + " + global_elem_offset);
+                         global_elem_offset.empty()
+                             ? global_ptr
+                             : global_ptr + " + " + global_elem_offset);
   replacer.register_rule("{bytes}", bytes);
   replacer.register_rule("{cg_or_ca}", bytes == "16" ? "cg" : "ca");
   asm_code = replacer.rewrite(asm_code);
@@ -1396,9 +1413,13 @@ std::string PrintPredicatedCpAsyncAssembly(
 
   Replacer replacer;
   replacer.register_rule("{smem_addr}",
-                         shared_ptr + " + " + shared_elem_offset);
+                         shared_elem_offset.empty()
+                             ? shared_ptr
+                             : shared_ptr + " + " + shared_elem_offset);
   replacer.register_rule("{global_ptr}",
-                         global_ptr + " + " + global_elem_offset);
+                         global_elem_offset.empty()
+                             ? global_ptr
+                             : global_ptr + " + " + global_elem_offset);
   replacer.register_rule("{bytes}", bytes);
   replacer.register_rule("{cg_or_ca}", bytes == "16" ? "cg" : "ca");
   replacer.register_rule("{store_shared}", store_shared);
@@ -1418,11 +1439,19 @@ std::string PrintCpAsyncBulkAsm(const std::string &shared_ptr,
   {
     unsigned int smem_addr_int = cast_smem_ptr_to_int({smem_addr});
     unsigned int barrier_addr_int = cast_smem_ptr_to_int({barrier});
+#if (__CUDACC_VER_MAJOR__ > 12) || (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 8)
+    __asm__ __volatile__(
+      "cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
+      :: "r"(smem_addr_int), "l"({global_ptr}), "r"({bytes}), "r"(barrier_addr_int)
+      : "memory"
+    );
+#else
     __asm__ __volatile__(
       "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
       :: "r"(smem_addr_int), "l"({global_ptr}), "r"({bytes}), "r"(barrier_addr_int)
       : "memory"
     );
+#endif
   }
 )";
 

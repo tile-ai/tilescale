@@ -92,21 +92,15 @@ def main(M=8192, N=8192, blk_m=8):
     print("Tile-lang: {:.2f} ms".format(latency))
 
     from tilelang.profiler import do_bench
+    from example_triton_cast_to_fp8 import per_token_group_quant_fp8
 
-    # Triton fp8e4nv is only supported on Hopper (SM90) and later
-    major, _ = torch.cuda.get_device_capability()
-    if major >= 9:
-        from example_triton_cast_to_fp8 import per_token_group_quant_fp8
+    def run_triton():
+        x_fp8_triton_, x_amax_triton_ = per_token_group_quant_fp8(x, 128, 1e-4, dtype=torch.float8_e4m3fn, column_major_scales=False)
+        return x_fp8_triton_, x_amax_triton_
 
-        def run_triton():
-            x_fp8_triton_, x_amax_triton_ = per_token_group_quant_fp8(x, 128, 1e-4, dtype=torch.float8_e4m3fn, column_major_scales=False)
-            return x_fp8_triton_, x_amax_triton_
-
-        x_fp8_triton, x_amax_triton = run_triton()
-        latency = do_bench(run_triton)
-        print("Triton: {:.2f} ms".format(latency))
-    else:
-        print("Triton fp8e4nv benchmark skipped (requires SM90+)")
+    x_fp8_triton, x_amax_triton = run_triton()
+    latency = do_bench(run_triton)
+    print("Triton: {:.2f} ms".format(latency))
 
 
 def run_regression_perf(M=8192, N=8192, blk_m=8):

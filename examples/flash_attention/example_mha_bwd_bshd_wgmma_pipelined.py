@@ -14,7 +14,11 @@ import argparse
 )
 def flashattn_fwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
     scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
+<<<<<<<< HEAD:examples/flash_attention/example_mha_bwd_bshd_wgmma_pipelined.py
     shape = [batch, seq_len, heads, dim]
+========
+    shape = [batch, heads, seq_len, dim]
+>>>>>>>> 0c836912c157c1a1a78e57bbee285196bc02d432:examples/flash_attention/example_mha_bwd_bhsd.py
     dtype = T.float16
     accum_dtype = T.float32
 
@@ -39,6 +43,7 @@ def flashattn_fwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
             scores_sum = T.alloc_fragment([block_M], accum_dtype)
             logsum = T.alloc_fragment([block_M], accum_dtype)
 
+<<<<<<<< HEAD:examples/flash_attention/example_mha_bwd_bshd_wgmma_pipelined.py
             T.copy(Q[bz, bx * block_M : (bx + 1) * block_M, by, :], Q_shared)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
@@ -47,6 +52,18 @@ def flashattn_fwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
             loop_range = T.ceildiv((bx + 1) * block_M, block_N) if is_causal else T.ceildiv(seq_len, block_N)
             for k in T.Pipelined(loop_range, num_stages=1):
                 T.copy(K[bz, k * block_N : (k + 1) * block_N, by, :], K_shared)
+========
+            T.copy(Q[bz, by, bx * block_M : (bx + 1) * block_M, :], Q_shared)
+            T.fill(acc_o, 0)
+            T.fill(logsum, 0)
+            T.fill(scores_max, -T.infinity(accum_dtype))
+            # T.copy(Q_shared, Q_local)
+            # for i, j in T.Parallel(block_M, dim):
+            #     Q_local[i, j] *= scale
+            loop_range = T.ceildiv((bx + 1) * block_M, block_N) if is_causal else T.ceildiv(seq_len, block_N)
+            for k in T.Pipelined(loop_range, num_stages=1):
+                T.copy(K[bz, by, k * block_N : (k + 1) * block_N, :], K_shared)
+>>>>>>>> 0c836912c157c1a1a78e57bbee285196bc02d432:examples/flash_attention/example_mha_bwd_bhsd.py
                 if is_causal:
                     for i, j in T.Parallel(block_M, block_N):
                         acc_s[i, j] = T.if_then_else(bx * block_M + i >= k * block_N + j, 0, -T.infinity(acc_s.dtype))
@@ -54,7 +71,11 @@ def flashattn_fwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
                     for i, j in T.Parallel(block_M, block_N):
                         acc_s[i, j] = T.if_then_else(k * block_N + j >= seq_len, -T.infinity(acc_s.dtype), 0)
                 T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+<<<<<<<< HEAD:examples/flash_attention/example_mha_bwd_bshd_wgmma_pipelined.py
                 T.copy(V[bz, k * block_N : (k + 1) * block_N, by, :], V_shared)
+========
+                T.copy(V[bz, by, k * block_N : (k + 1) * block_N, :], V_shared)
+>>>>>>>> 0c836912c157c1a1a78e57bbee285196bc02d432:examples/flash_attention/example_mha_bwd_bhsd.py
                 T.copy(scores_max, scores_max_prev)
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
                 for i in T.Parallel(block_M):
@@ -72,7 +93,11 @@ def flashattn_fwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
                     logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
             for i, j in T.Parallel(block_M, dim):
                 acc_o[i, j] /= logsum[i]
+<<<<<<<< HEAD:examples/flash_attention/example_mha_bwd_bshd_wgmma_pipelined.py
             T.copy(acc_o, Output[bz, bx * block_M : (bx + 1) * block_M, by, :])
+========
+            T.copy(acc_o, Output[bz, by, bx * block_M : (bx + 1) * block_M, :])
+>>>>>>>> 0c836912c157c1a1a78e57bbee285196bc02d432:examples/flash_attention/example_mha_bwd_bhsd.py
             for i in T.Parallel(block_M):
                 logsum[i] = T.log2(logsum[i]) + scores_max[i] * scale
             T.copy(logsum, lse[bz, by, bx * block_M : (bx + 1) * block_M])
@@ -89,7 +114,11 @@ def flashattn_fwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
 def flashattn_bwd_preprocess(batch, heads, seq_len, dim):
     dtype = T.float16
     accum_dtype = T.float32
+<<<<<<<< HEAD:examples/flash_attention/example_mha_bwd_bshd_wgmma_pipelined.py
     shape = [batch, seq_len, heads, dim]
+========
+    shape = [batch, heads, seq_len, dim]
+>>>>>>>> 0c836912c157c1a1a78e57bbee285196bc02d432:examples/flash_attention/example_mha_bwd_bhsd.py
     blk = 32
 
     @T.prim_func
@@ -105,8 +134,13 @@ def flashattn_bwd_preprocess(batch, heads, seq_len, dim):
             delta = T.alloc_fragment([blk], accum_dtype)
             T.clear(acc)
             for k in range(T.ceildiv(dim, blk)):
+<<<<<<<< HEAD:examples/flash_attention/example_mha_bwd_bshd_wgmma_pipelined.py
                 T.copy(O[bz, by * blk : (by + 1) * blk, bx, k * blk : (k + 1) * blk], o)
                 T.copy(dO[bz, by * blk : (by + 1) * blk, bx, k * blk : (k + 1) * blk], do)
+========
+                T.copy(O[bz, bx, by * blk : (by + 1) * blk, k * blk : (k + 1) * blk], o)
+                T.copy(dO[bz, bx, by * blk : (by + 1) * blk, k * blk : (k + 1) * blk], do)
+>>>>>>>> 0c836912c157c1a1a78e57bbee285196bc02d432:examples/flash_attention/example_mha_bwd_bhsd.py
                 for i, j in T.Parallel(blk, blk):
                     acc[i, j] += o[i, j] * do[i, j]
             T.reduce_sum(acc, delta, 1)
@@ -115,6 +149,41 @@ def flashattn_bwd_preprocess(batch, heads, seq_len, dim):
     return flash_bwd_prep
 
 
+<<<<<<<< HEAD:examples/flash_attention/example_mha_bwd_bshd_wgmma_pipelined.py
+========
+def make_dq_layout(dQ):
+    # atomicAdd can not be vectorized, so we need to reorder dq to match the 8x8 gemm fragment
+    return T.Layout(dQ.shape, lambda b, h, l, d: [b, h, l // 8, d // 8, (d % 2), 4 * (l % 8) + (d % 8) // 2])
+
+
+@tilelang.jit(
+    out_idx=[1],
+    pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    },
+)
+def flashattn_bwd_postprocess(batch, heads, seq_len, dim):
+    dtype = T.float16
+    accum_dtype = T.float32
+    shape = [batch, heads, seq_len, dim]
+    blk = 64
+
+    @T.prim_func
+    def flash_bwd_post(
+        dQ: T.Tensor(shape, accum_dtype),  # type: ignore
+        dQ_out: T.Tensor(shape, dtype),  # type: ignore
+    ):
+        with T.Kernel(T.ceildiv(seq_len, blk), heads, batch, threads=128) as (bx, by, bz):
+            T.annotate_layout({dQ: make_dq_layout(dQ)})
+            T.copy(
+                dQ[bz, by, bx * blk : (bx + 1) * blk, :],
+                dQ_out[bz, by, bx * blk : (bx + 1) * blk, :],
+            )
+
+    return flash_bwd_post
+
+
+>>>>>>>> 0c836912c157c1a1a78e57bbee285196bc02d432:examples/flash_attention/example_mha_bwd_bhsd.py
 @tilelang.jit(
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
@@ -123,7 +192,11 @@ def flashattn_bwd_preprocess(batch, heads, seq_len, dim):
 def flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
     sm_scale = (1.0 / dim) ** 0.5
     scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
+<<<<<<<< HEAD:examples/flash_attention/example_mha_bwd_bshd_wgmma_pipelined.py
     shape = [batch, seq_len, heads, dim]
+========
+    shape = [batch, heads, seq_len, dim]
+>>>>>>>> 0c836912c157c1a1a78e57bbee285196bc02d432:examples/flash_attention/example_mha_bwd_bhsd.py
     dtype = T.float16
     accum_dtype = T.float32
 
@@ -139,7 +212,7 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
         dK: T.Tensor(shape, dtype),  # type: ignore
         dV: T.Tensor(shape, dtype),  # type: ignore
     ):
-        with T.Kernel(heads, T.ceildiv(seq_len, block_M), batch, threads=256) as (bx, by, bz):
+        with T.Kernel(heads, T.ceildiv(seq_len, block_M), batch, threads=128) as (bx, by, bz):
             K_shared = T.alloc_shared([block_M, dim], dtype)
             dsT_shared = T.alloc_shared([block_M, block_N], dtype)
             # should not store K to local if dim is large
@@ -160,15 +233,27 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
             dq = T.alloc_fragment([block_N, dim], accum_dtype)
             dv_shared = T.alloc_shared([block_M, dim], dtype)
             dk_shared = T.alloc_shared([block_M, dim], dtype)
+<<<<<<<< HEAD:examples/flash_attention/example_mha_bwd_bshd_wgmma_pipelined.py
             dq_shared = T.alloc_shared([block_N, dim], accum_dtype)
 
             T.copy(K[bz, by * block_M : (by + 1) * block_M, bx, :], K_shared)
             T.copy(V[bz, by * block_M : (by + 1) * block_M, bx, :], V_shared)
+========
+
+            T.annotate_layout(
+                {
+                    dQ: make_dq_layout(dQ),
+                }
+            )
+            T.copy(K[bz, bx, by * block_M : (by + 1) * block_M, :], K_shared)
+            T.copy(V[bz, bx, by * block_M : (by + 1) * block_M, :], V_shared)
+>>>>>>>> 0c836912c157c1a1a78e57bbee285196bc02d432:examples/flash_attention/example_mha_bwd_bhsd.py
             T.clear(dv)
             T.clear(dk)
             loop_st = T.floordiv(by * block_M, block_N) if is_causal else 0
             loop_ed = T.ceildiv(seq_len, block_N)
             for k in T.Pipelined(loop_st, loop_ed, num_stages=2):
+<<<<<<<< HEAD:examples/flash_attention/example_mha_bwd_bshd_wgmma_pipelined.py
                 T.copy(Q[bz, k * block_N : (k + 1) * block_N, bx, :], q)
                 T.clear(qkT)
                 T.gemm(K_shared, q, qkT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow, wg_wait=-1)
@@ -177,6 +262,11 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
                 T.gemm(V_shared, do, dsT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow, wg_wait=-1)
                 T.wait_wgmma(1)
 
+========
+                T.copy(Q[bz, bx, k * block_N : (k + 1) * block_N, :], q)
+                T.clear(qkT)
+                T.gemm(K_shared, q, qkT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+>>>>>>>> 0c836912c157c1a1a78e57bbee285196bc02d432:examples/flash_attention/example_mha_bwd_bhsd.py
                 T.copy(lse[bz, bx, k * block_N : (k + 1) * block_N], lse_shared)
                 for i, j in T.Parallel(block_M, block_N):
                     qkT[i, j] = T.exp2(qkT[i, j] * scale - lse_shared[j])
@@ -185,18 +275,25 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
                         qkT[i, j] = T.if_then_else(by * block_M + i <= k * block_N + j, qkT[i, j], 0)
                 # We don't need to handle OOB positions for non-causal cases,
                 # since OOB values won't affect other positions here.
+<<<<<<<< HEAD:examples/flash_attention/example_mha_bwd_bshd_wgmma_pipelined.py
                 T.wait_wgmma(0)
+========
+                T.copy(dO[bz, bx, k * block_N : (k + 1) * block_N, :], do)
+                T.clear(dsT)
+                T.gemm(V_shared, do, dsT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+>>>>>>>> 0c836912c157c1a1a78e57bbee285196bc02d432:examples/flash_attention/example_mha_bwd_bhsd.py
                 T.copy(qkT, qkT_cast)
-                T.gemm(qkT_cast, do, dv, policy=T.GemmWarpPolicy.FullRow, wg_wait=-1)
+                T.gemm(qkT_cast, do, dv, policy=T.GemmWarpPolicy.FullRow)
 
                 T.copy(Delta[bz, bx, k * block_N : (k + 1) * block_N], delta)
 
                 for i, j in T.Parallel(block_M, block_N):
                     dsT_cast[i, j] = qkT[i, j] * (dsT[i, j] - delta[j]) * sm_scale
-                T.gemm(dsT_cast, q, dk, policy=T.GemmWarpPolicy.FullRow, wg_wait=1)
+                T.gemm(dsT_cast, q, dk, policy=T.GemmWarpPolicy.FullRow)
 
                 T.copy(dsT_cast, dsT_shared)
                 T.clear(dq)
+<<<<<<<< HEAD:examples/flash_attention/example_mha_bwd_bshd_wgmma_pipelined.py
                 T.gemm(dsT_shared, K_shared, dq, transpose_A=True, wg_wait=1)
                 T.wait_wgmma(0)
                 T.copy(dq, dq_shared)
@@ -205,6 +302,15 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
             T.copy(dk, dk_shared)
             T.copy(dv_shared, dV[bz, by * block_M : (by + 1) * block_M, bx, :])
             T.copy(dk_shared, dK[bz, by * block_M : (by + 1) * block_M, bx, :])
+========
+                T.gemm(dsT_shared, K_shared, dq, transpose_A=True)
+                for i, j in T.Parallel(block_N, dim):
+                    T.atomic_add(dQ[bz, bx, k * block_N + i, j], dq[i, j])
+            T.copy(dv, dv_shared)
+            T.copy(dk, dk_shared)
+            T.copy(dv_shared, dV[bz, bx, by * block_M : (by + 1) * block_M, :])
+            T.copy(dk_shared, dK[bz, bx, by * block_M : (by + 1) * block_M, :])
+>>>>>>>> 0c836912c157c1a1a78e57bbee285196bc02d432:examples/flash_attention/example_mha_bwd_bhsd.py
 
     return flash_bwd
 
@@ -212,11 +318,10 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
 class _attention(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, causal):
-        BATCH, N_CTX, H, D_HEAD = q.shape
+        BATCH, H, N_CTX, D_HEAD = q.shape
         block_M = 64
         block_N = 64 if D_HEAD <= 128 else 32
-        mod = flashattn_fwd(BATCH, H, N_CTX, D_HEAD, causal, block_M, block_N)
-        o, lse = mod(q, k, v)
+        o, lse = flashattn_fwd(BATCH, H, N_CTX, D_HEAD, causal, block_M, block_N)(q, k, v)
         ctx.save_for_backward(q, k, v, o, lse)
         ctx.causal = causal
         return o
@@ -224,7 +329,7 @@ class _attention(torch.autograd.Function):
     @staticmethod
     def backward(ctx, do):
         q, k, v, o, lse = ctx.saved_tensors
-        BATCH, N_CTX, H, D_HEAD = q.shape
+        BATCH, H, N_CTX, D_HEAD = q.shape
 
         def maybe_contiguous(x):
             if x.stride(-1) != 1:
@@ -232,6 +337,7 @@ class _attention(torch.autograd.Function):
             return x
 
         do, q, k, v, o = [maybe_contiguous(x) for x in (do, q, k, v, o)]
+<<<<<<<< HEAD:examples/flash_attention/example_mha_bwd_bshd_wgmma_pipelined.py
         block_M = 128
         block_N = 128 if D_HEAD <= 64 else 32
         mod_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD)
@@ -243,6 +349,20 @@ class _attention(torch.autograd.Function):
         dv = torch.empty(shape, dtype=torch.float16, device=q.device)
         mod(q, k, v, do, lse, delta, dq, dk, dv)
         dq = dq.to(torch.float16)
+========
+        block_M = 64
+        block_N = 64 if D_HEAD <= 64 else 32
+        kernel_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD)
+        kernel_post = flashattn_bwd_postprocess(BATCH, H, N_CTX, D_HEAD)
+        delta = kernel_prep(o, do)
+        kernel = flashattn_bwd(BATCH, H, N_CTX, D_HEAD, ctx.causal, block_M, block_N)
+        shape = [BATCH, H, N_CTX, D_HEAD]
+        dq = torch.zeros(shape, dtype=torch.float32, device=q.device)
+        dk = torch.empty(shape, dtype=torch.float16, device=q.device)
+        dv = torch.empty(shape, dtype=torch.float16, device=q.device)
+        kernel(q, k, v, do, lse, delta, dq, dk, dv)
+        dq = kernel_post(dq)
+>>>>>>>> 0c836912c157c1a1a78e57bbee285196bc02d432:examples/flash_attention/example_mha_bwd_bhsd.py
         return dq, dk, dv, None
 
 
@@ -251,15 +371,23 @@ attention = _attention.apply
 
 def ref_program(Q, K, V, is_causal):
     dim = Q.size(-1)
+<<<<<<<< HEAD:examples/flash_attention/example_mha_bwd_bshd_wgmma_pipelined.py
     scores = torch.einsum("bqhd,bkhd->bhqk", Q, K)
+========
+    scores = torch.einsum("bhqd,bhkd->bhqk", Q, K)
+>>>>>>>> 0c836912c157c1a1a78e57bbee285196bc02d432:examples/flash_attention/example_mha_bwd_bhsd.py
     scores = scores / torch.sqrt(torch.tensor(dim, dtype=scores.dtype))
     if is_causal:
-        seq_len = Q.size(1)
+        seq_len = Q.size(2)
         mask = torch.tril(torch.ones(seq_len, seq_len, device=scores.device))
         mask = mask.unsqueeze(0).unsqueeze(0)
         scores = scores.masked_fill(mask == 0, float("-inf"))
     attention_weights = F.softmax(scores, dim=-1)
+<<<<<<<< HEAD:examples/flash_attention/example_mha_bwd_bshd_wgmma_pipelined.py
     output = torch.einsum("bhqk,bkhd->bqhd", attention_weights, V)
+========
+    output = torch.einsum("bhqk,bhkd->bhqd", attention_weights, V)
+>>>>>>>> 0c836912c157c1a1a78e57bbee285196bc02d432:examples/flash_attention/example_mha_bwd_bhsd.py
     return output
 
 
@@ -274,7 +402,11 @@ def main(
     total_flops = 5 * flops_per_matmul
     if causal:
         total_flops *= 0.5
+<<<<<<<< HEAD:examples/flash_attention/example_mha_bwd_bshd_wgmma_pipelined.py
     Q = torch.empty(BATCH, N_CTX, H, D_HEAD, dtype=torch.half, device="cuda").normal_().requires_grad_()
+========
+    Q = torch.empty(BATCH, H, N_CTX, D_HEAD, dtype=torch.half, device="cuda").normal_().requires_grad_()
+>>>>>>>> 0c836912c157c1a1a78e57bbee285196bc02d432:examples/flash_attention/example_mha_bwd_bhsd.py
     K = torch.empty_like(Q).normal_().requires_grad_()
     V = torch.empty_like(Q).normal_().requires_grad_()
     dO = torch.randn_like(Q)
@@ -296,6 +428,8 @@ def main(
     assert torch.allclose(dQ, dQ_ref, rtol=1e-2, atol=1e-2)
     print("All checks passed.✅")
 
+    print("All checks passed.✅")
+
     def run():
         O_ref.backward(dO, retain_graph=True)
 
@@ -312,15 +446,26 @@ def main(
 
 def run_regression_perf():
     BATCH = 1
+<<<<<<<< HEAD:examples/flash_attention/example_mha_bwd_bshd_wgmma_pipelined.py
     H = 32
     N_CTX = 256
+========
+    H = 16
+    N_CTX = 512
+>>>>>>>> 0c836912c157c1a1a78e57bbee285196bc02d432:examples/flash_attention/example_mha_bwd_bhsd.py
     D_HEAD = 64
     causal = False
     device = "cuda"
     torch.manual_seed(0)
+<<<<<<<< HEAD:examples/flash_attention/example_mha_bwd_bshd_wgmma_pipelined.py
     block_M = 128
     block_N = 128 if D_HEAD <= 64 else 32
     Q = torch.randn(BATCH, N_CTX, H, D_HEAD, device=device, dtype=torch.half)
+========
+    block_M = 64
+    block_N = 64 if D_HEAD <= 64 else 32
+    Q = torch.randn(BATCH, H, N_CTX, D_HEAD, device=device, dtype=torch.half)
+>>>>>>>> 0c836912c157c1a1a78e57bbee285196bc02d432:examples/flash_attention/example_mha_bwd_bhsd.py
     K = torch.randn_like(Q)
     V = torch.randn_like(Q)
     O = torch.randn_like(Q)
@@ -329,11 +474,18 @@ def run_regression_perf():
     with torch.no_grad():
         mod_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD)
         kernel = flashattn_bwd(BATCH, H, N_CTX, D_HEAD, causal, block_M, block_N)
+<<<<<<<< HEAD:examples/flash_attention/example_mha_bwd_bshd_wgmma_pipelined.py
     dQ = torch.zeros(BATCH, N_CTX, H, D_HEAD, device=device, dtype=torch.float32)
     dK = torch.zeros_like(Q, dtype=torch.float16)
     dV = torch.zeros_like(Q, dtype=torch.float16)
     Delta = mod_prep(O, dO)
 
+========
+    dQ = torch.zeros(BATCH, H, N_CTX, D_HEAD, device=device, dtype=torch.float32)
+    dK = torch.zeros(BATCH, H, N_CTX, D_HEAD, device=device, dtype=torch.float16)
+    dV = torch.zeros(BATCH, H, N_CTX, D_HEAD, device=device, dtype=torch.float16)
+    Delta = mod_prep(O, dO)
+>>>>>>>> 0c836912c157c1a1a78e57bbee285196bc02d432:examples/flash_attention/example_mha_bwd_bhsd.py
     from tilelang.profiler import do_bench
 
     def run_kernel_only():

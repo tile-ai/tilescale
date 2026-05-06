@@ -5,28 +5,16 @@
 #ifndef TVM_TL_TARGET_CODEGEN_CUDA_H_
 #define TVM_TL_TARGET_CODEGEN_CUDA_H_
 
+#include <optional>
 #include <tvm/target/codegen.h>
 #include <tvm/tir/expr.h>
 #include <tvm/tir/op.h>
 
-#include <stdlib.h>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "target/source/codegen_c.h"
-
-/*
- * Utility function for judging whether distributed mode is enabled.
- * This is used to determine whether to include distributed.h in the generated
- * code.
- */
-static inline bool use_distributed() {
-  const char *env = std::getenv("TILELANG_USE_DISTRIBUTED");
-  if (env) {
-    return std::string(env) == "1";
-  }
-  return false;
-}
 
 namespace tvm {
 namespace codegen {
@@ -65,6 +53,7 @@ public:
   void VisitExpr_(const FloatImmNode *op, std::ostream &os) final;
   void VisitExpr_(const CallNode *op, std::ostream &os) final;
   void VisitExpr_(const CastNode *op, std::ostream &os) final;
+  void VisitExpr_(const ShuffleNode *op, std::ostream &os) final;
   void VisitExpr_(const MinNode *op, std::ostream &os) final;
   void VisitExpr_(const MaxNode *op, std::ostream &os) final;
   void VisitStmt_(const EvaluateNode *op) final;
@@ -79,6 +68,7 @@ public:
                               const PrimFunc &func, std::ostream &os);
 
 protected:
+  void ReserveKeywordsAsUnique_();
   virtual std::string GetBufferRef(DataType t, const BufferNode *buffer,
                                    PrimExpr index) final;
   void PrintCallExtern(Type ret_type, ffi::String global_symbol,
@@ -103,7 +93,8 @@ private:
   // Global barrier expected node.
   std::string vid_global_barrier_expect_;
   // Global curand state
-  std::string curand_philox_state;
+  std::string curand_random_generator_state;
+  std::string curand_random_generator_state_type;
 
   // whether enable fp16
   bool enable_fp16_{false};
@@ -141,12 +132,8 @@ private:
   bool need_cooperative_groups_{false};
   // whether need curand_kernel.h
   bool need_curand_kernel_h_{false};
-  // whether need multimem.h (NVSwitch multicast instructions)
-  bool need_multimem_h_{false};
-  // whether need distributed.h
-  bool use_distributed_{use_distributed()};
-  // whether need nvshmem.h
-  bool use_nvshmem_{false};
+  // whether need cluster.h
+  bool need_cluster_h_{false};
   // Op attribute map
   OpAttrMap<bool> op_need_warp_shuffle_ =
       Op::GetAttrMap<bool>("cuda.need_warp_shuffle");
@@ -156,6 +143,7 @@ private:
   // The size of the barrier array in shared memory
   int barrier_count_ = -1;
   // The name of the mbarrier array in shared memory
+  // The same as injected_mbarrier_name_ in transform/common/mbarrier.h
   const std::string mbarrier_name_ = "mbarrier";
   // The type name of the mbarrier array
   const std::string mbarrier_dtype_ = "Barrier";
@@ -166,6 +154,9 @@ private:
   std::unordered_map<const VarNode *, std::string> fragment_shapes;
   std::unordered_map<const VarNode *, std::string> fragment_layouts;
   std::unordered_map<const VarNode *, IntImm> unroll_factor;
+  std::optional<std::tuple<int64_t, int64_t, int64_t>> cluster_dims;
+  // Map from VarNode to packed buffer variable name for fp4 packed storage
+  std::unordered_map<const VarNode *, std::string> fp4_packed_buffers_;
   friend void PrintConst(const FloatImmNode *op, std::ostream &os,
                          CodeGenTileLangCUDA *p);
   void PrintWmmaScope(const std::string &scope, DataType t,

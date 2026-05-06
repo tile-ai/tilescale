@@ -19,10 +19,10 @@
 
 /*!
  * \file codegen_c_host.h
- * \brief Generate C host code (TileLang copy).
+ * \brief Generate C host code with TVM FFI when Host CodeGen is enabled.
  */
-#ifndef TL_TARGET_SOURCE_CODEGEN_C_HOST_H_
-#define TL_TARGET_SOURCE_CODEGEN_C_HOST_H_
+#ifndef TVM_TL_CODEGEN_C_HOST_H_
+#define TVM_TL_CODEGEN_C_HOST_H_
 
 #include <string>
 #include <unordered_map>
@@ -80,6 +80,8 @@ public:
 
   void VisitStmt_(const tvm::tir::AssertStmtNode *op) final; // NOLINT(*)
 
+  void VisitStmt_(const tvm::tir::AttrStmtNode *op) final; // NOLINT(*)
+
   void GenerateForwardFunctionDeclarations(
       tvm::ffi::String global_symbol,
       const tvm::ffi::Array<tvm::Type> &arg_types,
@@ -102,6 +104,8 @@ private:
   /*! \brief whether to generate the entry function if encountered */
   bool has_main_func_ = false;
 
+  bool is_in_metal_context = false;
+
   std::string GetPackedName(const tvm::tir::CallNode *op);
   void PrintGetFuncFromBackend(const std::string &func_name,
                                const std::string &packed_func_name);
@@ -116,9 +120,14 @@ private:
   template <typename T>
   inline void PrintTernaryCondExpr(const T *op, const char *compare,
                                    std::ostream &os); // NOLINT(*)
+
+  template <typename... Args> void PrintLine(Args &&...args) {
+    this->PrintIndent();
+    (this->stream << ... << args) << '\n';
+  }
 };
 
 } // namespace tl
 } // namespace tvm
 
-#endif // TL_TARGET_SOURCE_CODEGEN_C_HOST_H_
+#endif // TVM_TL_CODEGEN_C_HOST_H_

@@ -1,4 +1,3 @@
-from __future__ import annotations
 import tvm.script.ir_builder.tir.ir as _ir
 from tvm.script.ir_builder.tir import frame
 from tvm.tir import PrimExpr
@@ -193,6 +192,7 @@ exp2 = _op_wrapper(_tir_op.exp2)
 exp10 = _op_wrapper(_tir_op.exp10)
 floor = _op_wrapper(_tir_op.floor)
 ceildiv = _op_wrapper(_tir_op.ceildiv)
+cdiv = ceildiv
 floordiv = _op_wrapper(_tir_op.floordiv)
 floormod = _op_wrapper(_tir_op.floormod)
 fmod = _op_wrapper(_tir_op.fmod)
@@ -261,6 +261,7 @@ ptx_wait_group = _op_wrapper(_tir_op.ptx_wait_group)
 ptx_commit_group = _op_wrapper(_tir_op.ptx_commit_group)
 ptx_cp_async_barrier = _op_wrapper(_tir_op.ptx_cp_async_barrier)
 ptx_init_barrier_thread_count = _op_wrapper(_tir_op.ptx_init_barrier_thread_count)
+ptx_fence_barrier_init = _op_wrapper(_tir_op.ptx_fence_barrier_init)
 ptx_arrive_barrier = _op_wrapper(_tir_op.ptx_arrive_barrier)
 ptx_arrive_barrier_expect_tx = _op_wrapper(_tir_op.ptx_arrive_barrier_expect_tx)
 ptx_wait_barrier = _op_wrapper(_tir_op.ptx_wait_barrier)
@@ -277,7 +278,9 @@ anylist_setitem_call_packed = _op_wrapper(_tir_op.anylist_setitem_call_packed)
 anylist_setitem_call_cpacked = _op_wrapper(_tir_op.anylist_setitem_call_cpacked)
 vscale = _op_wrapper(_tir_op.vscale)
 
-reinterpret = _dtype_forward(_tir_op.reinterpret)
+# reinterpret = _dtype_forward(_tir_op.reinterpret)
+reinterpret = _tir_op.reinterpret
+
 call_extern = _dtype_forward(_tir_op.call_extern)
 call_intrin = _dtype_forward(_tir_op.call_intrin)
 call_llvm_intrin = _dtype_forward(_tir_op.call_llvm_intrin)
@@ -289,7 +292,8 @@ ptx_wgmma_ss = _dtype_forward(_tir_op.ptx_wgmma_ss)
 ptx_wgmma_rs = _dtype_forward(_tir_op.ptx_wgmma_rs)
 ptx_tcgen05_mma_ss = _dtype_forward(_tir_op.ptx_tcgen05_mma_ss)
 ptx_tcgen05_mma_ts = _dtype_forward(_tir_op.ptx_tcgen05_mma_ts)
-ptx_ldmatrix = _dtype_forward(_tir_op.ptx_ldmatrix)
+ptx_tcgen05_mma_blockscaled_ss = _dtype_forward(_tir_op.ptx_tcgen05_mma_blockscaled_ss)
+ptx_ldmatrix = _tir_op.ptx_ldmatrix
 ptx_cp_async = _dtype_forward(_tir_op.ptx_cp_async)
 ptx_cp_async_bulk = _dtype_forward(_tir_op.ptx_cp_async_bulk)
 mma_store = _dtype_forward(_tir_op.mma_store)
@@ -301,65 +305,3 @@ tvm_mfma = _dtype_forward(_tir_op.tvm_mfma)
 tvm_mfma_store = _dtype_forward(_tir_op.tvm_mfma_store)
 tvm_rdna_wmma = _dtype_forward(_tir_op.tvm_rdna_wmma)
 tvm_rdna_wmma_store = _dtype_forward(_tir_op.tvm_rdna_wmma_store)
-
-### Distributed enums ###
-import sys
-from enum import IntEnum
-
-
-class Team(IntEnum):
-    INVALID = -1
-    WORLD = 0
-    WORLD_INDEX = 0
-    SHARED = 1
-    SHARED_INDEX = 1
-    NODE = 2
-    NODE_INDEX = 2
-    SAME_MYPE_NODE = 3
-    SAME_MYPE_NODE_INDEX = 3
-    SAME_GPU = 4
-    SAME_GPU_INDEX = 4
-    GPU_LEADERS = 5
-    GPU_LEADERS_INDEX = 5
-    TEAMS_MIN = 6
-    TEAM_INDEX_MAX = sys.maxsize
-
-
-class CmpType(IntEnum):
-    EQ = 0
-    NE = 1
-    GT = 2
-    LE = 3
-    LT = 4
-    GE = 5
-    SENTINEL = sys.maxsize
-
-
-class Amo(IntEnum):
-    """Atomic Memory Operation (AMO) types.
-    Note: Signal ops (AMO_SIGNAL_SET and AMO_SIGNAL_ADD) are
-    included as a part of the AMO operations.
-    """
-
-    AMO_ACK = 1
-    AMO_INC = 2
-    AMO_SET = 3
-    AMO_ADD = 4
-    AMO_AND = 5
-    AMO_OR = 6
-    AMO_XOR = 7
-    AMO_SIGNAL = 8
-    SIGNAL_SET = 9
-    SIGNAL_ADD = 10
-    AMO_SIGNAL_SET = 9  # the same as SIGNAL_SET
-    AMO_SIGNAL_ADD = 10  # the same as SIGNAL_ADD
-    AMO_END_OF_NONFETCH = 11  # end of nonfetch atomics
-    AMO_FETCH = 12
-    AMO_FETCH_INC = 13
-    AMO_FETCH_ADD = 14
-    AMO_FETCH_AND = 15
-    AMO_FETCH_OR = 16
-    AMO_FETCH_XOR = 17
-    AMO_SWAP = 18
-    AMO_COMPARE_SWAP = 19
-    AMO_OP_SENTINEL = sys.maxsize

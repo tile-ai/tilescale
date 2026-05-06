@@ -65,7 +65,10 @@ enum class DataType : int {
   kBit8 = 19,
   kBit16 = 20,
   kBit32 = 21,
-  kBit64 = 22
+  kBit64 = 22,
+  kFloat6_e2m3fn = 23,
+  kFloat6_e3m2fn = 24,
+  kFloat4_e2m1fn = 25
 };
 
 /*!
@@ -193,9 +196,11 @@ std::string PrintLoadMatrixAssembly(bool trans, int num,
 /*!
  * \brief Print ptx cp.async assembly string given parameters.
  * \param shared_ptr: The pointer to the destination shared memory.
- * \param shared_elem_offset: The offset into the shared memory.
+ * \param shared_elem_offset: The offset into the shared memory (empty for no
+ * offset).
  * \param global_ptr: The pointer to the global memory.
- * \param global_elem_offset: The offset into the global memory.
+ * \param global_elem_offset: The offset into the global memory (empty for no
+ * offset).
  * \param bytes: The number of bytes to copy, valid values are 4, 8, and 16.
  */
 std::string PrintCpAsyncAssembly(const std::string &shared_ptr,
@@ -205,11 +210,26 @@ std::string PrintCpAsyncAssembly(const std::string &shared_ptr,
                                  const std::string &bytes);
 
 /*!
+ * \brief Print ptx cp.async assembly string given parameters (no offset
+ * version).
+ * \param shared_ptr: The pointer to the destination shared memory.
+ * \param global_ptr: The pointer to the global memory.
+ * \param bytes: The number of bytes to copy, valid values are 4, 8, and 16.
+ */
+inline std::string PrintCpAsyncAssembly(const std::string &shared_ptr,
+                                        const std::string &global_ptr,
+                                        const std::string &bytes) {
+  return PrintCpAsyncAssembly(shared_ptr, "", global_ptr, "", bytes);
+}
+
+/*!
  * \brief Print predicated ptx cp.async assembly string given parameters.
  * \param shared_ptr: The pointer to the destination shared memory.
- * \param shared_elem_offset: The offset into the shared memory.
+ * \param shared_elem_offset: The offset into the shared memory (empty for no
+ * offset).
  * \param global_ptr: The pointer to the global memory.
- * \param global_elem_offset: The offset into the global memory.
+ * \param global_elem_offset: The offset into the global memory (empty for no
+ * offset).
  * \param bytes: The number of bytes to copy, valid values are 4, 8, and 16.
  * \param predicate_value: The value of predicate `@p`.
  */
@@ -217,6 +237,21 @@ std::string PrintPredicatedCpAsyncAssembly(
     const std::string &shared_ptr, const std::string &shared_elem_offset,
     const std::string &global_ptr, const std::string &global_elem_offset,
     const std::string &bytes, const std::string &predicate_value);
+
+/*!
+ * \brief Print predicated ptx cp.async assembly string given parameters (no
+ * offset version).
+ * \param shared_ptr: The pointer to the destination shared memory.
+ * \param global_ptr: The pointer to the global memory.
+ * \param bytes: The number of bytes to copy, valid values are 4, 8, and 16.
+ * \param predicate_value: The value of predicate `@p`.
+ */
+inline std::string PrintPredicatedCpAsyncAssembly(
+    const std::string &shared_ptr, const std::string &global_ptr,
+    const std::string &bytes, const std::string &predicate_value) {
+  return PrintPredicatedCpAsyncAssembly(shared_ptr, "", global_ptr, "", bytes,
+                                        predicate_value);
+}
 
 /*!
  * \brief Print ptx async copy from global to shared memory using cp.async.bulk
