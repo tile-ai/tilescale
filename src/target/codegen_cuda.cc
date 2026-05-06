@@ -3936,6 +3936,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     os << ")";
   } else {
+    // Detect multimem call_extern to include multimem.h header
+    if (op->op.same_as(builtin::call_extern()) && !op->args.empty()) {
+      if (auto *str_imm = op->args[0].as<StringImmNode>()) {
+        if (std::string(str_imm->value).find("tl::multimem::") == 0) {
+          this->need_multimem_h_ = true;
+          this->use_distributed_ = true;
+        }
+      }
+    }
     CodeGenC::VisitExpr_(op, os);
   }
 }
