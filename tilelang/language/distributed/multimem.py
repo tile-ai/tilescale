@@ -5,7 +5,9 @@ to correctly handle fragment layouts, then post-process to emit multimem instruc
 """
 
 from enum import Enum
+from typing import Literal
 from tvm import tir
+from tvm.tir import PrimExpr, address_of
 from tilelang.utils.language import to_buffer_region
 
 
@@ -13,15 +15,18 @@ class MultimemReduceOp(Enum):
     ADD = 0
     MIN = 1
     MAX = 2
+    NONE = -1  # plain store (no reduction), for multimem_tma_store
 
 
 class _MultimemMode(Enum):
     LD_REDUCE = 0
     ST = 1
     RED = 2
+    TMA_STORE = 3
+    TMA_RED_STORE = 4
 
 
-def _multimem_impl(src, dst, mode: _MultimemMode, reduce_op: MultimemReduceOp):
+def _multimem_impl(src, dst, mode: _MultimemMode, reduce_op: MultimemReduceOp = MultimemReduceOp.NONE):
     """Shared implementation for all multimem operations.
 
     Converts src/dst to buffer regions and emits the tl.tileop.multimem intrinsic.
@@ -65,7 +70,7 @@ def multimem_st(src, dst):
         src: Local source (Buffer, BufferLoad with slice, or BufferRegion)
         dst: Multicast destination (Buffer, BufferLoad with slice, or BufferRegion)
     """
-    return _multimem_impl(src, dst, mode=_MultimemMode.ST, reduce_op=MultimemReduceOp.ADD)
+    return _multimem_impl(src, dst, mode=_MultimemMode.ST)
 
 
 def multimem_red(src, dst, reduce_op: MultimemReduceOp = MultimemReduceOp.ADD):
@@ -77,3 +82,28 @@ def multimem_red(src, dst, reduce_op: MultimemReduceOp = MultimemReduceOp.ADD):
         reduce_op: Reduction operation: 0=ADD, 1=MIN, 2=MAX.
     """
     return _multimem_impl(src, dst, mode=_MultimemMode.RED, reduce_op=reduce_op)
+
+
+def multimem_tma_store(src, dst, reduce_op: MultimemReduceOp | None = None):
+    """Async bulk TMA store from shared memory to multicast global address.
+
+    CTA-collective: a single thread emits one PTX instruction per call.
+    Uses bulk_group completion (fence.proxy.async + commit_group + wait).
+
+    Args:
+        src: Shared memory source (Buffer, BufferLoad or BufferRegion, shared scope)
+        dst: Multicast global destination (Buffer, BufferLoad or BufferRegion, global scope)
+        reduce_op: None for plain store (broadcast), MultimemReduceOp.ADD/MIN/MAX for reduce-accumulate
+    
+    NOTE: This instruction requires Hopper+ and CUDA toolkit 13.x.
+    (For unsatisfied CTK version, a hack is to use plain TMA store to mcast vaddr.)
+    """
+    if reduce_op is None:
+        return _multimem_impl(src, dst, mode=_MultimemMode.TMA_STORE)
+    return _multimem_impl(src, dst, mode=_MultimemMode.TMA_RED_STORE, reduce_op=reduce_op)
+
+
+def multimem_signal(addr, value: PrimExpr, dtype_tag: Literal['uint32', 'uint64'] ='uint32'):
+    return tir.call_extern("handle",
+                           f"tl::multimem::Signal<{dtype_tag}>::run",
+                           address_of(addr), value)
