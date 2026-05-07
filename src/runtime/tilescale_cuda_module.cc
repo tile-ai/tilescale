@@ -132,11 +132,6 @@ public:
     std::lock_guard<std::mutex> lock(mutex_);
     if (module_[device_id] == nullptr) {
       CUDA_DRIVER_CALL(cuModuleLoadData(&(module_[device_id]), data_.c_str()));
-      static auto nvshmem_init_hook =
-          ffi::Function::GetGlobal("runtime.nvshmem.cumodule_init");
-      if (nvshmem_init_hook.has_value()) {
-        (*nvshmem_init_hook)(static_cast<void *>(module_[device_id]));
-      }
     }
     CUfunction func;
     CUresult result =
@@ -156,24 +151,29 @@ public:
     std::lock_guard<std::mutex> lock(mutex_);
     if (module_[device_id] == nullptr) {
       CUDA_DRIVER_CALL(cuModuleLoadData(&(module_[device_id]), data_.c_str()));
-      static auto nvshmem_init_hook =
-          ffi::Function::GetGlobal("runtime.nvshmem.cumodule_init");
-      if (nvshmem_init_hook.has_value()) {
-        (*nvshmem_init_hook)(static_cast<void *>(module_[device_id]));
-      }
     }
     CUdeviceptr global;
     size_t nbytes;
 
     CUresult result = cuModuleGetGlobal(&global, &nbytes, module_[device_id],
                                         global_name.c_str());
-    ICHECK_EQ(nbytes, expect_nbytes);
+    // Handle errors by reloading the module (needed after multiprocessing
+    // spawn which invalidates CUmodule handles from the parent process).
+    if (result != CUDA_SUCCESS) {
+      module_[device_id] = nullptr;
+      CUDA_DRIVER_CALL(
+          cuModuleLoadData(&(module_[device_id]), data_.c_str()));
+      result = cuModuleGetGlobal(&global, &nbytes, module_[device_id],
+                                  global_name.c_str());
+    }
     if (result != CUDA_SUCCESS) {
       const char *msg;
       cuGetErrorName(result, &msg);
       LOG(FATAL) << "CUDAError: cuModuleGetGlobal " << global_name
                  << " failed with error: " << msg;
     }
+    ICHECK_EQ(nbytes, expect_nbytes)
+        << "Unexpected size for symbol " << global_name;
     return global;
   }
 
