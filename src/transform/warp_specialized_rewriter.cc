@@ -417,8 +417,9 @@ private:
   bool has_tma_op_ = false;
 };
 
-static bool ExprUsesBlockIdx(const PrimExpr &expr,
-                             const std::unordered_set<const VarNode *> &block_vars) {
+static bool
+ExprUsesBlockIdx(const PrimExpr &expr,
+                 const std::unordered_set<const VarNode *> &block_vars) {
   bool uses_block_idx = false;
   PostOrderVisit(expr, [&uses_block_idx, &block_vars](const ObjectRef &node) {
     if (auto var = node.as<VarNode>()) {
@@ -445,7 +446,8 @@ public:
   }
 
 private:
-  explicit BlockIdxIfDetector(const std::unordered_set<const VarNode *> &block_vars)
+  explicit BlockIdxIfDetector(
+      const std::unordered_set<const VarNode *> &block_vars)
       : block_vars_(block_vars) {}
 
   void VisitStmt_(const IfThenElseNode *op) final {
@@ -1212,7 +1214,8 @@ private:
       if (iv->thread_tag == "blockIdx.x" || iv->thread_tag == "blockIdx.y" ||
           iv->thread_tag == "blockIdx.z") {
         block_vars_.insert(iv->var.get());
-        AttrStmt attr_stmt = Downcast<AttrStmt>(StmtExprMutator::VisitStmt_(op));
+        AttrStmt attr_stmt =
+            Downcast<AttrStmt>(StmtExprMutator::VisitStmt_(op));
         block_vars_.erase(iv->var.get());
         return attr_stmt;
       }
@@ -1383,7 +1386,8 @@ private:
     // Add an attr here to handle the partial thread count in ThreadSync pass.
     Array<IntImm> ws_partition = {Downcast<IntImm>(producer_thread_extent),
                                   Downcast<IntImm>(consumer_thread_extent)};
-    ws_body = AttrStmt(ws_partition, attr::kWarpSpecializationScope, 0, ws_body);
+    ws_body =
+        AttrStmt(ws_partition, attr::kWarpSpecializationScope, 0, ws_body);
 
     return SeqStmt({init_barrier, ws_body});
   }

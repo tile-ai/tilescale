@@ -104,8 +104,10 @@ bool IsAsyncIntrinsic(const CallNode *call) {
   // multimem bulk async ops (shared → mcast_global via bulk_group)
   if (call->op.same_as(builtin::call_extern()) && call->args.size() >= 1) {
     if (auto *str_imm = call->args[0].as<StringImmNode>()) {
-      if (std::string(str_imm->value).find("tl::multimem::cp_async_bulk") == 0 ||
-          std::string(str_imm->value).find("tl::multimem::cp_reduce_async_bulk") == 0) {
+      if (std::string(str_imm->value).find("tl::multimem::cp_async_bulk") ==
+              0 ||
+          std::string(str_imm->value)
+                  .find("tl::multimem::cp_reduce_async_bulk") == 0) {
         return true;
       }
     }

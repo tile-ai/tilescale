@@ -52,7 +52,7 @@ def ag_gemm_sm_specialized_kernel(
         local_signal: T.Tensor((m_blocks,), "uint32"),
         grid_barrier: T.Tensor((num_ranks,), "int32"),
         C: T.Tensor((M, N_per_rank), dtype),
-        local_rank: T.int32
+        local_rank: T.int32,
     ):
         with T.Kernel(sm_num, threads=threads) as bid:
             A_shared = T.alloc_shared((block_M, block_K), dtype)
@@ -218,10 +218,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         warmup=args.warmup,
         rep=args.rep,
     )
-    print(
-        f"rank {local_rank} tilelang specialized ag_gemm time: {tl_t:.2f} ms, "
-        f"TFLOPS: {2 * M * N * K / 1e9 / tl_t / num_local_ranks:.2f}"
-    )
+    print(f"rank {local_rank} tilelang specialized ag_gemm time: {tl_t:.2f} ms, TFLOPS: {2 * M * N * K / 1e9 / tl_t / num_local_ranks:.2f}")
 
     allocator.close()
     dist.destroy_process_group()

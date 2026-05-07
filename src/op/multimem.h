@@ -26,8 +26,9 @@ enum class MultimemMode : int {
   kLdReduce = 0,
   kSt = 1,
   kRed = 2,
-  kTmaStore = 3,    // multimem.cp.async.bulk: shared → mcast_global (plain store)
-  kTmaRedStore = 4, // multimem.cp.reduce.async.bulk: shared → mcast_global (reduce)
+  kTmaStore = 3, // multimem.cp.async.bulk: shared → mcast_global (plain store)
+  kTmaRedStore =
+      4, // multimem.cp.reduce.async.bulk: shared → mcast_global (reduce)
 };
 
 /*!

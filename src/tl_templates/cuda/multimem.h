@@ -183,7 +183,8 @@ template <> struct LdReduceV2<ReduceOp::MAX, float> {
 
 template <typename DType> struct StV2 {
   TL_DEVICE static void run(void *, const void *) {
-    static_assert(always_false_v<DType>, "tl::multimem::StV2: unsupported dtype");
+    static_assert(always_false_v<DType>,
+                  "tl::multimem::StV2: unsupported dtype");
   }
 };
 
@@ -208,7 +209,7 @@ template <> struct RedV2<ReduceOp::ADD, float> {
   TL_DEVICE static void run(void *mcast_ptr, const void *src) {
     const float *src_f = reinterpret_cast<const float *>(src);
     const char *mc = reinterpret_cast<const char *>(mcast_ptr);
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < 2; i++) {
       unsigned val = __float_as_uint(src_f[i]);
       asm volatile("multimem.red.relaxed.sys.global.add.f32 [%0], %1;"
@@ -223,7 +224,7 @@ template <> struct RedV2<ReduceOp::MIN, float> {
   TL_DEVICE static void run(void *mcast_ptr, const void *src) {
     const float *src_f = reinterpret_cast<const float *>(src);
     const char *mc = reinterpret_cast<const char *>(mcast_ptr);
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < 2; i++) {
       unsigned val = __float_as_uint(src_f[i]);
       asm volatile("multimem.red.relaxed.sys.global.min.f32 [%0], %1;"
@@ -238,7 +239,7 @@ template <> struct RedV2<ReduceOp::MAX, float> {
   TL_DEVICE static void run(void *mcast_ptr, const void *src) {
     const float *src_f = reinterpret_cast<const float *>(src);
     const char *mc = reinterpret_cast<const char *>(mcast_ptr);
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < 2; i++) {
       unsigned val = __float_as_uint(src_f[i]);
       asm volatile("multimem.red.relaxed.sys.global.max.f32 [%0], %1;"
@@ -259,13 +260,17 @@ template <typename T> struct Signal {
 template <> struct Signal<uint32_t> {
   TL_DEVICE static void run(void *mcast_ptr, uint32_t val) {
     asm volatile("multimem.st.relaxed.sys.global.u32 [%0], %1;"
-                 : : "l"(mcast_ptr), "r"(val) : "memory");
+                 :
+                 : "l"(mcast_ptr), "r"(val)
+                 : "memory");
   }
 };
 template <> struct Signal<uint64_t> {
   TL_DEVICE static void run(void *mcast_ptr, uint64_t val) {
     asm volatile("multimem.st.relaxed.sys.global.u64 [%0], %1;"
-                 : : "l"(mcast_ptr), "l"(val) : "memory");
+                 :
+                 : "l"(mcast_ptr), "l"(val)
+                 : "memory");
   }
 };
 
@@ -278,83 +283,107 @@ TL_DEVICE void cp_async_bulk(void *mcast_global, void *smem, uint32_t size) {
   uint32_t smem_int = smem_ptr_to_uint(smem);
   asm volatile(
       "multimem.cp.async.bulk.global.shared::cta.bulk_group [%0], [%1], %2;\n"
-      : : "l"(mcast_global), "r"(smem_int), "r"(size) : "memory");
+      :
+      : "l"(mcast_global), "r"(smem_int), "r"(size)
+      : "memory");
 }
 
 TL_DEVICE void cp_reduce_async_bulk_add_f32(void *mcast_global, void *smem,
-                                             uint32_t size) {
+                                            uint32_t size) {
   uint32_t smem_int = smem_ptr_to_uint(smem);
   asm volatile(
       "multimem.cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f32 "
       "[%0], [%1], %2;\n"
-      : : "l"(mcast_global), "r"(smem_int), "r"(size) : "memory");
+      :
+      : "l"(mcast_global), "r"(smem_int), "r"(size)
+      : "memory");
 }
 
 TL_DEVICE void cp_reduce_async_bulk_min_f32(void *mcast_global, void *smem,
-                                             uint32_t size) {
+                                            uint32_t size) {
   uint32_t smem_int = smem_ptr_to_uint(smem);
   asm volatile(
       "multimem.cp.reduce.async.bulk.global.shared::cta.bulk_group.min.f32 "
       "[%0], [%1], %2;\n"
-      : : "l"(mcast_global), "r"(smem_int), "r"(size) : "memory");
+      :
+      : "l"(mcast_global), "r"(smem_int), "r"(size)
+      : "memory");
 }
 
 TL_DEVICE void cp_reduce_async_bulk_max_f32(void *mcast_global, void *smem,
-                                             uint32_t size) {
+                                            uint32_t size) {
   uint32_t smem_int = smem_ptr_to_uint(smem);
   asm volatile(
       "multimem.cp.reduce.async.bulk.global.shared::cta.bulk_group.max.f32 "
       "[%0], [%1], %2;\n"
-      : : "l"(mcast_global), "r"(smem_int), "r"(size) : "memory");
+      :
+      : "l"(mcast_global), "r"(smem_int), "r"(size)
+      : "memory");
 }
 
 TL_DEVICE void cp_reduce_async_bulk_add_f16(void *mcast_global, void *smem,
-                                             uint32_t size) {
+                                            uint32_t size) {
   uint32_t smem_int = smem_ptr_to_uint(smem);
   asm volatile(
       "multimem.cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f16x2 "
       "[%0], [%1], %2;\n"
-      : : "l"(mcast_global), "r"(smem_int), "r"(size) : "memory");
+      :
+      : "l"(mcast_global), "r"(smem_int), "r"(size)
+      : "memory");
 }
 
 TL_DEVICE void cp_reduce_async_bulk_add_bf16(void *mcast_global, void *smem,
-                                              uint32_t size) {
+                                             uint32_t size) {
   uint32_t smem_int = smem_ptr_to_uint(smem);
   asm volatile(
       "multimem.cp.reduce.async.bulk.global.shared::cta.bulk_group.add.bf16x2 "
       "[%0], [%1], %2;\n"
-      : : "l"(mcast_global), "r"(smem_int), "r"(size) : "memory");
+      :
+      : "l"(mcast_global), "r"(smem_int), "r"(size)
+      : "memory");
 }
 
-#else  // PTX 9.1 not available — unconditional trap
+#else // PTX 9.1 not available — unconditional trap
 
 TL_DEVICE void cp_async_bulk(void *mcast_global, void *smem, uint32_t size) {
-  (void)mcast_global; (void)smem; (void)size;
+  (void)mcast_global;
+  (void)smem;
+  (void)size;
   asm("trap;");
 }
 TL_DEVICE void cp_reduce_async_bulk_add_f32(void *mcast_global, void *smem,
-                                             uint32_t size) {
-  (void)mcast_global; (void)smem; (void)size;
+                                            uint32_t size) {
+  (void)mcast_global;
+  (void)smem;
+  (void)size;
   asm("trap;");
 }
 TL_DEVICE void cp_reduce_async_bulk_min_f32(void *mcast_global, void *smem,
-                                             uint32_t size) {
-  (void)mcast_global; (void)smem; (void)size;
+                                            uint32_t size) {
+  (void)mcast_global;
+  (void)smem;
+  (void)size;
   asm("trap;");
 }
 TL_DEVICE void cp_reduce_async_bulk_max_f32(void *mcast_global, void *smem,
-                                             uint32_t size) {
-  (void)mcast_global; (void)smem; (void)size;
+                                            uint32_t size) {
+  (void)mcast_global;
+  (void)smem;
+  (void)size;
   asm("trap;");
 }
 TL_DEVICE void cp_reduce_async_bulk_add_f16(void *mcast_global, void *smem,
-                                             uint32_t size) {
-  (void)mcast_global; (void)smem; (void)size;
+                                            uint32_t size) {
+  (void)mcast_global;
+  (void)smem;
+  (void)size;
   asm("trap;");
 }
 TL_DEVICE void cp_reduce_async_bulk_add_bf16(void *mcast_global, void *smem,
-                                              uint32_t size) {
-  (void)mcast_global; (void)smem; (void)size;
+                                             uint32_t size) {
+  (void)mcast_global;
+  (void)smem;
+  (void)size;
   asm("trap;");
 }
 

@@ -60,14 +60,14 @@ def gemm_allreduce_kernel(M, N, K, block_M, block_N, block_K, threads, dtype="fl
 
             T.clear(C_local)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=2):
-                T.copy(A[by * block_M:(by + 1) * block_M, k * block_K:(k + 1) * block_K], A_shared)
-                T.copy(B[k * block_K:(k + 1) * block_K, bx * block_N:(bx + 1) * block_N], B_shared)
+                T.copy(A[by * block_M : (by + 1) * block_M, k * block_K : (k + 1) * block_K], A_shared)
+                T.copy(B[k * block_K : (k + 1) * block_K, bx * block_N : (bx + 1) * block_N], B_shared)
                 T.gemm(A_shared, B_shared, C_local)
 
             # Reduce partial GEMM result into multicast buffer
             T.multimem_red(
                 C_local,
-                mcast_C[by * block_M:(by + 1) * block_M, bx * block_N:(bx + 1) * block_N],
+                mcast_C[by * block_M : (by + 1) * block_M, bx * block_N : (bx + 1) * block_N],
                 reduce_op=T.MultimemReduceOp.ADD,
             )
             T.fence_sys()
@@ -162,6 +162,4 @@ if __name__ == "__main__":
     parser.add_argument("--print_source", action="store_true")
     args = parser.parse_args()
 
-    torch.multiprocessing.spawn(
-        main, args=(args.num_processes, args), nprocs=args.num_processes, join=True
-    )
+    torch.multiprocessing.spawn(main, args=(args.num_processes, args), nprocs=args.num_processes, join=True)

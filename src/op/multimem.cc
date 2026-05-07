@@ -343,13 +343,21 @@ Stmt MultimemOpNode::LowerBulkCopy(const LowerArgs &T,
   if (is_reduce) {
     func_name = "tl::multimem::cp_reduce_async_bulk_";
     switch (reduce_op) {
-    case 0: func_name += "add_"; break;
-    case 1: func_name += "min_"; break;
-    case 2: func_name += "max_"; break;
-    default: LOG(FATAL) << "Invalid reduce_op: " << reduce_op;
+    case 0:
+      func_name += "add_";
+      break;
+    case 1:
+      func_name += "min_";
+      break;
+    case 2:
+      func_name += "max_";
+      break;
+    default:
+      LOG(FATAL) << "Invalid reduce_op: " << reduce_op;
     }
-    func_name += shared_tensor->dtype.is_float16() ? "f16" :
-                 shared_tensor->dtype.is_bfloat16() ? "bf16" : "f32";
+    func_name += shared_tensor->dtype.is_float16()    ? "f16"
+                 : shared_tensor->dtype.is_bfloat16() ? "bf16"
+                                                      : "f32";
   } else {
     func_name = "tl::multimem::cp_async_bulk";
   }
@@ -360,8 +368,8 @@ Stmt MultimemOpNode::LowerBulkCopy(const LowerArgs &T,
   extern_args.push_back(smem_addr);
   extern_args.push_back(size_bytes);
 
-  Stmt bulk_copy = Evaluate(
-      Call(DataType::Handle(), builtin::call_extern(), extern_args));
+  Stmt bulk_copy =
+      Evaluate(Call(DataType::Handle(), builtin::call_extern(), extern_args));
 
   // Gate with tid == 0 (single thread per CTA emits the PTX)
   bulk_copy = IfThenElse(EQ(T.thread_var, T.thread_bounds->min), bulk_copy);
