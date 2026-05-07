@@ -1666,26 +1666,6 @@ def fence_sys():
     return tir.call_intrin("handle", tir.op.Op.get("tl.fence_sys"))
 
 
-def inc_max_nreg(reg_count: int):
-    """Increment the maximum number of registers to use.
-
-    See Also
-    --------
-    set_max_nreg
-    """
-    return set_max_nreg(reg_count, 1)
-
-
-def dec_max_nreg(reg_count: int):
-    """Decrement the maximum number of registers to use.
-
-    See Also
-    --------
-    set_max_nreg
-    """
-    return set_max_nreg(reg_count, 0)
-
-
 def fence_cta():
     """Create a memory fence at the block level (visible to all threads in the current block)."""
     return tir.call_intrin("handle", tir.op.Op.get("tl.fence_cta"))
@@ -1699,8 +1679,8 @@ def fence_gpu():
 def ld(
     src: PrimExpr,
     value: PrimExpr,
-    scope: Literal["cta", "gpu", "sys"] = "gpu",
-    sem: Literal["weak", "volatile", "acquire", "release", "relaxed"] = "weak",
+    scope: Literal[cta, gpu, sys] = "gpu",  # noqa: F821
+    sem: Literal[weak, volatile, acquire, release, relaxed] = "weak",  # noqa: F821
     na: bool = False,
     nc: bool = False,
     src_pe: tir.PrimExpr | tir.IntImm | None = -1,
@@ -1720,8 +1700,8 @@ def ld(
 def st(
     dst: PrimExpr,
     value: PrimExpr,
-    scope: Literal["cta", "gpu", "sys"] = "gpu",
-    sem: Literal["weak", "volatile", "release", "relaxed"] = "weak",
+    scope: Literal[cta, gpu, sys] = "gpu",  # noqa: F821
+    sem: Literal[weak, volatile, release, relaxed] = "weak",  # noqa: F821
     na: bool = False,
     dst_pe: tir.PrimExpr | tir.IntImm | None = -1,
 ):
