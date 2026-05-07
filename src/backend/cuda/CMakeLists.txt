@@ -138,6 +138,12 @@ endif()
 
 file(GLOB TILE_LANG_CUDA_SRCS
   src/runtime/runtime.cc
+  src/runtime/tilescale_cuda_module.cc
+  src/shared_memory/shared_memory.cc
+  src/op/distributed.cc
+  src/op/sync.cc
+  src/op/multimem.cc
+  src/op/remote_copy.cc
   src/backend/cuda/codegen/ptx.cc
   src/backend/cuda/codegen/codegen_cuda.cc
   src/backend/cuda/codegen/codegen_py.cc

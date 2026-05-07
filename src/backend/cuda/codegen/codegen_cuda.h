@@ -10,6 +10,7 @@
 #include <tvm/tir/expr.h>
 #include <tvm/tir/op.h>
 
+#include <cstdlib>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -18,6 +19,15 @@
 
 namespace tvm {
 namespace codegen {
+
+/*
+ * Check whether distributed mode is enabled via environment variable.
+ * Controls inclusion of distributed/sync/ldst templates in generated code.
+ */
+static inline bool use_distributed() {
+  const char *env = std::getenv("TILELANG_USE_DISTRIBUTED");
+  return env && std::string(env) == "1";
+}
 
 class CodeGenTileLangCUDA final : public CodeGenC {
 public:
@@ -135,6 +145,10 @@ private:
   bool need_curand_kernel_h_{false};
   // whether need cluster.h
   bool need_cluster_h_{false};
+  // whether need distributed templates (sync.h, distributed.h, ldst.h)
+  bool use_distributed_{use_distributed()};
+  // whether need multimem.h
+  bool need_multimem_h_{false};
   // Op attribute map
   OpAttrMap<bool> op_need_warp_shuffle_ =
       Op::GetAttrMap<bool>("cuda.need_warp_shuffle");

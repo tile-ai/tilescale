@@ -187,4 +187,8 @@ if not env.is_light_import():
     from . import ir  # noqa: F401
     from . import tileop  # noqa: F401
 
+    # Distributed extensions (optional)
+    from .utils.tensor import tensor  # noqa: F401
+    from .utils.allocator import get_allocator  # noqa: F401
+
 del _lazy_load_lib

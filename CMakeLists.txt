@@ -461,7 +461,7 @@ endif()
 
 # Provide the custom LogMessageImpl / LogFatalImpl implementation to TVM,
 # since TVM_LOG_CUSTOMIZE=1 requires them to be supplied by the user.
-target_sources(tvm_objs PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/logging.cc")
+target_sources(tvm_runtime_objs PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/logging.cc")
 if(TILELANG_RELEASE_BUILD)
   target_compile_definitions(tvm_objs PRIVATE TILELANG_RELEASE_BUILD=1)
 endif()
@@ -594,7 +594,18 @@ endif()
 
 if(DEFINED TILELANG_ACTIVE_BACKEND_STUB_LINK)
   foreach(target IN LISTS TILELANG_OUTPUT_TARGETS)
+    # Use --no-as-needed to force the stub into DT_NEEDED even when the conda
+    # linker's default --as-needed would otherwise drop it.  The stub's symbols
+    # (cuCtxGetDevice, etc.) are referenced by object files but resolved lazily
+    # at runtime, so without this flag they get pruned and cause a
+    # "symbol lookup error" at load time.
+    if(UNIX AND NOT APPLE)
+      target_link_options(${target} PRIVATE "-Wl,--no-as-needed")
+    endif()
     target_link_libraries(${target} PUBLIC ${TILELANG_ACTIVE_BACKEND_STUB_LINK})
+    if(UNIX AND NOT APPLE)
+      target_link_options(${target} PRIVATE "-Wl,--as-needed")
+    endif()
   endforeach()
 endif()
 

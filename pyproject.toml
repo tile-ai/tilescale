@@ -1,5 +1,5 @@
 [project]
-name = "tilelang"
+name = "tilescale"
 description = "A tile level programming language to generate high performance code."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -26,7 +26,7 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-dynamic = ["version"]
+version = "0.0.1"
 dependencies = [
     # >=0.1.6 fixes a memory issue: tilelang#1502, but keep
     # requirement as wide as possible to be compatible with other libraries
@@ -109,11 +109,6 @@ if.platform-system = "win32"
 cmake.args = ["-G", "Ninja"]
 
 # editable.rebuild = true
-
-# Include backend and git info in version
-metadata.version.provider = "version_provider"
-metadata.version.provider-path = "."
-experimental = true
 
 # build.verbose = true
 # logging.level = "DEBUG"
