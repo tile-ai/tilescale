@@ -77,7 +77,7 @@ public:
     for (size_t i = 0; i < module_.size(); ++i) {
       if (module_[i] != nullptr) {
         CUDA_CALL(cudaSetDevice(static_cast<int>(i)));
-        CUDA_DRIVER_CALL(cuModuleUnload(module_[i]));
+        CUDA_CALL(cudaModuleUnload(module_[i]));
       }
     }
   }
@@ -130,8 +130,9 @@ public:
   // Get a CUfunction from primary context in device_id
   CUfunction GetFunc(int device_id, const std::string &func_name) {
     std::lock_guard<std::mutex> lock(mutex_);
+    cudaSetDevice(device_id);
     if (module_[device_id] == nullptr) {
-      CUDA_DRIVER_CALL(cuModuleLoadData(&(module_[device_id]), data_.c_str()));
+      CUDA_CALL(cudaModuleLoadData(&(module_[device_id]), data_.c_str()));
     }
     CUfunction func;
     CUresult result =
@@ -149,23 +150,18 @@ public:
   CUdeviceptr GetGlobal(int device_id, const std::string &global_name,
                         size_t expect_nbytes) {
     std::lock_guard<std::mutex> lock(mutex_);
+    cudaSetDevice(device_id);
     if (module_[device_id] == nullptr) {
-      CUDA_DRIVER_CALL(cuModuleLoadData(&(module_[device_id]), data_.c_str()));
+      // Use runtime API for module loading to ensure proper context binding.
+      // The driver API cuModuleLoadData does not require a context, which can
+      // lead to CUDA_ERROR_INVALID_CONTEXT in spawned subprocesses.
+      CUDA_CALL(cudaModuleLoadData(&(module_[device_id]), data_.c_str()));
     }
     CUdeviceptr global;
     size_t nbytes;
 
     CUresult result = cuModuleGetGlobal(&global, &nbytes, module_[device_id],
                                         global_name.c_str());
-    // Handle errors by reloading the module (needed after multiprocessing
-    // spawn which invalidates CUmodule handles from the parent process).
-    if (result != CUDA_SUCCESS) {
-      module_[device_id] = nullptr;
-      CUDA_DRIVER_CALL(
-          cuModuleLoadData(&(module_[device_id]), data_.c_str()));
-      result = cuModuleGetGlobal(&global, &nbytes, module_[device_id],
-                                  global_name.c_str());
-    }
     if (result != CUDA_SUCCESS) {
       const char *msg;
       cuGetErrorName(result, &msg);
