@@ -3615,6 +3615,24 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       os << PrintExpr(op->args[i]);
     }
     os << ")";
+  } else if (op->op.same_as(tl::get_rank())) {
+    os << "tl::get_rank()";
+  } else if (op->op.same_as(tl::get_num_ranks())) {
+    os << "tl::get_num_ranks()";
+  } else if (op->op.same_as(tl::get_remote_base_ptr())) {
+    ICHECK_EQ(op->args.size(), 1U)
+        << "tl.get_remote_base_ptr expects 1 argument <rank>.";
+    os << "tl::get_remote_base_ptr(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::get_uintptr_t())) {
+    ICHECK_EQ(op->args.size(), 1U)
+        << "tl.get_uintptr_t expects 1 argument <ptr>.";
+    os << "tl::get_uintptr_t(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::fence_cta())) {
+    os << "__threadfence_block()";
+  } else if (op->op.same_as(tl::fence_gpu())) {
+    os << "__threadfence()";
+  } else if (op->op.same_as(tl::fence_sys())) {
+    os << "__threadfence_system()";
   } else if (op->op.same_as(tl::tl_shuffle_elect())) {
     os << "tl::tl_shuffle_elect<" << PrintExpr(op->args[0]) << ">()";
   } else if (op->op.same_as(tl::initialize_wgmma_descriptor())) {

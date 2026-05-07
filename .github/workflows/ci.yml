@@ -304,12 +304,12 @@ jobs:
           # Run distributed tests (marked with @requires_distributed) with TILELANG_USE_DISTRIBUTED=1
           # DeepEP tests requires fullmesh nvl or internode environment, we disable for now
           echo "Running distributed examples with TILELANG_USE_DISTRIBUTED=1:"
-          TILELANG_USE_DISTRIBUTED=1 "${PYTEST[@]}" --maxfail=3 --numprocesses=1 -m distributed --ignore-glob='*deepep*' . || true
+          TILELANG_USE_DISTRIBUTED=1 "${PYTEST[@]}" --maxfail=3 --numprocesses=1 -m distributed --ignore-glob='*deepep*' .
 
           # Run remaining example tests (non-distributed)
           # Temporarily disable problematic tests: sink, vs_sparse
           echo "Running non-distributed examples:"
-          "${PYTEST[@]}" --maxfail=3 --numprocesses=2 -m "not distributed" -k "not sink and not vs_sparse" . || true
+          "${PYTEST[@]}" --maxfail=3 --numprocesses=2 -m "not distributed" -k "not sink and not vs_sparse" .
 
       # NVIDIA CUDA tests
       - name: Run CUDA tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
@@ -325,12 +325,12 @@ jobs:
 
           # Run distributed tests (marked with @requires_distributed) with TILELANG_USE_DISTRIBUTED=1
           echo "Running distributed tests with TILELANG_USE_DISTRIBUTED=1:"
-          TILELANG_USE_DISTRIBUTED=1 "${PYTEST[@]}" --maxfail=3 --numprocesses=1 -m distributed . || true
+          TILELANG_USE_DISTRIBUTED=1 "${PYTEST[@]}" --maxfail=3 --numprocesses=1 -m distributed .
 
           # Run remaining tests (non-distributed)
           # Temporarily disable problematic tests: tilelibrary_gemm, jit_gemm_ctypes
           echo "Running non-distributed tests:"
-          "${PYTEST[@]}" --maxfail=3 --numprocesses=2 -m "not distributed" -k "not tilelibrary_gemm and not jit_gemm_ctypes" . || true
+          "${PYTEST[@]}" --maxfail=3 --numprocesses=2 -m "not distributed" -k "not tilelibrary_gemm and not jit_gemm_ctypes" .
 
       - name: List generated files
         if: ${{ !cancelled() }}
