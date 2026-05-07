@@ -18,10 +18,10 @@ template <typename dtype_t> TL_DEVICE uint64_t get_uintptr_t(dtype_t *ptr) {
 }
 
 // Block-level remote copy: copies N*sizeof(float) bytes from src to dst
-template <int N>
-TL_DEVICE void cp_block(uint64_t dst_addr, uint64_t src_addr) {
+template <int N> TL_DEVICE void cp_block(uint64_t dst_addr, uint64_t src_addr) {
   using CopyT = uint64_t;
-  constexpr int num_elements = (N * (int)sizeof(float) + (int)sizeof(CopyT) - 1) / (int)sizeof(CopyT);
+  constexpr int num_elements =
+      (N * (int)sizeof(float) + (int)sizeof(CopyT) - 1) / (int)sizeof(CopyT);
   auto *dst = reinterpret_cast<CopyT *>(dst_addr);
   const auto *src = reinterpret_cast<const CopyT *>(src_addr);
 #pragma unroll

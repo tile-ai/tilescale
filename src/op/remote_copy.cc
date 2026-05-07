@@ -113,9 +113,11 @@ Stmt PutOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
         Call(DataType::Handle(), tl::get_remote_base_ptr(), {dst_pe}) +
         offset_to_base);
   } else {
-    new_args.push_back(Call(DataType::Handle(), tl::get_uintptr_t(), {MakeRemappedAddress(T, dst_buffer, dst_indices)}));
+    new_args.push_back(Call(DataType::Handle(), tl::get_uintptr_t(),
+                            {MakeRemappedAddress(T, dst_buffer, dst_indices)}));
   }
-  new_args.push_back(Call(DataType::Handle(), tl::get_uintptr_t(), {MakeRemappedAddress(T, src_buffer, src_indices)}));
+  new_args.push_back(Call(DataType::Handle(), tl::get_uintptr_t(),
+                          {MakeRemappedAddress(T, src_buffer, src_indices)}));
   auto put = Call(DataType::Handle(), builtin::call_extern(), new_args);
   return Evaluate(put);
 }
@@ -211,7 +213,8 @@ Stmt GetOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   new_args.push_back(StringImm(ss.str()));
   PrimExpr dst_addr_expr = MakeRemappedAddress(T, dst_buffer, dst_indices);
-  new_args.push_back(Call(DataType::Handle(), tl::get_uintptr_t(), {dst_addr_expr}));
+  new_args.push_back(
+      Call(DataType::Handle(), tl::get_uintptr_t(), {dst_addr_expr}));
   if (is_distributed()) {
     PrimExpr src_addr_expr = MakeRemappedAddress(T, src_buffer, src_indices);
     PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
@@ -224,7 +227,8 @@ Stmt GetOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
         Call(DataType::Handle(), tl::get_remote_base_ptr(), {src_pe}) +
         offset_to_base);
   } else {
-    new_args.push_back(Call(DataType::Handle(), tl::get_uintptr_t(), {MakeRemappedAddress(T, src_buffer, src_indices)}));
+    new_args.push_back(Call(DataType::Handle(), tl::get_uintptr_t(),
+                            {MakeRemappedAddress(T, src_buffer, src_indices)}));
   }
 
   auto get = Call(DataType::Handle(), builtin::call_extern(), new_args);
