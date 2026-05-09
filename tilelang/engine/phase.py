@@ -181,14 +181,11 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.Simplify()(mod)
     # Set layouts for reducers
     mod = tilelang.transform.LayoutReducer()(mod)
-    # Tile-level warp specialization: runs before layout inference so that
-    # producer/consumer split happens at the high-level tile-op IR.
-    # The pass classifies copy ops as TMA/cp.async/sync inline (no prior
-    # InstructionAnnotation pass needed). Shared buffers are multi-versioned
-    # internally only for functions where the WS transformation actually
-    # applies.
-    if allow_warp_specialized(target=target):
-        mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
+    # Tile-level warp specialization runs before layout inference so that the
+    # producer/consumer split happens at high-level tile-op IR. The pass is
+    # also responsible for stripping sm_specialize_scope annotations when WS is
+    # disabled or unavailable, keeping that marker frontend-only.
+    mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
     # Lower 2SM TCGEN5MMA and related on Blackwell target (must run before
     # LayoutInference so that the use_2cta annotation is visible to infer_layout)
     mod = tilelang.transform.LowerBlackwell2SM()(mod)

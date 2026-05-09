@@ -29,6 +29,19 @@ using namespace tir;
 
 namespace {
 
+static constexpr const char *kSmSpecialize = "tilelang.sm_specialize";
+
+static bool SmSpecializeAutoWSValue(const ObjectRef &obj) {
+  if (auto *imm = obj.as<IntImmNode>()) {
+    return imm->value != 0;
+  }
+  return true;
+}
+
+static bool SmSpecializeAutoWS(const AttrStmtNode *op) {
+  return SmSpecializeAutoWSValue(op->value);
+}
+
 bool ShapesEqual(const Array<PrimExpr> &lhs, const Array<PrimExpr> &rhs,
                  arith::Analyzer *analyzer) {
   if (lhs.size() != rhs.size()) {
@@ -611,6 +624,10 @@ private:
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == kSmSpecialize && !SmSpecializeAutoWS(op)) {
+      return ffi::GetRef<Stmt>(op);
+    }
+
     stmt_stack_.push_back(op);
 
     bool pushed_explicit_version = false;

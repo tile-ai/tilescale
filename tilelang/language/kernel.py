@@ -6,6 +6,7 @@ import os
 from tvm import tir
 from tvm.tir import Var
 from tvm.script.ir_builder.tir import evaluate as T_evaluate
+from tvm.script.ir_builder.tir import attr as T_attr
 from tvm.script.ir_builder.tir.frame import TIRFrame, BlockFrame
 from tvm.ffi import register_object
 from tilelang import _ffi_api
@@ -342,6 +343,17 @@ def Kernel(
         attrs["cluster_dims"] = cluster_dims
 
     return _ffi_api.KernelLaunch(blocks, threads, attrs)
+
+
+def sm_specialize_scope(*, auto_ws: bool = True):
+    """Mark a scope inside an SM-specialized persistent kernel.
+
+    This is a thin compiler annotation. It does not split kernels, assign SMs,
+    or remap block indices; existing passes only use it to decide where auto WS
+    is allowed.
+    """
+    value = int(bool(auto_ws))
+    return T_attr(0, "tilelang.sm_specialize", value)
 
 
 # For CUDA source kernels, we need to load the source code from a file or string.
