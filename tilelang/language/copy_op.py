@@ -55,6 +55,8 @@ def copy(
     coalesced_width: int | None = None,
     disable_tma: bool = False,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
+    src_pe: int | tir.PrimExpr | None = None,
+    dst_pe: int | tir.PrimExpr | None = None,
     annotations: dict | None = None,
     loop_layout: Any | None = None,
 ) -> tir.PrimExpr | tir.Stmt:
@@ -66,8 +68,10 @@ def copy(
         coalesced_width (Optional[int], keyword-only): Width for coalesced memory access. Defaults to None.
         disable_tma (bool, keyword-only): Whether to disable TMA acceleration. Defaults to False.
         eviction_policy (Optional[str], keyword-only): Cache eviction policy. Defaults to None.
+        src_pe (Optional[Union[int, tir.PrimExpr]], keyword-only): Remote PE for global-source TMA copy.
+        dst_pe (Optional[Union[int, tir.PrimExpr]], keyword-only): Remote PE for global-destination TMA copy.
         annotations (Optional[dict], keyword-only): Additional annotations dict. If provided,
-            coalesced_width, disable_tma, and eviction_policy can also be specified here.
+            coalesced_width, disable_tma, eviction_policy, src_pe, and dst_pe can also be specified here.
             Values in annotations take precedence over individual arguments.
         loop_layout (Optional[Fragment], keyword-only): A parallel loop layout hint for the SIMT copy
             (only valid for normal SIMT copy; incompatible with TMA/LDSM/STSM/TMem). When provided,
@@ -97,8 +101,12 @@ def copy(
       and passed through to the backend; low-level loop construction and any
       scope-specific decisions happen during lowering.
     """
+    has_remote_pe = src_pe is not None or dst_pe is not None
+    if annotations and ("src_pe" in annotations or "dst_pe" in annotations):
+        has_remote_pe = True
+
     src, dst = _normalize_copy_regions(src, dst)
-    if isinstance(src, tir.BufferLoad) and isinstance(dst, tir.BufferLoad):
+    if isinstance(src, tir.BufferLoad) and isinstance(dst, tir.BufferLoad) and not has_remote_pe:
         return tir.BufferStore(dst.buffer, src, dst.indices)
 
     # Build annotations dict
@@ -112,6 +120,10 @@ def copy(
     if "eviction_policy" not in ann and eviction_policy is not None:
         eviction_policy_map = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
         ann["eviction_policy"] = eviction_policy_map[eviction_policy]
+    if "src_pe" not in ann and src_pe is not None:
+        ann["src_pe"] = src_pe
+    if "dst_pe" not in ann and dst_pe is not None:
+        ann["dst_pe"] = dst_pe
 
     # Parallel loop layout hint (Fragment). Mirrors T.Parallel(loop_layout=...)
     if loop_layout is not None and "parallel_loop_layout" not in ann:
@@ -170,6 +182,8 @@ def tma_copy(
     *,
     barrier=None,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
+    src_pe: int | tir.PrimExpr | None = None,
+    dst_pe: int | tir.PrimExpr | None = None,
     annotations: dict | None = None,
 ) -> tir.PrimExpr | tir.Stmt:
     """TMA copy with user-managed synchronization.
@@ -193,6 +207,8 @@ def tma_copy(
             The TMA load will arrive at this barrier with expected byte count.
             The user must wait on the same barrier via T.mbarrier_wait_parity().
         eviction_policy: Cache eviction policy. Defaults to None.
+        src_pe: Remote PE for global-source TMA copy.
+        dst_pe: Remote PE for global-destination TMA copy.
         annotations: Additional annotations dict. Values in annotations take
             precedence over individual arguments.
 
@@ -225,6 +241,10 @@ def tma_copy(
     if "eviction_policy" not in ann and eviction_policy is not None:
         eviction_policy_map = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
         ann["eviction_policy"] = eviction_policy_map[eviction_policy]
+    if "src_pe" not in ann and src_pe is not None:
+        ann["src_pe"] = src_pe
+    if "dst_pe" not in ann and dst_pe is not None:
+        ann["dst_pe"] = dst_pe
 
     return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.tma_copy"), src, dst, annotations=ann if ann else None)
 
