@@ -1331,10 +1331,15 @@ private:
     if (num_tma == 0)
       return StmtExprMutator::VisitStmt_(op);
 
+    std::vector<const ForNode *> enclosing_loops;
+    ICHECK(CollectEnclosingForLoops(orig_block->body, pipeline_loop,
+                                    &enclosing_loops))
+        << "ProducerConsumerWS: failed to collect pipeline loop ancestry";
+
     // --- Build the WS transformation ---
     return BuildWSBlock(op, orig_block, pipeline_loop, num_stages, flat_stmts,
                         kinds, outer_let_bindings, inner_let_bindings,
-                        loop_body_condition);
+                        loop_body_condition, enclosing_loops);
   }
 
   Stmt
@@ -1344,14 +1349,23 @@ private:
                const std::vector<TileStmtKind> &kinds,
                const std::vector<std::pair<Var, PrimExpr>> &outer_let_bindings,
                const std::vector<std::pair<Var, PrimExpr>> &inner_let_bindings,
-               Optional<PrimExpr> loop_body_condition = Optional<PrimExpr>()) {
+               Optional<PrimExpr> loop_body_condition,
+               const std::vector<const ForNode *> &enclosing_loops) {
     Var loop_var = pipeline_loop->loop_var;
     PrimExpr loop_min = pipeline_loop->min;
     PrimExpr loop_extent = pipeline_loop->extent;
     PrimExpr linear_idx = loop_var - loop_min;
+    PrimExpr outer_linear_idx = IntImm(DataType::Int(32), 0);
+    for (const ForNode *outer_loop : enclosing_loops) {
+      outer_linear_idx =
+          outer_linear_idx * outer_loop->extent +
+          (outer_loop->loop_var - outer_loop->min);
+    }
+    PrimExpr global_linear_idx = outer_linear_idx * loop_extent + linear_idx;
 
-    PrimExpr base_stage_expr = FloorMod(linear_idx, num_stages);
-    PrimExpr base_parity_expr = FloorMod(FloorDiv(linear_idx, num_stages), 2);
+    PrimExpr base_stage_expr = FloorMod(global_linear_idx, num_stages);
+    PrimExpr base_parity_expr =
+        FloorMod(FloorDiv(global_linear_idx, num_stages), 2);
 
     // When the loop body is conditionally guarded, use PhaseCounters
     // instead of the loop variable for barrier stage/parity.  This
@@ -1575,7 +1589,7 @@ private:
     PrimExpr prelude_wait_guard =
         needs_phase_counter ? EQ(consumer_phase_counter.value().Load(),
                                  IntImm(DataType::Int(32), 0))
-                            : EQ(loop_var, loop_min);
+                            : EQ(global_linear_idx, IntImm(DataType::Int(32), 0));
     int prelude_barrier_base = num_fwd + num_bp;
     for (size_t i = 0; i < prelude_tma_plans.size(); ++i) {
       PrimExpr barrier_id = IntImm(DataType::Int(32), prelude_barrier_base + i);
@@ -2049,6 +2063,52 @@ private:
       return FindPipelineLoop(attr->body);
     }
     return nullptr;
+  }
+
+  bool CollectEnclosingForLoops(const Stmt &stmt, const ForNode *target,
+                                std::vector<const ForNode *> *loops) {
+    if (stmt.get() == target) {
+      return true;
+    }
+    if (auto *for_node = stmt.as<ForNode>()) {
+      loops->push_back(for_node);
+      if (CollectEnclosingForLoops(for_node->body, target, loops)) {
+        return true;
+      }
+      loops->pop_back();
+      return false;
+    }
+    if (auto *seq = stmt.as<SeqStmtNode>()) {
+      for (const Stmt &s : seq->seq) {
+        if (CollectEnclosingForLoops(s, target, loops)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    if (auto *if_stmt = stmt.as<IfThenElseNode>()) {
+      if (CollectEnclosingForLoops(if_stmt->then_case, target, loops)) {
+        return true;
+      }
+      if (if_stmt->else_case.defined()) {
+        return CollectEnclosingForLoops(if_stmt->else_case.value(), target,
+                                        loops);
+      }
+      return false;
+    }
+    if (auto *let = stmt.as<LetStmtNode>()) {
+      return CollectEnclosingForLoops(let->body, target, loops);
+    }
+    if (auto *realize = stmt.as<BlockRealizeNode>()) {
+      return CollectEnclosingForLoops(realize->block->body, target, loops);
+    }
+    if (auto *block = stmt.as<BlockNode>()) {
+      return CollectEnclosingForLoops(block->body, target, loops);
+    }
+    if (auto *attr = stmt.as<AttrStmtNode>()) {
+      return CollectEnclosingForLoops(attr->body, target, loops);
+    }
+    return false;
   }
 
   struct ReplaceResult {
