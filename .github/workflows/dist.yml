@@ -1,26 +1,6 @@
 name: Dist
 on:
   workflow_dispatch:
-  schedule:
-    # gemini said this is 6:00 china time
-    - cron: "0 22 * * *"
-  pull_request:
-    types:
-      - opened
-      - synchronize
-      - reopened
-      - ready_for_review
-    paths:
-      - setup.py
-      - setup.cfg
-      - pyproject.toml
-      - MANIFEST.in
-      - CMakeLists.txt
-      - version_provider.py
-      - .github/workflows/dist.yml
-      # temporarily add to dist check
-      # until we have type checking in ci / move to python 3.10
-      - tilelang/_typing.py
   release:
     types:
       - published
