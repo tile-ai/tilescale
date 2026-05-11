@@ -21,6 +21,7 @@
 #include "runtime/meta_data.h"
 #include "runtime/pack_args.h"
 #include "runtime/thread_storage_scope.h"
+#include "runtime.h"
 
 namespace tvm {
 namespace runtime {
@@ -198,6 +199,7 @@ void TileScaleInitDistributedTable::operator()(const ffi::PackedArgs &args,
   void *host_table = reinterpret_cast<void *>(host_table_ptr);
   // 打印host table前8个entry
   auto *table_ptr = reinterpret_cast<const uint64_t *>(host_table);
+  tl::SetRemoteTensorMapMetaData(table_ptr, static_cast<size_t>(table_size));
   std::ostringstream oss;
   int rank;
   CUDA_CALL(cudaGetDevice(&rank));
