@@ -181,6 +181,7 @@ def tma_copy(
     dst: BufferLikeType,
     *,
     barrier=None,
+    leader_thread_extent: int | None = None,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
     src_pe: int | tir.PrimExpr | None = None,
     dst_pe: int | tir.PrimExpr | None = None,
@@ -206,6 +207,9 @@ def tma_copy(
             Required for loads (global -> shared). Not needed for stores.
             The TMA load will arrive at this barrier with expected byte count.
             The user must wait on the same barrier via T.mbarrier_wait_parity().
+        leader_thread_extent: Logical thread group size for electing one TMA
+            issuing thread. Defaults to the whole CTA. Use 32 to issue one copy
+            per warp when each warp owns independent buffers/barriers.
         eviction_policy: Cache eviction policy. Defaults to None.
         src_pe: Remote PE for global-source TMA copy.
         dst_pe: Remote PE for global-destination TMA copy.
@@ -241,6 +245,8 @@ def tma_copy(
     if "eviction_policy" not in ann and eviction_policy is not None:
         eviction_policy_map = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
         ann["eviction_policy"] = eviction_policy_map[eviction_policy]
+    if "leader_thread_extent" not in ann and leader_thread_extent is not None:
+        ann["leader_thread_extent"] = int(leader_thread_extent)
     if "src_pe" not in ann and src_pe is not None:
         ann["src_pe"] = src_pe
     if "dst_pe" not in ann and dst_pe is not None:
