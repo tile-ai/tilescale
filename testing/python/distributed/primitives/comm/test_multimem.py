@@ -1,4 +1,5 @@
 """Small multimem all-reduce correctness test."""
+
 from __future__ import annotations
 
 import os

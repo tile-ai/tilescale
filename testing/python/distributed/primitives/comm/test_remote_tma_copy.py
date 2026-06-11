@@ -206,9 +206,7 @@ def test_remote_descriptor_tma_copy(local_rank: int, num_ranks: int):
     torch.cuda.synchronize()
     dist.barrier(group)
 
-    assert torch.allclose(expected_peer_half, out, atol=1e-6, rtol=1e-6), (
-        f"rank {rank}: remote descriptor TMA load mismatch"
-    )
+    assert torch.allclose(expected_peer_half, out, atol=1e-6, rtol=1e-6), f"rank {rank}: remote descriptor TMA load mismatch"
 
     torch.cuda.synchronize()
     dist.barrier(group)
@@ -216,9 +214,7 @@ def test_remote_descriptor_tma_copy(local_rank: int, num_ranks: int):
     torch.cuda.synchronize()
     dist.barrier(group)
 
-    assert torch.allclose(expected_peer_half, dst[:, : _N // 2], atol=1e-6, rtol=1e-6), (
-        f"rank {rank}: remote descriptor TMA store mismatch"
-    )
+    assert torch.allclose(expected_peer_half, dst[:, : _N // 2], atol=1e-6, rtol=1e-6), f"rank {rank}: remote descriptor TMA store mismatch"
     assert torch.allclose(torch.zeros_like(dst[:, _N // 2 :]), dst[:, _N // 2 :]), (
         f"rank {rank}: remote descriptor TMA store touched unwritten columns"
     )
@@ -264,9 +260,7 @@ def test_remote_simt_fallback_edge_tile(local_rank: int, num_ranks: int):
     src_refs = [torch.empty_like(src) for _ in range(num_ranks)]
     dist.all_gather(src_refs, src, group)
     expected = src_refs[rank ^ 1]
-    assert torch.allclose(expected, out, atol=1e-6, rtol=1e-6), (
-        f"rank {rank}: remote SIMT edge fallback mismatch"
-    )
+    assert torch.allclose(expected, out, atol=1e-6, rtol=1e-6), f"rank {rank}: remote SIMT edge fallback mismatch"
 
     dist.destroy_process_group()
 
@@ -330,9 +324,7 @@ def test_remote_tma_copy(local_rank: int, num_ranks: int):
     src_refs = [torch.empty_like(src) for _ in range(num_ranks)]
     dist.all_gather(src_refs, src, group)
     expected = src_refs[rank ^ 1]
-    assert torch.allclose(expected, out, atol=1e-6, rtol=1e-6), (
-        f"rank {rank}: remote TMA load mismatch"
-    )
+    assert torch.allclose(expected, out, atol=1e-6, rtol=1e-6), f"rank {rank}: remote TMA load mismatch"
 
     torch.cuda.synchronize()
     dist.barrier(group)
@@ -343,9 +335,7 @@ def test_remote_tma_copy(local_rank: int, num_ranks: int):
     src_refs = [torch.empty_like(src) for _ in range(num_ranks)]
     dist.all_gather(src_refs, src, group)
     expected = src_refs[rank ^ 1]
-    assert torch.allclose(expected, dst, atol=1e-6, rtol=1e-6), (
-        f"rank {rank}: remote TMA store mismatch"
-    )
+    assert torch.allclose(expected, dst, atol=1e-6, rtol=1e-6), f"rank {rank}: remote TMA store mismatch"
 
     torch.cuda.synchronize()
     dist.barrier(group)
@@ -356,9 +346,7 @@ def test_remote_tma_copy(local_rank: int, num_ranks: int):
     src_refs = [torch.empty_like(src) for _ in range(num_ranks)]
     dist.all_gather(src_refs, src, group)
     expected = src_refs[rank ^ 1]
-    assert torch.allclose(expected, simt_out, atol=1e-6, rtol=1e-6), (
-        f"rank {rank}: remote SIMT fallback mismatch"
-    )
+    assert torch.allclose(expected, simt_out, atol=1e-6, rtol=1e-6), f"rank {rank}: remote SIMT fallback mismatch"
 
     dist.destroy_process_group()
 

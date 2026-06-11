@@ -5,7 +5,7 @@ from __future__ import annotations
 import tvm.tirx.script.parser as T
 from tilelang._typing import BufferLikeType, BufferLikeTypeTuple, BarrierType, DType
 from tilelang import tvm as tvm
-from tilelang.language import ptx_arrive_barrier, evaluate, address_of
+from tilelang.language import ptx_arrive_barrier, evaluate
 from tilelang.language.eager.builder import macro
 from tilelang.language.kernel import get_thread_bindings, get_block_extents
 from tilelang.language.distributed.comm import atom_add, ld, st  # noqa: F401
@@ -326,7 +326,7 @@ def create_remote_tma_descriptor(*args):
     host/runtime side remaps the descriptor base pointer through the distributed
     symmetric allocation table before encoding the CUtensorMap.
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.create_remote_tma_descriptor"), *args)
+    return tirx.call_intrin("handle", tirx.op.Op.get("tl.create_remote_tma_descriptor"), *args)
 
 
 def tma_load(*args):

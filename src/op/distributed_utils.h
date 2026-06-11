@@ -16,9 +16,7 @@ namespace tl {
 
 using namespace tirx;
 
-inline PrimExpr RemotePESentinel() {
-  return IntImm(DataType::Int(64), -1);
-}
+inline PrimExpr RemotePESentinel() { return IntImm(DataType::Int(64), -1); }
 
 inline bool IsRemotePE(const PrimExpr &pe) {
   if (const auto *int_pe = pe.as<IntImmNode>()) {

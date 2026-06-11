@@ -145,8 +145,7 @@ struct SharedMemoryDriverAPI {
 #define cuMulticastGetGranularity                                              \
   SharedMemoryDriverAPI::Get()->cuMulticastGetGranularity_
 #define cuMulticastCreate SharedMemoryDriverAPI::Get()->cuMulticastCreate_
-#define cuMulticastAddDevice                                                   \
-  SharedMemoryDriverAPI::Get()->cuMulticastAddDevice_
+#define cuMulticastAddDevice SharedMemoryDriverAPI::Get()->cuMulticastAddDevice_
 #define cuMulticastBindMem SharedMemoryDriverAPI::Get()->cuMulticastBindMem_
 
 } // namespace
@@ -235,8 +234,8 @@ static bool can_create_multicast_object(int device_count) {
                                         CU_MEM_HANDLE_TYPE_FABRIC, 0);
   if (result == CUDA_SUCCESS) {
     CUmemGenericAllocationHandle imported_handle;
-    result = cuMemImportFromShareableHandle(
-        &imported_handle, &fabric_handle, CU_MEM_HANDLE_TYPE_FABRIC);
+    result = cuMemImportFromShareableHandle(&imported_handle, &fabric_handle,
+                                            CU_MEM_HANDLE_TYPE_FABRIC);
     if (result == CUDA_SUCCESS) {
       ok = cuMemRelease(imported_handle) == CUDA_SUCCESS;
     }

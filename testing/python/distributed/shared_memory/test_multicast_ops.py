@@ -4,6 +4,7 @@ Multicast (NVSwitch SHARP) shared-memory operations.
 Single-GPU tests run directly under pytest.
 Multi-GPU tests use torch.multiprocessing.spawn and require >= 2 GPUs.
 """
+
 from __future__ import annotations
 
 import os
@@ -37,13 +38,16 @@ def _multimem_reduce_kernel():
 
     return main
 
+
 # ---------------------------------------------------------------------------
 # Single-GPU tests
 # ---------------------------------------------------------------------------
 
+
 @tilelang.testing.requires_cuda
 def test_supports_multicast():
     from tilelang.distributed.shared_memory import _supports_multicast
+
     result = _supports_multicast()
     assert isinstance(result, bool)
 
@@ -51,6 +55,7 @@ def test_supports_multicast():
 # ---------------------------------------------------------------------------
 # Multi-GPU worker functions (called by spawn)
 # ---------------------------------------------------------------------------
+
 
 @distributed_test(nprocs=None, require_multicast=True)
 def test_distributed_multicast_allocator(local_rank: int, num_ranks: int):

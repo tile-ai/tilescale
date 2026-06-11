@@ -1239,8 +1239,7 @@ static Stmt RewritePreludeTmaProducerStmt(const Stmt &stmt,
   return rewriter.Rewrite(stmt);
 }
 
-static Stmt RewriteTmaProducerStmt(const Stmt &stmt,
-                                   const Buffer &barrier_buf,
+static Stmt RewriteTmaProducerStmt(const Stmt &stmt, const Buffer &barrier_buf,
                                    PrimExpr barrier_id, bool emit_arrive) {
   class TmaProducerStmtRewriter : public StmtExprMutator {
   public:
@@ -1274,9 +1273,8 @@ static Stmt RewriteTmaProducerStmt(const Stmt &stmt,
         Call new_call = Downcast<Call>(rewritten_call);
         auto annotations = new_call->annotations;
         annotations.Set("emit_arrive", IntImm(DataType::Int(32), 1));
-        rewritten_call =
-            Call(new_call->dtype, new_call->op, new_call->args, annotations,
-                 new_call->span);
+        rewritten_call = Call(new_call->dtype, new_call->op, new_call->args,
+                              annotations, new_call->span);
       }
       ++num_rewritten_;
       return rewritten_call;
@@ -1477,9 +1475,8 @@ private:
     PrimExpr linear_idx = loop_var - loop_min;
     PrimExpr outer_linear_idx = IntImm(DataType::Int(32), 0);
     for (const For &outer_loop : enclosing_loops) {
-      outer_linear_idx =
-          outer_linear_idx * outer_loop->extent +
-          (outer_loop->loop_var - outer_loop->min);
+      outer_linear_idx = outer_linear_idx * outer_loop->extent +
+                         (outer_loop->loop_var - outer_loop->min);
     }
     PrimExpr global_linear_idx = outer_linear_idx * loop_extent + linear_idx;
 
@@ -1774,9 +1771,10 @@ private:
     std::vector<Array<Stmt>> prelude_waits_before_consumer(
         consumer_compute_stmts.size());
     PrimExpr prelude_wait_guard =
-        needs_phase_counter ? EQ(consumer_phase_counter.value().Load(),
-                                 IntImm(DataType::Int(32), 0))
-                            : EQ(global_linear_idx, IntImm(DataType::Int(32), 0));
+        needs_phase_counter
+            ? EQ(consumer_phase_counter.value().Load(),
+                 IntImm(DataType::Int(32), 0))
+            : EQ(global_linear_idx, IntImm(DataType::Int(32), 0));
     int prelude_barrier_base = num_fwd + num_bp;
     for (size_t i = 0; i < prelude_tma_plans.size(); ++i) {
       PrimExpr barrier_id = IntImm(DataType::Int(32), prelude_barrier_base + i);

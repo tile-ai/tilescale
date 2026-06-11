@@ -270,10 +270,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         )
         if local_rank == 0:
             algo_bw, hw_bw = _bandwidth_gbs(args.N * dtype_bytes, tl_t, num_local_ranks, "two_shot")
-            print(
-                f"tilelang {strategy_name} allreduce time: {tl_t * 1000:.2f} us, "
-                f"algo BW: {algo_bw:.2f} GB/s, HW BW: {hw_bw:.2f} GB/s"
-            )
+            print(f"tilelang {strategy_name} allreduce time: {tl_t * 1000:.2f} us, algo BW: {algo_bw:.2f} GB/s, HW BW: {hw_bw:.2f} GB/s")
 
     if one_shot_kernel is not None:
         run_one_shot()
@@ -284,10 +281,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         tl_t = do_bench(run_one_shot, warmup=args.warmup, rep=args.rep, group=group)
         if local_rank == 0:
             algo_bw, hw_bw = _bandwidth_gbs(args.N * dtype_bytes, tl_t, num_local_ranks, "one_shot")
-            print(
-                f"tilelang one_shot allreduce time: {tl_t * 1000:.2f} us, "
-                f"algo BW: {algo_bw:.2f} GB/s, HW BW: {hw_bw:.2f} GB/s"
-            )
+            print(f"tilelang one_shot allreduce time: {tl_t * 1000:.2f} us, algo BW: {algo_bw:.2f} GB/s, HW BW: {hw_bw:.2f} GB/s")
 
     if two_shot_kernel is not None:
         bench_two_shot_variant("two_shot", run_two_shot)

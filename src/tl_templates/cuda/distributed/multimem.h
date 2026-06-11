@@ -88,10 +88,11 @@ template <> struct LdReduceV4<ReduceOp::ADD, bfloat16_t> {
 #pragma unroll
     for (int i = 0; i < 2; i++) {
       uint32_t ret;
-      asm volatile("multimem.ld_reduce.weak.global.add.acc::f32.bf16x2 %0, [%1];"
-                   : "=r"(ret)
-                   : "l"(mc + i * 4)
-                   : "memory");
+      asm volatile(
+          "multimem.ld_reduce.weak.global.add.acc::f32.bf16x2 %0, [%1];"
+          : "=r"(ret)
+          : "l"(mc + i * 4)
+          : "memory");
       dst_u32[i] = ret;
     }
   }
@@ -432,10 +433,11 @@ template <> struct LdReduceV8<ReduceOp::ADD, bfloat16_t> {
 #pragma unroll
     for (int i = 0; i < 4; i++) {
       uint32_t ret;
-      asm volatile("multimem.ld_reduce.weak.global.add.acc::f32.bf16x2 %0, [%1];"
-                   : "=r"(ret)
-                   : "l"(mc + i * 4)
-                   : "memory");
+      asm volatile(
+          "multimem.ld_reduce.weak.global.add.acc::f32.bf16x2 %0, [%1];"
+          : "=r"(ret)
+          : "l"(mc + i * 4)
+          : "memory");
       dst_u32[i] = ret;
     }
   }

@@ -12,9 +12,7 @@ from reduce_scatter_utils import reduce_scatter_2d_op, create_reduce_scater_2d_c
 
 
 @tilelang.jit(compile_once=True)
-def gemm_kernel(
-    M, N, K, num_local_rank, block_M, block_N, block_K, threads, persistent=False, dtype=T.float16, accum_dtype=T.float32
-):
+def gemm_kernel(M, N, K, num_local_rank, block_M, block_N, block_K, threads, persistent=False, dtype=T.float16, accum_dtype=T.float32):
     M_per_rank = T.ceildiv(M, num_local_rank)
     GROUP_SIZE_M = 8
 

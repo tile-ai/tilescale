@@ -42,7 +42,7 @@ def gemm_rs_specialized_kernel(
     waves = T.ceildiv(total_tiles, sm_num)
     accum_dtype = T.float32
 
-    store_block_M = block_M // 2   # avoid SMEM spill when #stages = 4
+    store_block_M = block_M // 2  # avoid SMEM spill when #stages = 4
 
     def tile_coords(tile_id, local_rank):
         rotation = ((local_rank + 1) * blocks_per_rank * n_blocks) % total_tiles
@@ -74,7 +74,7 @@ def gemm_rs_specialized_kernel(
         by = by_expr
         bx = bx_expr
         return by, bx
-        
+
     @T.prim_func
     def main(
         A: T.Tensor((M, K_per_rank), dtype),
@@ -158,6 +158,7 @@ def gemm_rs_specialized_kernel(
                                 dst_pe=dst_rank,
                             )
                     T.sync_threads(0, threads)
+
     return main
 
 

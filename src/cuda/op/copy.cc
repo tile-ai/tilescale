@@ -358,8 +358,7 @@ private:
     PrimExpr addr = RemapRemoteAddress(
         MakeRemappedAddress(T_, src_, load->indices), src_pe_);
     return Call(load.dtype(), builtin::call_extern(),
-                {StringImm("tl::remote_load"), addr,
-                 make_zero(load.dtype())});
+                {StringImm("tl::remote_load"), addr, make_zero(load.dtype())});
   }
 
   Stmt VisitStmt_(const BufferStoreNode *op) final {
@@ -391,13 +390,8 @@ Stmt LowerRemoteSIMTElementwise(const CopyNode &op, const LowerArgs &T,
   std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
                                     InferLevel::kFree};
   for (auto level : levels) {
-    par_op->InferLayout({T.target,
-                         T.thread_bounds,
-                         T.layout_map,
-                         analyzer,
-                         false,
-                         T.buffer_remap,
-                         T.bind_var_to_expr},
+    par_op->InferLayout({T.target, T.thread_bounds, T.layout_map, analyzer,
+                         false, T.buffer_remap, T.bind_var_to_expr},
                         level);
   }
   auto loop_layout = par_op->GetLoopLayout();
@@ -977,10 +971,9 @@ Stmt Copy::Lower(const CopyNode &op, const LowerArgs &T,
   PrimExpr src_pe = GetRemotePEAnnotation(op, "src_pe");
   PrimExpr dst_pe = GetRemotePEAnnotation(op, "dst_pe");
   bool has_remote_pe = IsRemotePE(src_pe) || IsRemotePE(dst_pe);
-  bool is_tma_copy = copy_inst == CopyInst::kBulkLoad ||
-                     copy_inst == CopyInst::kBulkStore ||
-                     copy_inst == CopyInst::kBulkLoad1D ||
-                     copy_inst == CopyInst::kBulkStore1D;
+  bool is_tma_copy =
+      copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkStore ||
+      copy_inst == CopyInst::kBulkLoad1D || copy_inst == CopyInst::kBulkStore1D;
   ICHECK(!has_remote_pe || !GetIsTmaCopy(op) || is_tma_copy)
       << "T.tma_copy with src_pe or dst_pe requires TMA lowering; got "
       << CopyInstToString(copy_inst);
@@ -1891,11 +1884,11 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
       desc.rank = 5;
       desc.global_shape = {swizzle_elements_expr, rows, col_groups, one_i64,
                            one_i64};
-      desc.global_stride = {
-          TMABytesFromElements(IntImm(DataType::Int(64), 1),
-                               global_tensor->dtype),
-          row_stride_bytes, IntImm(DataType::Int(64), swizzle_bytes),
-          matrix_bytes, matrix_bytes};
+      desc.global_stride = {TMABytesFromElements(IntImm(DataType::Int(64), 1),
+                                                 global_tensor->dtype),
+                            row_stride_bytes,
+                            IntImm(DataType::Int(64), swizzle_bytes),
+                            matrix_bytes, matrix_bytes};
       desc.smem_box = {
           swizzle_elements_expr,
           IntImm(DataType::Int(64), *tile_rows),
@@ -2003,8 +1996,8 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
         *inner_box_dim, instruction_dim, is_load, tma_op, barrier_base_id,
         mbar_handle, GetEvictionPolicy(op), tma_ann, remote_pe);
   } else {
-    Call create_descriptor =
-        Call(DataType::Handle(), create_tma_descriptor(), desc.EncodeCallArgs());
+    Call create_descriptor = Call(DataType::Handle(), create_tma_descriptor(),
+                                  desc.EncodeCallArgs());
     Array<PrimExpr> args;
     args.reserve(desc.rank + 4);
     args.push_back(create_descriptor);
@@ -2042,9 +2035,8 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
         args.push_back(need_reduce);
       }
       args.push_back(GetEvictionPolicy(op));
-      tma_copy =
-          For(loop_var, 0, loop_extent, ForKind::kUnrolled,
-              Evaluate(Call(DataType::Handle(), tma_op, args, tma_ann)));
+      tma_copy = For(loop_var, 0, loop_extent, ForKind::kUnrolled,
+                     Evaluate(Call(DataType::Handle(), tma_op, args, tma_ann)));
 
       if (use_multicast) {
         Array<PrimExpr> mc_args = build_multicast_args(args);
@@ -2065,9 +2057,9 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
                        multicast_copy, regular_or_noop);
       }
     } else {
-      PrimExpr shared_addr = shared_tensor.access_ptr(
-          is_load ? 2 : 1, DataType::Handle(), 1, shared_offset,
-          total_elements);
+      PrimExpr shared_addr =
+          shared_tensor.access_ptr(is_load ? 2 : 1, DataType::Handle(), 1,
+                                   shared_offset, total_elements);
       args.push_back(shared_addr);
       for (auto coord : global_coords) {
         args.push_back(coord);
@@ -2159,9 +2151,9 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
       producer_seq.push_back(barrier_after_tma_stmt.value());
     }
 
-    Stmt producer = IfThenElse(
-        MakeTmaLeaderCondition(GetTmaLeaderThreadExtent(op, T)),
-        SeqStmt(producer_seq));
+    Stmt producer =
+        IfThenElse(MakeTmaLeaderCondition(GetTmaLeaderThreadExtent(op, T)),
+                   SeqStmt(producer_seq));
 
     if (GetIsTmaCopy(op)) {
       return producer;
@@ -2174,8 +2166,8 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     return SeqStmt({producer, wait_stmt});
   }
 
-  tma_copy = IfThenElse(
-      MakeTmaLeaderCondition(GetTmaLeaderThreadExtent(op, T)), tma_copy);
+  tma_copy = IfThenElse(MakeTmaLeaderCondition(GetTmaLeaderThreadExtent(op, T)),
+                        tma_copy);
 
   return tma_copy;
 }
@@ -2467,9 +2459,9 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
       producer_seq.push_back(barrier_after_tma_stmt.value());
     }
 
-    Stmt producer = IfThenElse(
-        MakeTmaLeaderCondition(GetTmaLeaderThreadExtent(op, T)),
-        SeqStmt(producer_seq));
+    Stmt producer =
+        IfThenElse(MakeTmaLeaderCondition(GetTmaLeaderThreadExtent(op, T)),
+                   SeqStmt(producer_seq));
 
     if (GetIsTmaCopy(op)) {
       return producer;
@@ -2482,8 +2474,8 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
     return SeqStmt({producer, wait_stmt});
   }
 
-  tma_copy = IfThenElse(
-      MakeTmaLeaderCondition(GetTmaLeaderThreadExtent(op, T)), tma_copy);
+  tma_copy = IfThenElse(MakeTmaLeaderCondition(GetTmaLeaderThreadExtent(op, T)),
+                        tma_copy);
   return tma_copy;
 }
 

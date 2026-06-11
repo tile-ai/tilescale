@@ -1,4 +1,5 @@
 """Small distributed remote-copy correctness test."""
+
 from __future__ import annotations
 
 import os

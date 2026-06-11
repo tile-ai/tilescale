@@ -1,4 +1,5 @@
 """Tests for distributed compile_once coordination."""
+
 from __future__ import annotations
 
 import os

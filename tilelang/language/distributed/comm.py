@@ -69,14 +69,10 @@ def ld(
 ):
     """Load a value from an address with explicit PTX scope and semantic."""
     assert scope in ["cta", "gpu", "sys"], "Scope must be one of 'cta', 'gpu', or 'sys'."
-    assert sem in ["weak", "volatile", "acquire", "relaxed"], (
-        "Semantic must be one of 'weak', 'volatile', 'acquire', or 'relaxed'."
-    )
+    assert sem in ["weak", "volatile", "acquire", "relaxed"], "Semantic must be one of 'weak', 'volatile', 'acquire', or 'relaxed'."
     scope_id = {"cta": 0, "gpu": 1, "sys": 2}[scope]
     sem_id = {"weak": 0, "volatile": 1, "acquire": 2, "release": 3, "relaxed": 4}[sem]
-    return tirx.call_intrin(
-        "handle", tirx.op.Op.get("tl.tileop.ld"), address_of(src), value, sem_id, scope_id, int(na), int(nc), src_pe
-    )
+    return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.ld"), address_of(src), value, sem_id, scope_id, int(na), int(nc), src_pe)
 
 
 def st(
@@ -89,9 +85,7 @@ def st(
 ):
     """Store a value to an address with explicit PTX scope and semantic."""
     assert scope in ["cta", "gpu", "sys"], "Scope must be one of 'cta', 'gpu', or 'sys'."
-    assert sem in ["weak", "volatile", "release", "relaxed"], (
-        "Semantic must be one of 'weak', 'volatile', 'release', or 'relaxed'."
-    )
+    assert sem in ["weak", "volatile", "release", "relaxed"], "Semantic must be one of 'weak', 'volatile', 'release', or 'relaxed'."
     scope_id = {"cta": 0, "gpu": 1, "sys": 2}[scope]
     sem_id = {"weak": 0, "volatile": 1, "acquire": 2, "release": 3, "relaxed": 4}[sem]
     return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.st"), address_of(dst), value, sem_id, scope_id, int(na), dst_pe)
@@ -100,7 +94,5 @@ def st(
 def atom_add(target: PrimExpr, value: PrimExpr, scope: str = "gpu", sem: str = "relaxed"):
     """Perform a scoped uint32 atomic add and return the previous value."""
     assert scope in ["gpu", "sys"], "Scope must be one of 'gpu', or 'sys'."
-    assert sem in ["relaxed", "acquire", "release", "acq_rel"], (
-        "Semantic must be one of 'relaxed', 'acquire', 'release', or 'acq_rel'."
-    )
+    assert sem in ["relaxed", "acquire", "release", "acq_rel"], "Semantic must be one of 'relaxed', 'acquire', 'release', or 'acq_rel'."
     return tirx.call_intrin("uint32", tirx.op.Op.get("tl.atom_add"), address_of(target), value, sem, scope)

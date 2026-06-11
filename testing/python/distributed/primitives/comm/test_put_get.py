@@ -6,6 +6,7 @@ ops via the test names reported by the worker.
 
 Requirements: >= 2 GPUs, compute >= 9.0, TILELANG_USE_DISTRIBUTED=1.
 """
+
 from __future__ import annotations
 
 import os
@@ -29,6 +30,7 @@ _THREADS = 128
 # Kernel definitions
 # ---------------------------------------------------------------------------
 
+
 def _kernel_get_block(M, num_rank, block_M, threads):
     @T.prim_func
     def main(dst: T.Tensor((M), "float32"), src: T.Tensor((M), "float32")):
@@ -42,6 +44,7 @@ def _kernel_get_block(M, num_rank, block_M, threads):
                 src_pe=rank[0] ^ 1,
             )
             T.fence_sys()
+
     return main
 
 
@@ -62,6 +65,7 @@ def _kernel_get_warp(M, num_rank, block_M, threads):
                 unroll_factor=4,
             )
             T.fence_sys()
+
     return main
 
 
@@ -77,6 +81,7 @@ def _kernel_put_block(M, num_rank, block_M, threads):
                 size=block_M,
                 dst_pe=rank[0] ^ 1,
             )
+
     return main
 
 
@@ -96,6 +101,7 @@ def _kernel_put_warp(M, num_rank, block_M, threads):
                 dst_pe=rank[0] ^ 1,
                 unroll_factor=4,
             )
+
     return main
 
 
@@ -110,6 +116,7 @@ for _fn in _KERNEL_FNS:
 # ---------------------------------------------------------------------------
 # Worker: runs all four kernel tests in one spawn session
 # ---------------------------------------------------------------------------
+
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 @distributed_test()
@@ -149,9 +156,7 @@ def test_put_get(local_rank: int, num_ranks: int):
         dist.all_gather(dst_refs, src, group)
         expected = dst_refs[local_rank ^ 1]
 
-        assert torch.allclose(expected, dst, atol=1e-6, rtol=1e-6), (
-            f"rank {local_rank}: {name} mismatch"
-        )
+        assert torch.allclose(expected, dst, atol=1e-6, rtol=1e-6), f"rank {local_rank}: {name} mismatch"
 
     dist.destroy_process_group()
 

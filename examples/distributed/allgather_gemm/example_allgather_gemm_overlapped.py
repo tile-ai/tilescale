@@ -24,6 +24,8 @@ from tilelang.distributed.bench import do_bench
 os.environ.setdefault("NCCL_DEBUG", "ERROR")  # silence NCCL log
 tilelang.set_log_level(logging.WARNING)
 
+tilelang.disable_cache()
+
 
 @tilelang.jit(
     pass_configs={

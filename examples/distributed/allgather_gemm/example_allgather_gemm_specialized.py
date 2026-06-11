@@ -15,7 +15,8 @@ from tilelang.distributed.host import init_dist
 from tilelang.distributed.allocator import get_allocator
 
 os.environ.setdefault("NCCL_DEBUG", "ERROR")
-tilelang.enable_cache()
+tilelang.disable_cache()
+
 
 @tilelang.jit(
     pass_configs={
@@ -147,21 +148,35 @@ def ag_gemm_sm_specialized_kernel(
                         tile_id = bid + w * num_comp_sms
                         if tile_id < total_tiles:
                             is_local_by, by_expr, _, _ = tile_coords(tile_id, local_rank)
-                            load_by, load_bx, load_local_by = materialized_tile_coords(
-                                tile_id, local_rank
-                            )
+                            load_by, load_bx, load_local_by = materialized_tile_coords(tile_id, local_rank)
                             if not is_local_by:
                                 T.wait_ge(local_signal[by_expr // 2], comm_workers_per_signal)
 
                             T.clear(C_local)
                             for k in T.Pipelined(k_blocks, num_stages=pipeline_stages):
                                 if is_local_by:
-                                    T.copy(A_local[load_local_by * block_M, k * block_K,], A_comp_shared)
+                                    T.copy(
+                                        A_local[
+                                            load_local_by * block_M,
+                                            k * block_K,
+                                        ],
+                                        A_comp_shared,
+                                    )
                                 else:
                                     T.copy(
-                                        gathered_A[load_by * block_M, k * block_K,], A_comp_shared)
+                                        gathered_A[
+                                            load_by * block_M,
+                                            k * block_K,
+                                        ],
+                                        A_comp_shared,
+                                    )
                                 T.copy(
-                                    B[k * block_K, load_bx * block_N,], B_comp_shared)
+                                    B[
+                                        k * block_K,
+                                        load_bx * block_N,
+                                    ],
+                                    B_comp_shared,
+                                )
                                 T.gemm(A_comp_shared, B_comp_shared, C_local)
                             store_by, store_bx = materialized_global_tile_coords(tile_id, local_rank)
                             if use_tma_store:
@@ -179,7 +194,13 @@ def ag_gemm_sm_specialized_kernel(
                                     )
                                     T.sync_threads(0, threads)
                             else:
-                                T.copy(C_local, C[store_by * block_M, store_bx * block_N,])
+                                T.copy(
+                                    C_local,
+                                    C[
+                                        store_by * block_M,
+                                        store_bx * block_N,
+                                    ],
+                                )
             else:
                 with T.sm_specialize_scope(auto_ws=False):
                     A_comm_shared = T.alloc_shared((comm_chunks, comm_block_M, comm_block_K), dtype)
@@ -193,9 +214,7 @@ def ag_gemm_sm_specialized_kernel(
                         # an independent TMA load/store pair into its own shared
                         # buffer and mbarrier.
                         for local_task_iter in T.serial(T.ceildiv(comm_tasks_per_rank, num_comm_sms * comm_chunks)):
-                            local_task_id = (
-                                (local_task_iter * num_comm_sms + comm_sm_id) * comm_chunks + comm_chunk
-                            )
+                            local_task_id = (local_task_iter * num_comm_sms + comm_sm_id) * comm_chunks + comm_chunk
                             if local_task_id < comm_tasks_per_rank:
                                 local_comm_by = local_task_id // comm_k_blocks
                                 k = local_task_id - local_comm_by * comm_k_blocks
@@ -223,9 +242,8 @@ def ag_gemm_sm_specialized_kernel(
                                     leader_thread_extent=32,
                                 )
                                 T.tma_store_wait(0, False)
-                                if k + num_comm_sms * comm_chunks >= comm_k_blocks:
-                                    if lane_id == 0:
-                                        T.multimem_signal_add(mcast_signal[global_comm_by], 1)
+                                if k + num_comm_sms * comm_chunks >= comm_k_blocks and lane_id == 0:
+                                    T.multimem_signal_add(mcast_signal[global_comm_by], 1)
 
     return main
 
@@ -283,7 +301,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     M_per_rank = M // num_local_ranks
     N_per_rank = N // num_local_ranks
-    m_blocks = M // block_M
+    # m_blocks = M // block_M
     signal_blocks = (M + block_M * 2 - 1) // (block_M * 2)
 
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)

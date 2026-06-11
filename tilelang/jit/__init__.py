@@ -219,9 +219,7 @@ def _cached_compile(
     root_status = statuses[compile_root]
     if root_status is None or not root_status["ok"]:
         root_traceback = None if root_status is None else root_status["traceback"]
-        raise RuntimeError(
-            f"compile_once root group rank {compile_root} failed during compilation:\n{root_traceback}"
-        )
+        raise RuntimeError(f"compile_once root group rank {compile_root} failed during compilation:\n{root_traceback}")
 
     if rank == compile_root:
         return kernel

@@ -13,9 +13,7 @@ def _apply_merge(func, enable_aggressive_merge: bool = True) -> str:
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     with target:
         mod = tvm.tirx.transform.BindTarget(target)(mod)
-        mod = tilelang.transform.MergeSharedMemoryAllocations(
-            enable_aggressive_merge=enable_aggressive_merge
-        )(mod)
+        mod = tilelang.transform.MergeSharedMemoryAllocations(enable_aggressive_merge=enable_aggressive_merge)(mod)
     return mod.script(show_meta=False)
 
 
@@ -28,9 +26,7 @@ def _apply_merge_after_alloc_lowering(func, enable_aggressive_merge: bool = True
         mod = tilelang.transform.HoistGlobalBufferAllocations()(mod)
         mod = tilelang.transform.LowerOpaqueBlock()(mod)
         mod = tilelang.transform.FlattenBuffer()(mod)
-        mod = tilelang.transform.MergeSharedMemoryAllocations(
-            enable_aggressive_merge=enable_aggressive_merge
-        )(mod)
+        mod = tilelang.transform.MergeSharedMemoryAllocations(enable_aggressive_merge=enable_aggressive_merge)(mod)
     return mod.script(show_meta=False)
 
 
@@ -128,6 +124,7 @@ def test_mutually_exclusive_branches_still_reuse_shared_memory():
     source = _apply_merge(_make_branch_reuse_kernel())
     assert _shared_alloc(65536) in source
     assert _shared_alloc(98304) not in source
+
 
 if __name__ == "__main__":
     test_aggressive_merge_uses_statement_level_shared_liveness()

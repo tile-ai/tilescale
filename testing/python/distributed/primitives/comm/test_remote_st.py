@@ -2,6 +2,7 @@
 
 Requirements: >= 2 GPUs, compute >= 9.0, TILELANG_USE_DISTRIBUTED=1.
 """
+
 from __future__ import annotations
 
 import os
@@ -69,9 +70,7 @@ def test_remote_st(local_rank: int, num_ranks: int):
     dist.all_gather(src_refs, src, group)
     expected = src_refs[rank ^ 1]
 
-    assert torch.allclose(expected, dst, atol=1e-6, rtol=1e-6), (
-        f"rank {rank}: remote T.st mismatch"
-    )
+    assert torch.allclose(expected, dst, atol=1e-6, rtol=1e-6), f"rank {rank}: remote T.st mismatch"
 
     dist.destroy_process_group()
 

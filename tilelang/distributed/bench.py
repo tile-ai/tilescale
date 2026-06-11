@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from typing import Callable, Literal
-
+from typing import Literal
+from collections.abc import Callable
+import numpy as np
 import torch
 import torch.distributed as dist
 
@@ -17,12 +18,12 @@ def _resolve_bench_group(group):
 
 
 def _reduce_benchmark_times(
-    times: "np.ndarray",
+    times: np.ndarray,
     *,
     group=None,
     aggregate: Literal["max", "mean", "min", "none"] = "max",
     device: str | torch.device = "cuda",
-) -> "np.ndarray":
+) -> np.ndarray:
     if aggregate == "none" or not _dist_ready():
         return times
 

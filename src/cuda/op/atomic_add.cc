@@ -97,8 +97,8 @@ Call MakeDescriptorCall(const TMADesc &desc, Optional<PrimExpr> dst_pe) {
 
 Stmt MakeTMAReduceStmt(const TMADesc &desc, const Buffer &shared_tensor,
                        PrimExpr shared_offset, PrimExpr total_elements,
-                       Array<PrimExpr> global_coords,
-                       int inner_box_dim, int instruction_dim,
+                       Array<PrimExpr> global_coords, int inner_box_dim,
+                       int instruction_dim,
                        const Map<String, ObjectRef> &op_annotations,
                        Optional<PrimExpr> dst_pe) {
   Call create_descriptor = MakeDescriptorCall(desc, dst_pe);
@@ -121,9 +121,9 @@ Stmt MakeTMAReduceStmt(const TMADesc &desc, const Buffer &shared_tensor,
     }
     args.push_back(1);
     args.push_back(0);
-    return For(loop_var, 0, loop_extent, ForKind::kUnrolled,
-               Evaluate(Call(DataType::Handle(), tma_store(), args,
-                             op_annotations)));
+    return For(
+        loop_var, 0, loop_extent, ForKind::kUnrolled,
+        Evaluate(Call(DataType::Handle(), tma_store(), args, op_annotations)));
   }
 
   Array<PrimExpr> args;
@@ -552,9 +552,9 @@ struct AtomicAdd {
     seq.reserve(3);
     seq.push_back(tma_reduce);
     seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_arrive(), {})));
-    seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_wait(),
-                                {IntImm(DataType::Int(32), 0),
-                                 Bool(!tma_wait_complete)})));
+    seq.push_back(Evaluate(
+        Call(DataType::Handle(), tma_store_wait(),
+             {IntImm(DataType::Int(32), 0), Bool(!tma_wait_complete)})));
     return IfThenElse(EQ(T.thread_var, T.thread_bounds->min),
                       SeqStmt(std::move(seq)));
   }

@@ -67,9 +67,8 @@ std::optional<DataType> GetAccessPtrElementType(const PrimExpr &expr) {
 std::string RemapRemotePointerExpr(const std::string &ptr_expr,
                                    const std::string &pe_expr) {
   return "reinterpret_cast<decltype(" + ptr_expr +
-         ")>(tl::get_remote_base_ptr(" + pe_expr +
-         ") + (tl::get_uintptr_t(" + ptr_expr +
-         ") - tl::get_remote_base_ptr(tl::get_rank())))";
+         ")>(tl::get_remote_base_ptr(" + pe_expr + ") + (tl::get_uintptr_t(" +
+         ptr_expr + ") - tl::get_remote_base_ptr(tl::get_rank())))";
 }
 
 std::optional<PrimExpr> GetDstPEAnnotation(const CallNode *op) {
@@ -1999,8 +1998,7 @@ void CodeGenTileLangCUDA::PrintCallExtern(Type ret_type, String global_symbol,
                                           bool skip_first_arg,
                                           std::ostream &os) { // NOLINT(*)
   static constexpr char kMultimemPrefix[] = "tl::multimem::";
-  static constexpr size_t kMultimemPrefixLen =
-      sizeof(kMultimemPrefix) - 1;
+  static constexpr size_t kMultimemPrefixLen = sizeof(kMultimemPrefix) - 1;
   if (global_symbol.size() >= static_cast<size_t>(kMultimemPrefixLen) &&
       std::strncmp(global_symbol.data(), kMultimemPrefix, kMultimemPrefixLen) ==
           0) {

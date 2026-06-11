@@ -1,4 +1,5 @@
 """Tests for distributed T.wait_eq + remote T.st signaling."""
+
 from __future__ import annotations
 
 import os

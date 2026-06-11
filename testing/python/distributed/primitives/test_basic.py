@@ -5,6 +5,7 @@ module import time so children load from disk cache.
 
 Requirements: >= 2 GPUs, compute >= 9.0, TILELANG_USE_DISTRIBUTED=1.
 """
+
 from __future__ import annotations
 
 import os
@@ -26,6 +27,7 @@ _THREADS = 32
 # Kernel definitions
 # ---------------------------------------------------------------------------
 
+
 def _kernel_get_rank():
     @T.prim_func
     def main(out: T.Tensor((1,), T.uint64)):
@@ -34,6 +36,7 @@ def _kernel_get_rank():
             rank[0] = T.get_rank()
             if T.get_thread_binding(0) == 0:
                 out[0] = rank[0]
+
     return main
 
 
@@ -45,6 +48,7 @@ def _kernel_get_num_ranks():
             num_ranks[0] = T.get_num_ranks()
             if T.get_thread_binding(0) == 0:
                 out[0] = num_ranks[0]
+
     return main
 
 
@@ -92,13 +96,9 @@ def test_basic(local_rank: int, num_local_ranks: int):
         out_cpu = out.cpu()
 
         if name == "get_rank":
-            assert out_cpu[0].item() == local_rank, (
-                f"rank {local_rank}: get_rank() = {out_cpu[0].item()}, expected {local_rank}"
-            )
+            assert out_cpu[0].item() == local_rank, f"rank {local_rank}: get_rank() = {out_cpu[0].item()}, expected {local_rank}"
         else:
-            assert out_cpu[0].item() == num_ranks, (
-                f"rank {local_rank}: get_num_ranks() = {out_cpu[0].item()}, expected {num_ranks}"
-            )
+            assert out_cpu[0].item() == num_ranks, f"rank {local_rank}: get_num_ranks() = {out_cpu[0].item()}, expected {num_ranks}"
 
     dist.destroy_process_group()
 

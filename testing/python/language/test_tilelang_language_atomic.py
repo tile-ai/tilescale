@@ -211,9 +211,7 @@ def test_tma_atomic_add():
     assert "desc" in kernel.get_kernel_source()  # Ensure using cp.reduce.async.bulk.tensor
     assert "tl::tma_store_wait<0, true>();" in kernel.get_kernel_source()
 
-    kernel_with_complete_wait = tma_atomic_add_program.compile(
-        out=T.Tensor[(16, 16), T.float32], tma_wait_complete=True
-    )
+    kernel_with_complete_wait = tma_atomic_add_program.compile(out=T.Tensor[(16, 16), T.float32], tma_wait_complete=True)
     assert "tl::tma_store_wait<0, false>();" in kernel_with_complete_wait.get_kernel_source()
 
     kernel_with_explicit_swizzle = tma_atomic_add_program.compile(out=T.Tensor[(16, 16), T.float32], explicit_swizzle=True)

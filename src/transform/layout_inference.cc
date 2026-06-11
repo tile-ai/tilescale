@@ -989,8 +989,7 @@ private:
               thread_bounds_override_extent_ = producer_extent;
               IRVisitorWithAnalyzer::VisitStmt(if_node->then_case);
 
-              thread_bounds_override_min_ =
-                  IntImm(thread_var_->var.dtype(), 0);
+              thread_bounds_override_min_ = IntImm(thread_var_->var.dtype(), 0);
               thread_bounds_override_extent_ = consumer_extent;
               IRVisitorWithAnalyzer::VisitStmt(if_node->else_case.value());
 

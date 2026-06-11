@@ -1,7 +1,7 @@
 #pragma once
 
-#include "../copy.h"
 #include "../common.h"
+#include "../copy.h"
 #include <cstddef>
 #include <cstdint>
 
@@ -10,8 +10,7 @@ namespace tl {
 template <typename BarrierType = uint64_t>
 TL_DEVICE void tma_load(void *smem_ptr, uint64_t gmem_ptr,
                         BarrierType &smem_mbar, uint32_t size) {
-  tma_load(smem_ptr, reinterpret_cast<void const *>(gmem_ptr), smem_mbar,
-           size);
+  tma_load(smem_ptr, reinterpret_cast<void const *>(gmem_ptr), smem_mbar, size);
 }
 
 template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL>
@@ -40,8 +39,8 @@ TL_DEVICE void cp_warp_impl(dtype_t const *const dst_addr,
     _Pragma("unroll") for (int __j = 0; __j < UNROLL_FACTOR; ++__j)
         __dst[__i + __j * 32] = unrolled_values[__j];
   }
-  for (int __i = (N_int4 / kLoopStride) * kLoopStride + lane_id;
-       __i < N_int4; __i += 32)
+  for (int __i = (N_int4 / kLoopStride) * kLoopStride + lane_id; __i < N_int4;
+       __i += 32)
     __dst[__i] = __src[__i];
 }
 
@@ -73,8 +72,8 @@ TL_DEVICE void cp_warp(dtype_t *const dst_addr, uint64_t src_addr_uint64) {
 
 template <int N, typename dtype_t>
 TL_DEVICE void threadgroup_cp(dtype_t *__restrict__ _dst,
-                              const dtype_t *__restrict__ _src,
-                              int myIdx, int groupSize) {
+                              const dtype_t *__restrict__ _src, int myIdx,
+                              int groupSize) {
   size_t len = N * sizeof(dtype_t);
   void *dst = _dst;
   const void *src = _src;
@@ -86,7 +85,8 @@ TL_DEVICE void threadgroup_cp(dtype_t *__restrict__ _dst,
     for (size_t i = myIdx; i < nelems; i += groupSize)
       dst_p[i] = src_p[i];
     len -= nelems * 16;
-    if (0 == len) return;
+    if (0 == len)
+      return;
     dst = (void *)(dst_p + nelems);
     src = (void *)(src_p + nelems);
   }
@@ -98,7 +98,8 @@ TL_DEVICE void threadgroup_cp(dtype_t *__restrict__ _dst,
     for (size_t i = myIdx; i < nelems; i += groupSize)
       dst_p[i] = src_p[i];
     len -= nelems * 8;
-    if (0 == len) return;
+    if (0 == len)
+      return;
     dst = (void *)(dst_p + nelems);
     src = (void *)(src_p + nelems);
   }
@@ -110,7 +111,8 @@ TL_DEVICE void threadgroup_cp(dtype_t *__restrict__ _dst,
     for (size_t i = myIdx; i < nelems; i += groupSize)
       dst_p[i] = src_p[i];
     len -= nelems * 4;
-    if (0 == len) return;
+    if (0 == len)
+      return;
     dst = (void *)(dst_p + nelems);
     src = (void *)(src_p + nelems);
   }
@@ -122,7 +124,8 @@ TL_DEVICE void threadgroup_cp(dtype_t *__restrict__ _dst,
     for (size_t i = myIdx; i < nelems; i += groupSize)
       dst_p[i] = src_p[i];
     len -= nelems * 2;
-    if (0 == len) return;
+    if (0 == len)
+      return;
     dst = (void *)(dst_p + nelems);
     src = (void *)(src_p + nelems);
   }
@@ -153,13 +156,11 @@ TL_DEVICE void cp_block(dtype_t *dst_addr, const uint64_t src_addr_uint64) {
   cp_block<N>(dst_addr, src_addr);
 }
 
-template <typename T>
-TL_DEVICE T remote_load(uint64_t addr, T) {
+template <typename T> TL_DEVICE T remote_load(uint64_t addr, T) {
   return *reinterpret_cast<const T *>(addr);
 }
 
-template <typename T>
-TL_DEVICE void remote_store(uint64_t addr, T value) {
+template <typename T> TL_DEVICE void remote_store(uint64_t addr, T value) {
   *reinterpret_cast<T *>(addr) = value;
 }
 

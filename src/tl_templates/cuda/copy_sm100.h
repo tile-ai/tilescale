@@ -174,8 +174,7 @@ pack_float16x4(const half x, const half y, const half z, const half w) {
 }
 
 __device__ __forceinline__ unsigned long long
-pack_float16x4(const half_t x, const half_t y, const half_t z,
-               const half_t w) {
+pack_float16x4(const half_t x, const half_t y, const half_t z, const half_t w) {
   unsigned long long v0 = *((unsigned short *)&x);
   unsigned long long v1 = *((unsigned short *)&y);
   unsigned long long v2 = *((unsigned short *)&z);

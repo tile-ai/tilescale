@@ -17,5 +17,3 @@ if [ ! -c $IMAX_CHANNEL_PATH/$IMAX_CHANNEL_NAME ]; then
 else
     echo -e "${GREEN}Channel $IMAX_CHANNEL_NAME created successfully${NC}"
 fi
-
-

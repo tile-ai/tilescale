@@ -22,7 +22,6 @@ from tilelang.distributed.host import init_dist
 from tilelang.distributed.allocator import get_allocator
 
 os.environ.setdefault("NCCL_DEBUG", "ERROR")
-tilelang.enable_cache()
 
 
 @tilelang.jit(
@@ -115,7 +114,7 @@ def gemm_ar_sm_specialized_kernel(
     total_tiles = m_blocks * n_blocks
     ar_rows = ar_block_e // block_N
     ar_row_chunks = block_M // ar_rows
-    store_block_M = block_M // 2
+    # store_block_M = block_M // 2
     accum_dtype = T.float32
 
     def tile_coords(tile_id):
@@ -252,9 +251,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     assert args.ar_block_e % 512 == 0, "ar-block-e must be a multiple of 512 for bf16x2 multimem vectorization"
     assert args.ar_block_e % block_N == 0, "ar-block-e must contain an integer number of tile rows"
     assert block_M % (args.ar_block_e // block_N) == 0, "block-m must be divisible by ar-block-e/block-n"
-    assert args.two_kernel or 0 < args.num_comm_sms < driver.get_num_sms(), (
-        "num-comm-sms must leave at least one compute SM"
-    )
+    assert args.two_kernel or 0 < args.num_comm_sms < driver.get_num_sms(), "num-comm-sms must leave at least one compute SM"
     assert block_M * block_N % args.ar_block_e == 0, "block_m*block_n must be divisible by ar-block-e"
 
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
@@ -388,6 +385,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             return output
 
         if include_reset_in_bench:
+
             def bench_kernel():
                 run_kernel_with_sms()
                 # Launch the main kernel followed by the device-side reset

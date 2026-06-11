@@ -1188,9 +1188,8 @@ private:
                                       return !conflicts_with_existing(
                                           interval, candidate_offset);
                                     })) {
-        offset =
-            freelist.AllocateAt(slot->first, interval.size_bytes,
-                                interval.alignment);
+        offset = freelist.AllocateAt(slot->first, interval.size_bytes,
+                                     interval.alignment);
       } else if (auto tail_slot =
                      freelist.FindTail(interval.alignment, arena_top);
                  tail_slot && !conflicts_with_existing(interval, *tail_slot)) {
