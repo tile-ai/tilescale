@@ -186,7 +186,7 @@ def run_atomic_return_prev(M, N, block_M, block_N, dtype=T.float32):
 
 
 @tilelang.jit
-def tma_atomic_add_program(out, explicit_swizzle=False):
+def tma_atomic_add_program(out, explicit_swizzle=False, tma_wait_complete=False):
     out: T.Tensor[(16, 16), T.float32]
 
     with T.Kernel(
@@ -197,7 +197,7 @@ def tma_atomic_add_program(out, explicit_swizzle=False):
             T.annotate_layout({out_shared: tilelang.layout.make_swizzled_layout(out_shared)})
         T.fill(out_shared, 1)
         for _ in range(16):
-            T.atomic_add(out, out_shared, use_tma=True)
+            T.atomic_add(out, out_shared, use_tma=True, tma_wait_complete=tma_wait_complete)
 
 
 @tilelang.testing.requires_cuda
@@ -209,6 +209,12 @@ def test_tma_atomic_add():
     kernel = tma_atomic_add_program.compile(out=T.Tensor[(16, 16), T.float32])
     assert "tma_store_add" in kernel.get_kernel_source()
     assert "desc" in kernel.get_kernel_source()  # Ensure using cp.reduce.async.bulk.tensor
+    assert "tl::tma_store_wait<0, true>();" in kernel.get_kernel_source()
+
+    kernel_with_complete_wait = tma_atomic_add_program.compile(
+        out=T.Tensor[(16, 16), T.float32], tma_wait_complete=True
+    )
+    assert "tl::tma_store_wait<0, false>();" in kernel_with_complete_wait.get_kernel_source()
 
     kernel_with_explicit_swizzle = tma_atomic_add_program.compile(out=T.Tensor[(16, 16), T.float32], explicit_swizzle=True)
     # Ensure auto swizzled layout is applied

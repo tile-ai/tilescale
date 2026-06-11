@@ -188,6 +188,7 @@ def atomic_add(
     memory_order: str | None = None,
     return_prev: bool = False,
     use_tma: bool = False,
+    tma_wait_complete: bool = False,
     dst_pe: PrimExpr | int | None = None,
 ) -> PrimExpr:
     """
@@ -201,6 +202,7 @@ def atomic_add(
         memory_order (Optional[str]): Optional memory-order name controlling the atomic operation's ordering.
         return_prev (bool): If True, return the previous value; if False, return handle (default False).
         use_tma (bool): If True, use TMA (cp.reduce) to perform the atomic add. This is available only for sm90+ (default False).
+        tma_wait_complete (bool): If True with use_tma, wait for TMA store completion instead of read-only wait.
         dst_pe (Optional[Union[PrimExpr, int]]): Remote PE for symmetric destination addressing.
 
     Returns:
@@ -282,6 +284,8 @@ def atomic_add(
 
     if use_tma:
         ann["use_tma"] = 1
+        if tma_wait_complete:
+            ann["tma_wait_complete"] = 1
     if memory_order is not None:
         ann["memory_order"] = _MEMORY_ORDER_ID_MAP[memory_order]
 
