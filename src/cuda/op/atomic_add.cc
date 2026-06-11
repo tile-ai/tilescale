@@ -64,15 +64,6 @@ bool UseTMA(const AtomicAddNode &op) {
   return false;
 }
 
-bool TMAWait(const AtomicAddNode &op) {
-  if (auto val = op.annotations.Get("tma_wait")) {
-    if (auto int_val = val->as<IntImmNode>()) {
-      return int_val->value != 0;
-    }
-  }
-  return true;
-}
-
 constexpr int kMaxRemoteTMADescriptors = 8;
 
 PrimExpr GetRemotePEAnnotation(const AtomicAddNode &op, const char *key) {
@@ -524,7 +515,6 @@ struct AtomicAdd {
 
     auto op_annotations = op.annotations;
     op_annotations.erase("use_tma");
-    op_annotations.erase("tma_wait");
     op_annotations.erase("dst_pe");
 
     Stmt tma_reduce;
@@ -547,14 +537,11 @@ struct AtomicAdd {
     }
 
     Array<Stmt> seq;
-    seq.reserve(TMAWait(op) ? 3 : 2);
+    seq.reserve(3);
     seq.push_back(tma_reduce);
     seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_arrive(), {})));
-    if (TMAWait(op)) {
-      seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_wait(),
-                                  {IntImm(DataType::Int(32), 0),
-                                   Bool(true)})));
-    }
+    seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_wait(),
+                                {IntImm(DataType::Int(32), 0), Bool(true)})));
     return IfThenElse(EQ(T.thread_var, T.thread_bounds->min),
                       SeqStmt(std::move(seq)));
   }

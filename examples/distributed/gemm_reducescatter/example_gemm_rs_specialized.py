@@ -118,7 +118,6 @@ def gemm_rs_specialized_kernel(
                             ],
                             C_shared,
                             use_tma=True,
-                            tma_wait=True,
                             dst_pe=dst_rank,
                         )
                     else:
@@ -144,7 +143,6 @@ def gemm_rs_specialized_kernel(
                             ],
                             C_shared,
                             use_tma=True,
-                            tma_wait=True,
                             dst_pe=dst_rank,
                         )
                     else:
