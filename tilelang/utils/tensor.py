@@ -291,3 +291,9 @@ def torch_assert_close(
         )
     else:
         return True
+
+
+def tensor(*args, **kwargs):
+    from tilelang.distributed.tensor import tensor as distributed_tensor
+
+    return distributed_tensor(*args, **kwargs)

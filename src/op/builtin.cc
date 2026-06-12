@@ -170,6 +170,11 @@ TIR_DEFINE_TL_BUILTIN(create_tma_descriptor)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kPure));
 
+TIR_DEFINE_TL_BUILTIN(create_remote_tma_descriptor)
+    .set_num_inputs(-1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
 TIR_DEFINE_TL_BUILTIN(create_tma_im2col_descriptor)
     .set_num_inputs(-1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
@@ -590,6 +595,9 @@ TIR_DEFINE_TL_BUILTIN(increase_descriptor_offset)
     .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(atom_add).set_num_inputs(4).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
 TIR_DEFINE_TL_BUILTIN(atomic_add_elem_op)
     .set_num_inputs(3)
