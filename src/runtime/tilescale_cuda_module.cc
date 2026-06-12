@@ -233,9 +233,9 @@ public:
     return func;
   }
 
-  // Get a global var from primary context in device_id
-  CUdeviceptr GetGlobal(int device_id, const std::string &global_name,
-                        size_t expect_nbytes) {
+  // Get a global var from primary context in device_id.
+  bool TryGetGlobal(int device_id, const std::string &global_name,
+                    size_t expect_nbytes, CUdeviceptr *global) {
     std::lock_guard<std::mutex> lock(mutex_);
     BindPrimaryContext(device_id);
     if (module_[device_id] == nullptr) {
@@ -246,11 +246,13 @@ public:
         (*nvshmem_init_hook)(static_cast<void *>(module_[device_id]));
       }
     }
-    CUdeviceptr global;
     size_t nbytes;
 
     CUresult result = TileScaleCudaContextAPI::Get()->cuModuleGetGlobal_(
-        &global, &nbytes, module_[device_id], global_name.c_str());
+        global, &nbytes, module_[device_id], global_name.c_str());
+    if (result == CUDA_ERROR_NOT_FOUND) {
+      return false;
+    }
     if (result != CUDA_SUCCESS) {
       const char *msg;
       cuGetErrorName(result, &msg);
@@ -258,7 +260,7 @@ public:
                  << " failed with error: " << msg;
     }
     ICHECK_EQ(nbytes, expect_nbytes);
-    return global;
+    return true;
   }
 
   void BindPrimaryContext(int device_id) {
@@ -309,9 +311,16 @@ void TileScaleInitDistributedTable::operator()(const ffi::PackedArgs &args,
   int device_id;
   CUDA_CALL(cudaGetDevice(&device_id));
 
-  // Get the device pointer for meta_data symbol (lazy initialization)
+  // Get the device pointer for meta_data symbol (lazy initialization).
+  // Non-distributed helper kernels do not declare this symbol, so there is no
+  // device table to initialize for them.
   if (pcache_[device_id] == 0) {
-    pcache_[device_id] = m_->GetGlobal(device_id, "meta_data", kMetaDataSize);
+    CUdeviceptr meta_data = 0;
+    if (!m_->TryGetGlobal(device_id, "meta_data", kMetaDataSize, &meta_data)) {
+      *rv = 0;
+      return;
+    }
+    pcache_[device_id] = meta_data;
   }
 
   // Copy data from host to device constant memory. The symbol lives in a

@@ -4,7 +4,7 @@ All four ops are tested in a single spawn session to avoid paying per-test
 import / NCCL setup overhead (~10s per spawn).  pytest -k can select individual
 ops via the test names reported by the worker.
 
-Requirements: >= 2 GPUs, compute >= 9.0, TILELANG_USE_DISTRIBUTED=1.
+Requirements: >= 2 GPUs, compute >= 9.0.
 """
 
 from __future__ import annotations

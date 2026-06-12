@@ -1,5 +1,4 @@
 ### Set environment variables for intranode usage ###
-export TILELANG_USE_DISTRIBUTED=1
 export NCCL_IB_DISABLE=1  # disable annoying IB-related logging from NCCL
 
 ### Optional ###

@@ -14,7 +14,6 @@ pip install -e . -v --no-build-isolation  # for development
 
 ## Useful Env Args
 ```bash
-export TILELANG_USE_DISTRIBUTED=1  # enable distributed features
 export TILESCALE_USE_VMM=1  # use VMM and multimem instructions
 export NCCL_IB_DISABLE=1  # disable annoying IB-related logging from NCCL
 export TILESCALE_MASTER_PORT=12345  # optional, set the master port

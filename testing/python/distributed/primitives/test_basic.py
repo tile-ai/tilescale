@@ -3,7 +3,7 @@
 Both ops are tested in a single spawn session.  Kernels are pre-compiled at
 module import time so children load from disk cache.
 
-Requirements: >= 2 GPUs, compute >= 9.0, TILELANG_USE_DISTRIBUTED=1.
+Requirements: >= 2 GPUs, compute >= 9.0.
 """
 
 from __future__ import annotations

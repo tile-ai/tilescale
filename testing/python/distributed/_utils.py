@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from collections.abc import Callable
 import importlib
 
@@ -27,7 +26,6 @@ def distributed_test(
 
         @tilelang.testing.requires_cuda
         def test_wrapper():
-            _skip_if_distributed_disabled()
             resolved_nprocs = _resolve_nprocs(nprocs)
             _skip_if_not_enough_gpus(resolved_nprocs)
             if require_fabric:
@@ -54,16 +52,6 @@ def _resolve_nprocs(nprocs: int | None) -> int:
     if nprocs is None:
         return torch.cuda.device_count()
     return nprocs
-
-
-def _skip_if_distributed_disabled():
-    enabled = os.environ.get("TILELANG_USE_DISTRIBUTED", "0").lower() in (
-        "1",
-        "true",
-        "on",
-    )
-    if not enabled:
-        pytest.skip("Requires TILELANG_USE_DISTRIBUTED=1")
 
 
 def _skip_if_not_enough_gpus(nprocs: int):

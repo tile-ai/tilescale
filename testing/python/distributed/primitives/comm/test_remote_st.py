@@ -1,6 +1,6 @@
 """Tests for distributed remote scalar store via T.st(..., dst_pe=...).
 
-Requirements: >= 2 GPUs, compute >= 9.0, TILELANG_USE_DISTRIBUTED=1.
+Requirements: >= 2 GPUs, compute >= 9.0.
 """
 
 from __future__ import annotations

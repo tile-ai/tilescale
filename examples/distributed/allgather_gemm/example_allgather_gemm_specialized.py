@@ -15,7 +15,6 @@ from tilelang.distributed.host import init_dist
 from tilelang.distributed.allocator import get_allocator
 
 os.environ.setdefault("NCCL_DEBUG", "ERROR")
-tilelang.disable_cache()
 
 
 @tilelang.jit(

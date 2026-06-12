@@ -15,10 +15,10 @@ def tensor(
     """Allocate a tensor, optionally using a distributed allocator."""
 
     if not isinstance(dtype, torch.dtype):
-        try:
+        import contextlib
+
+        with contextlib.suppress(AttributeError):
             dtype = dtype.as_torch()
-        except AttributeError:
-            pass
 
     if allocator is None:
         assert return_peers is None, "return_peers must be None when allocator is not provided"

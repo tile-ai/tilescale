@@ -1,7 +1,6 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from tilelang import tvm as tvm
-from tilelang import env
 from typing import Any
 from tvm import IRModule
 from tvm.target import Target
@@ -276,7 +275,6 @@ class TLCUDASourceWrapper:
         self.block_info: list[int] | dict = [1, 1, 1]
         self.grid_info: list[int] | dict = [1, 1, 1]
         self.tma_descriptor_args: dict | None = None
-        self.use_distributed = env.USE_DISTRIBUTED
         self.l2_persistent_map: dict[str, dict] | None = {}
         self.pdl_sync_map: dict[str, int] | None = {}
         self.parse_source_information()
@@ -591,8 +589,7 @@ class TLCUDASourceWrapper:
                 call_str += PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY.format(function_name, dynamic_smem_buf)
         # Format the initialization function using the call_str
         init_funcs = PREDEF_INIT_FUNC.format(call_str)
-        if self.use_distributed:
-            init_funcs += PREDEF_INIT_TABLE_FUNC
+        init_funcs += PREDEF_INIT_TABLE_FUNC
         return init_funcs
 
     def update_lib_code(self, code: str):

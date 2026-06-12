@@ -2,7 +2,7 @@
 
 This document covers all APIs extended on top of TileLang for distributed multi-GPU programming.
 
-> **Environment**: Set `export TILELANG_USE_DISTRIBUTED=1` before running any distributed kernel.
+> **Environment**: Distributed CUDA metadata support is enabled by default in TileScale.
 
 ---
 
@@ -231,7 +231,6 @@ Copies `allocator.table` to device constant memory `meta_data[1024]` via `cudaMe
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TILELANG_USE_DISTRIBUTED` | `0` | Enable distributed codegen (include sync/distributed templates) |
 | `TILESCALE_USE_VMM` | `0` | Use VMM fabric instead of IPC for shared memory |
 | `NCCL_IB_DISABLE` | — | Set to `1` if InfiniBand is not available |
 

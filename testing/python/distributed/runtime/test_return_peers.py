@@ -1,6 +1,6 @@
 """Tests for distributed allocator peer tensor views.
 
-Requirements: >= 2 GPUs, TILELANG_USE_DISTRIBUTED=1.
+Requirements: >= 2 GPUs.
 """
 
 from __future__ import annotations
