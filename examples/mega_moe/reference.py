@@ -19,6 +19,7 @@ The pieces that are aligned with DeepGEMM (``deep_gemm/utils/math.py`` and
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Tuple
 
 import torch
@@ -58,6 +59,18 @@ def pack_ue8m0_to_int(sf_fp32: torch.Tensor) -> torch.Tensor:
     return packed.to(torch.int32).contiguous()
 
 
+def pack_ue8m0_to_int_k_major(sf_fp32: torch.Tensor) -> torch.Tensor:
+    """Pack UE8M0 exponent bytes into DeepGEMM's K-major 1D layout.
+
+    TileLang's SM100 GEMM example expects scale factors as
+    ``[ceil(k_groups / 4), mn]`` flattened, while DeepGEMM's MegaMoE host API
+    keeps the symmetric input ``x_sf`` as ``[tokens, hidden / 128]``.  This
+    helper is useful for code paths that feed the standalone GEMM kernel.
+    """
+    packed = pack_ue8m0_to_int(sf_fp32)
+    return packed.T.contiguous().reshape(-1)
+
+
 def unpack_int_to_ue8m0(packed: torch.Tensor, num_k_blocks: int) -> torch.Tensor:
     """Inverse of :func:`pack_ue8m0_to_int`, returns UE8M0 exponent bytes."""
     words = packed.contiguous().to(torch.int64)
@@ -66,6 +79,13 @@ def unpack_int_to_ue8m0(packed: torch.Tensor, num_k_blocks: int) -> torch.Tensor
     for i in range(4):
         unpacked[..., i::4] = ((words >> (8 * i)) & 0xFF).to(torch.uint8)
     return unpacked[..., :num_k_blocks].contiguous()
+
+
+def unpack_int_k_major_to_ue8m0(packed: torch.Tensor, mn: int, num_k_blocks: int) -> torch.Tensor:
+    """Inverse of :func:`pack_ue8m0_to_int_k_major`."""
+    num_k_groups = ceil_div(num_k_blocks, 4)
+    packed_2d = packed.view(num_k_groups, mn).T.contiguous()
+    return unpack_int_to_ue8m0(packed_2d, num_k_blocks)
 
 
 def ue8m0_to_scale(exp_bytes: torch.Tensor) -> torch.Tensor:
@@ -162,6 +182,172 @@ def interleave_gate_up(t: torch.Tensor, gran: int = 8) -> torch.Tensor:
     gate = t[:, :half].reshape(g, half // gran, gran, *rest)
     up = t[:, half:].reshape(g, half // gran, gran, *rest)
     return torch.empty_like(t).copy_(torch.stack([gate, up], dim=2).reshape(g, n, *rest))
+
+
+def transpose_sf_for_utccp(sf: torch.Tensor) -> torch.Tensor:
+    """Transpose packed scale-factor rows into DeepGEMM's UTCCP layout.
+
+    ``sf`` has shape ``[num_groups, mn, packed_sf_k]`` and dtype ``int32``.
+    DeepGEMM requires the MN dimension to be rearranged in 128-row tiles so the
+    SM100 scale-factor copy path can load it efficiently.
+    """
+    num_groups, mn, packed_sf_k = sf.shape
+    assert sf.dtype == torch.int32
+    assert mn % 128 == 0, f"mn={mn} must be divisible by 128"
+    result = sf.reshape(num_groups, -1, 4, 32, packed_sf_k).transpose(2, 3).reshape(num_groups, mn, packed_sf_k)
+    return torch.empty_like(sf).copy_(result)
+
+
+def inverse_transpose_sf_for_utccp(sf: torch.Tensor) -> torch.Tensor:
+    """Undo :func:`transpose_sf_for_utccp` for reference execution."""
+    num_groups, mn, packed_sf_k = sf.shape
+    assert sf.dtype == torch.int32
+    assert mn % 128 == 0, f"mn={mn} must be divisible by 128"
+    result = sf.reshape(num_groups, -1, 32, 4, packed_sf_k).transpose(2, 3).reshape(num_groups, mn, packed_sf_k)
+    return torch.empty_like(sf).copy_(result)
+
+
+def transform_weights_for_mega_moe(
+    l1_weights: Tuple[torch.Tensor, torch.Tensor],
+    l2_weights: Tuple[torch.Tensor, torch.Tensor],
+) -> Tuple[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
+    """Transform FP4 weights and packed SFs into DeepGEMM MegaMoE layout."""
+    l1_w, l1_sf = l1_weights
+    l2_w, l2_sf = l2_weights
+    l1_transformed = (interleave_gate_up(l1_w), transpose_sf_for_utccp(interleave_gate_up(l1_sf)))
+    l2_transformed = (l2_w.contiguous(), transpose_sf_for_utccp(l2_sf))
+    return l1_transformed, l2_transformed
+
+
+def inverse_transform_weights_for_mega_moe(
+    l1_weights: Tuple[torch.Tensor, torch.Tensor],
+    l2_weights: Tuple[torch.Tensor, torch.Tensor],
+) -> Tuple[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
+    """Undo MegaMoE weight transforms for the PyTorch reference backend."""
+
+    def deinterleave_gate_up(t: torch.Tensor, gran: int = 8) -> torch.Tensor:
+        g, n, *rest = t.shape
+        half = n // 2
+        chunks = t.reshape(g, half // gran, 2, gran, *rest)
+        gate = chunks[:, :, 0].reshape(g, half, *rest)
+        up = chunks[:, :, 1].reshape(g, half, *rest)
+        return torch.empty_like(t).copy_(torch.cat([gate, up], dim=1))
+
+    l1_w, l1_sf = l1_weights
+    l2_w, l2_sf = l2_weights
+    l1_plain = (deinterleave_gate_up(l1_w), deinterleave_gate_up(inverse_transpose_sf_for_utccp(l1_sf)))
+    l2_plain = (l2_w.contiguous(), inverse_transpose_sf_for_utccp(l2_sf))
+    return l1_plain, l2_plain
+
+
+def cast_weights_to_fp4_for_mega_moe(
+    l1_weight: torch.Tensor,
+    l2_weight: torch.Tensor,
+    gran_k: int = 32,
+    transform: bool = True,
+) -> Tuple[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
+    """Quantize BF16/FP32 L1/L2 expert weights to MegaMoE FP4 tuples."""
+    assert l1_weight.dim() == 3 and l2_weight.dim() == 3
+    num_experts, l1_n, hidden = l1_weight.shape
+    num_experts_l2, hidden_l2, intermediate_hidden = l2_weight.shape
+    assert num_experts == num_experts_l2
+    assert hidden == hidden_l2
+    assert l1_n == intermediate_hidden * 2
+    assert hidden % 128 == 0 and intermediate_hidden % 128 == 0
+
+    l1_w, l1_sf = per_token_cast_to_fp4(
+        l1_weight.reshape(num_experts * l1_n, hidden),
+        gran_k=gran_k,
+        use_packed_ue8m0=True,
+    )
+    l1_w = l1_w.view(num_experts, l1_n, hidden // 2)
+    l1_sf = l1_sf.view(num_experts, l1_n, hidden // (gran_k * 4))
+
+    l2_w, l2_sf = per_token_cast_to_fp4(
+        l2_weight.reshape(num_experts * hidden, intermediate_hidden),
+        gran_k=gran_k,
+        use_packed_ue8m0=True,
+    )
+    l2_w = l2_w.view(num_experts, hidden, intermediate_hidden // 2)
+    l2_sf = l2_sf.view(num_experts, hidden, intermediate_hidden // (gran_k * 4))
+
+    l1_tuple, l2_tuple = (l1_w, l1_sf), (l2_w, l2_sf)
+    if transform:
+        return transform_weights_for_mega_moe(l1_tuple, l2_tuple)
+    return l1_tuple, l2_tuple
+
+
+@dataclass(frozen=True)
+class MegaMoEInputs:
+    x: torch.Tensor
+    x_fp8: torch.Tensor
+    x_sf: torch.Tensor
+    topk_idx: torch.Tensor
+    topk_weights: torch.Tensor
+    l1_weights: Tuple[torch.Tensor, torch.Tensor]
+    l2_weights: Tuple[torch.Tensor, torch.Tensor]
+    plain_l1_weights: Tuple[torch.Tensor, torch.Tensor]
+    plain_l2_weights: Tuple[torch.Tensor, torch.Tensor]
+    bf16_l1_weight: torch.Tensor
+    bf16_l2_weight: torch.Tensor
+
+
+def make_random_mega_moe_inputs(
+    *,
+    num_tokens: int,
+    hidden: int,
+    intermediate_hidden: int,
+    num_experts: int,
+    num_topk: int,
+    device: str | torch.device = "cuda",
+    seed: int = 0,
+    gran_k: int = 32,
+    masked_ratio: float = 0.0,
+    weight_scale: float = 0.1,
+    transform_weights: bool = True,
+) -> MegaMoEInputs:
+    """Create deterministic random inputs matching DeepGEMM MegaMoE tests."""
+    generator = torch.Generator(device=device)
+    generator.manual_seed(seed)
+    x = torch.randn((num_tokens, hidden), generator=generator, device=device, dtype=torch.bfloat16)
+    l1 = torch.randn(
+        (num_experts, intermediate_hidden * 2, hidden),
+        generator=generator,
+        device=device,
+        dtype=torch.bfloat16,
+    ) * weight_scale
+    l2 = torch.randn(
+        (num_experts, hidden, intermediate_hidden),
+        generator=generator,
+        device=device,
+        dtype=torch.bfloat16,
+    ) * weight_scale
+    scores = torch.randn((num_tokens, num_experts), generator=generator, device=device, dtype=torch.float32)
+    topk_weights, topk_idx = torch.topk(scores, num_topk, dim=-1, largest=True, sorted=False)
+    if masked_ratio > 0:
+        rand_mask = torch.rand(topk_idx.shape, generator=generator, device=device)
+        topk_idx = topk_idx.masked_fill(rand_mask < masked_ratio, -1)
+        topk_weights = topk_weights.masked_fill(topk_idx < 0, 0)
+
+    x_fp8, x_sf = per_token_cast_to_fp8(x, gran_k=gran_k, use_packed_ue8m0=True)
+    plain_l1, plain_l2 = cast_weights_to_fp4_for_mega_moe(l1, l2, gran_k=gran_k, transform=False)
+    if transform_weights:
+        l1_weights, l2_weights = transform_weights_for_mega_moe(plain_l1, plain_l2)
+    else:
+        l1_weights, l2_weights = plain_l1, plain_l2
+    return MegaMoEInputs(
+        x=x,
+        x_fp8=x_fp8,
+        x_sf=x_sf,
+        topk_idx=topk_idx,
+        topk_weights=topk_weights,
+        l1_weights=l1_weights,
+        l2_weights=l2_weights,
+        plain_l1_weights=plain_l1,
+        plain_l2_weights=plain_l2,
+        bf16_l1_weight=l1,
+        bf16_l2_weight=l2,
+    )
 
 
 # ---------------------------------------------------------------------------
