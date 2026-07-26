@@ -180,6 +180,9 @@ include = [
     "!**/__pycache__/**",
     "!**/*.pyc",
     "!**/*.pyo",
+    # Repository-local agent instructions are contributor tooling, not package
+    # source or build inputs.
+    "!.agents/**",
     # CuTeDSL is distributed under a separate NVIDIA EULA and is not needed by
     # TileScale. CUTLASS's generated documentation is not a build dependency
     # and includes CuTeDSL documentation, so exclude it as a unit.
@@ -201,8 +204,10 @@ include = [
 exclude = [
     ".git",
     ".github",
+    ".agents",
     "**/.git",
     "**/.github",
+    "**/.agents",
     "**/__pycache__",
     "**/*.pyc",
     "**/*.pyo",

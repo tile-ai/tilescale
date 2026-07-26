@@ -47,6 +47,7 @@ REQUIRED_LICENSE_FILES = (
 )
 
 FORBIDDEN_PATH_FRAGMENTS = (
+    ".agents/",
     "3rdparty/tvm/3rdparty/cutlass/EULA.txt",
     "3rdparty/tvm/3rdparty/cutlass/python/CuTeDSL/",
     "3rdparty/tvm/3rdparty/cutlass/examples/python/CuTeDSL/",
