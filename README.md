@@ -1,261 +1,260 @@
-# TileScale V0: Light-weighted TileLang Extension for Efficient Distributed Programming
+# TileScale V0: Fine-grained Distributed GPU Programming with TileLang
 
-<div align="center">    <img src="./images/tilescale_v0_logo.png" alt="TileScale V0" width=80% /> </div>
+<div align="center">
+  <img src="./images/tilescale_v0_logo.png" alt="TileScale V0" width="80%" />
+</div>
 
-TileScale v0 aims to be a concise distributed extension of [TileLang](https://github.com/tile-ai/tilelang). Rather than attempting to build a full multi-level distributed abstraction like in [TileScale](https://github.com/tile-ai/tilescale), v0 takes a pragmatic approach: it extends TileLang's tile-level interface with distributed communication primitives to cover common, popular distributed patterns and achieve first-class performance.
+TileScale extends [TileLang](https://github.com/tile-ai/tilelang) with
+fine-grained, kernel-side communication for distributed accelerators. V0 keeps
+TileLang's Python kernel language, compiler, JIT, and cache interfaces, and
+adds an experimental single-host, multi-GPU CUDA runtime.
+
+The current release candidate is based on upstream TileLang commit
+[`550e25d493a93729cb087e4ecb587c19028d3cea`](https://github.com/tile-ai/tilelang/commit/550e25d493a93729cb087e4ecb587c19028d3cea).
+TileScale's distributed additions are designed to remain opt-in: ordinary
+TileLang programs continue through the upstream-compatible compiler paths,
+while distributed kernel support is injected only when its primitives are
+used.
+
+## What Works Today
+
+| Area | TileScale V0 status |
+|------|---------------------|
+| Execution model | One host, one process per local GPU, with contiguous rank-to-device mapping |
+| Host coordination | PyTorch distributed with an NCCL process group |
+| Peer memory | CUDA IPC, or CUDA VMM fabric handles when the runtime capability probe succeeds |
+| Kernel operations | Peer load, store, copy, TMA, signal, wait, atomic, and barrier primitives |
+| Optional fabric operations | Multicast allocation and multimem operations on compatible NVSwitch/IMEX systems |
+| Compilation | Normal TileLang lowering plus coordinated `compile_once` support for multi-process JIT |
+| Kernel examples | All-gather GEMM, GEMM all-reduce, reduce-scatter, and multimem variants |
+
+The distributed extension currently targets NVIDIA CUDA only. Multi-node
+execution, non-contiguous device subgroups, NVSHMEM, DeepEP, and a general
+distributed runtime are not part of V0.
+
+## How It Works
+
+TileScale separates host-side coordination from the kernel data path:
+
+```text
+one process per GPU
+        |
+NCCL process group (launch, barriers, and handle exchange)
+        |
+BaseAllocator: local allocation -> peer handle exchange -> peer VA mappings
+        |
+symmetric bump allocations + rank/base-address metadata table
+        |
+kernel.initialize(allocator)
+        |
+TileLang lowering -> direct peer CUDA operations / optional multimem
+```
+
+1. `init_dist` binds each process to its local CUDA device and creates the NCCL
+   process group. NCCL provides the control plane; generated kernels do not use
+   NCCL as their peer-memory data path.
+2. A distributed `BaseAllocator` reserves one contiguous region per rank,
+   exchanges CUDA IPC or VMM handles, and maps every peer into the local virtual
+   address space.
+3. Each rank performs allocator-backed allocations in the same order and with
+   the same sizes. A remote pointer is computed from the local allocation
+   offset and the selected peer's base address.
+4. `kernel.initialize(allocator)` installs rank, world-size, and peer base
+   addresses into the generated module. Rank queries, pointer remapping, and
+   remote TMA operations use that metadata at runtime.
+5. The kernel issues direct CUDA peer-memory instructions. On supported
+   systems, multicast mappings also enable hardware multimem operations.
+
+`compile_once=True` coordinates which rank populates a shared TileLang disk
+cache first. It does not broadcast a compiled binary, and an unavailable cache
+can still require compilation on other ranks.
+
+## Programming Surface
+
+Distributed operations use the existing `tilelang.language` namespace. This
+small kernel copies each block to the other rank:
+
+```python
+import tilelang.language as T
+
+
+@T.prim_func
+def remote_copy(dst: T.Tensor((1024,), "float32"),
+                src: T.Tensor((1024,), "float32")):
+    with T.Kernel(8, threads=128) as block:
+        rank = T.alloc_local((1,), "uint64")
+        rank[0] = T.get_rank()
+        T.put_block(
+            src=T.address_of(src[block * 128]),
+            dst=T.address_of(dst[block * 128]),
+            size=128,
+            dst_pe=rank[0] ^ 1,
+        )
+```
+
+The host follows a collective lifecycle:
+
+```python
+rank, world_size, group = init_dist(local_rank, num_local_ranks)
+allocator = tilelang.get_allocator(
+    size=2**30,
+    device="cuda",
+    is_distributed=True,
+    local_rank=local_rank,
+    num_local_ranks=world_size,
+    group=group,
+)
+
+kernel = tilelang.compile(remote_copy, compile_once=True, compile_group=group)
+kernel.initialize(allocator=allocator)
+
+src = tilelang.tensor((1024,), torch.float32, allocator=allocator)
+dst = tilelang.tensor((1024,), torch.float32, allocator=allocator)
+kernel(dst, src)
+
+allocator.close()                 # collective across participating ranks
+torch.distributed.destroy_process_group()
+```
+
+Allocator-backed tensors are zero-copy PyTorch tensors over the mapped region.
+They must not outlive their allocator. All ranks must close the allocator
+collectively before destroying the process group. See the executable
+[remote-copy test](testing/python/distributed/primitives/comm/test_remote_copy.py)
+and the [distributed API reference](docs/distributed_api_reference.md) for the
+complete contract.
+
+## Capability and Validation Status
+
+The memory path is selected according to runtime capabilities:
+
+| Path | Current status | Requirements |
+|------|----------------|--------------|
+| CUDA IPC | Implemented and validated | Same host and peer access between all participating GPUs |
+| VMM fabric | Implemented, auto-detected, and validated on the release host | CUDA driver API 12.4+, fabric-handle support on every visible GPU, and an accessible NVIDIA IMEX channel |
+| Multicast and multimem | Implemented, experimental, capability-gated, and validated on the release host | VMM requirements plus multicast-capable GPUs and fabric, normally NVSwitch |
+
+The 2026-07-26 release candidate was evaluated on an 8 x NVIDIA B200 NVSwitch
+host with CUDA 13.2. Validation covered both allocator paths. Before IMEX was
+configured, the forced-IPC distributed suite completed with 97 tests passing
+and 5 fabric-dependent capability skips. After an administrator exposed an
+IMEX channel, the 2026-07-27 follow-up automatically selected VMM and completed
+with 102 tests passing, including VMM, multicast, and multimem cases.
+
+Four post-configuration 8-GPU test nodes also passed on every rank: specialized
+all-gather GEMM, specialized GEMM all-reduce, multimem one-shot/two-shot
+all-reduce, and the experimental ordinary-TMA store to multicast VA. Separate
+broad upstream-compatibility slices passed on the same candidate. Exact
+environment details, test records, and the two-stage validation timeline are in
+the [release validation report](docs/release_v0_0726.md).
 
 ## Installation
-```python
-pip install .  # for usage
-```
-```python
-pip install -e . -v --no-build-isolation  # for development
-```
 
-## Useful Env Args
+Python 3.10 or newer is required. Building for Blackwell/B200 requires CUDA
+12.8 or newer; CUDA 13.x is recommended for the distributed B200 examples.
+
+Install from a source checkout with pinned submodules:
+
 ```bash
-export TILESCALE_USE_VMM=1  # use VMM and multimem instructions
-export NCCL_IB_DISABLE=1  # disable annoying IB-related logging from NCCL
-export TILESCALE_MASTER_PORT=12345  # optional, set the master port
+git clone --recursive https://github.com/tile-ai/tilescale.git
+cd tilescale
+python -m pip install -r requirements-dev.txt
+python -m pip install --no-build-isolation ".[distributed]"
 ```
 
-# TileScale: Tile-based AI Compute at All Scales
+Editable installs are not supported by the current build. Developers can build
+the native library and use the source tree directly:
 
-TileScale is a distributed extension of TileLang. It expands TileLang's tile-level programming to multi-GPU, multi-node, and even distributed chip architecture scopes, with some new feature designs like tile-level communication and hierarchical programming introduced.
-
-TileScale is a distributed-native domain-specific language (DSL) and compiler stack designed for deep learning on next-generation distributed architectures.
-As AI model entering the "scaling-law" era, modern AI infrastructure is also scaling the computation across both intra-chip and inter-chip scopes. On one side, current large AI models are already executing on multiple GPUs or even multiple nodes connected by the high-performance links like NVLink or InfiniBand. On the other side, a bunch of next-gen AI accelerators are embracing new chip architectures—such as 3D IC, near/in-memory computing, wafer-scale accelerators, etc., which are all in distributed form inner the chip for better scalability. Together, these trends are shaping modern AI compute systems into a hybrid, multi-level of "distributed architecture".
-
-TileScale is the first programming and compiler stack to unify these intra-chip and inter-chip compute resources into a unified, hierarchical, distributed architecture, which virtualizes the whole distributed system as a unified "mega-device" to users. To facilitate programming, TileScale provides a set of consistent tile-level primitives across all hardware layers for compute, memory, and communication. Thus, users can just write tile-level computing logic or flow at certain layers of interest, then TileScale automatically compiles and optimizes the scheduling of computation, communication, memory access, and their overlap. The goal of TileScale is to define an open, streamlined programming model for future distributed architectures and systems, addressing the emerging needs of modern AI computation, such as fine-grained computation and communication overlap, flexible parallel mechanisms, dataflow computation, NUMA programming, etc.
-
-## The full technical white-paper is coming soon.
-
-## Hierarchical Distributed Architecture (HDA)
-Unlike traditional GPU SIMT programming, which assumes thread-level computation on a single device, TileScale is designed to manage compute, memory, and communication across all hierarchical scales, from threads and PEs to dies, chips, and nodes. It introduces a unified virtual device architecture, called Hierarchical Distributed Architecture (HDA), to abstract these distributed systems.
-![](./images/arch.png "Hierarchical Distributed Architecture(HDA)")
-
-HDA is built upon three fundamental resources: *compute units, memory, and network*.
-Those resources can be logically organized into hierarchical groups, which provide different scales of computation capability. For example, on a GPU, the smallest granularity is a thread-scale. Threads can be grouped into a warp (e.g., 32 threads), which executes warp-scale operations. These warp-scale compute units (e.g., tensor cores) and thread-scale units (e.g., CUDA cores) are further organized into an SM-scale unit, capable of executing thread block tasks. The number of scale levels and naming of each scale are hardware-defined and can vary across architectures.
-
-HDA contains multiple memory layers. Each layer can be either shared or distributed to individual compute unit. For example, the L1 cache or shared memory is accessible to all threads within a thread-block, while register memory can only be accessed by individual threads. Note that a compute unit at a certain scale can access different layer of memory.
-
-<!-- For instance, on GPUs, the L1 cache or shared memory is accessible to all threads within a block (SM-level scope), whereas DSMEM (distributed shared memory) is accessible across SMs within a cluster-level scope. A compute unit at a given scope has control over all memory layers within that scope. For example, an SM-level task can access both thread registers and shared memory. -->
-
-Parallel units at the same level scale can be interconnected via a network. For example, in NVIDIA Hopper GPUs, SMs within a CTA cluster are interconnected via a NoC (Network-on-Chip), enabling peer SM memory access. Similarly, multiple GPUs within a node can be connected using NVLink to support inter-GPU communication.
-
-This hierarchical structure of compute, memory, and network forms the backbone of HDA, enabling scalable and programmable execution across complex, distributed AI systems.
-
-<!-- In HDA, each top-level compute unit is associated with an L0 memory (e.g., a CUDA core with few registers). A group of such units then forms a higher-level compute unit with L1 memory—for example, a Streaming Multiprocessor (SM) containing multiple CUDA cores with shared memory. This hierarchical composition can be extended to form SM clusters, GPUs, nodes, super-nodes, and beyond, each with its corresponding level of memory.
-
-At each layer, the associated memory may be shared among all units or distributed to individual units. Compute units or groups of units at the same level can be interconnected via a dedicated network. For instance, in Hopper GPUs, SM clusters are connected via a Network-on-Chip (NoC), enabling DSMem programming capabilities. Similarly, GPUs within a single node are interconnected using an NVLink switch. -->
-
-## Tile-based Programming Interface
-Following the hierarchical hardware architecture, TileScale exposes a hierarchical programming interface. The fundamental unit of computation in TileScale is at the *tile* granularity. TileScale provides consistent tile-level compute, memory, and communication operators corresponding to each hardware scales.
-<div align="center">    <img src="./images/interface.png" alt="TileScale Programming Interface" width=80% />
-</div>
-
-- *Compute*: A compute primitive takes input tensor tiles at certain memory layer and produces output tensor tiles. The same compute primitive can be used at different scale level, which will be translated to different implementations. A primitive at a high-level scale can be implemented by the lower-level-scale primitives. For example, a block-scale operator can be implemented by a group of warp-scale or thread-scale primitives.
-
-- *Memory*: The memory primitives are used to copy data tiles at certain memory layer, as well as to copy data tile between different memory layers.
-
-- *Communicate*: The communication primitives are used to transfer data tiles between compute units over the network, as well as to manage the synchronization. TileScale provides both basic peer-to-peer communication primitives as well as the collective communication primitives like AllReduce, All2All, etc., at a specific scale level.
-
-A primitive for a certain scale level may have multiple implementations. For example, a copy primitive could be implemented using TMA or LSU, while a remote copy across GPUs might be implemented using copy engines, TMA, or LSU. TileScale provides default implementations for each primitive, along with a compilation process to tune the best implementation. Users can also specify particular implementations through arguments in the tile primitives.
-With this hierarchical interface, user can easily customize the computation at certain scale level. For example, we can leverage the DSMEM feature to implement a general cluster-scale GEMM primitive.
-
-## System Overview and Design
-<div align="center">    <img src="./images/overview.png" alt="TileScale system overview" width=50% />
-</div>
-The frontend of TileScale provides all the tile primitives, Python bindings, and related programming syntax. The middle layer consists of three modules: compiler, tile kernels, and cost model. The compiler module lowers the frontend program into an intermediate representation (IR), applies optimization passes, and lowers tile primitives to lower-level primitives. For example, a block-scale GEMM primitive can be either directly mapped to a pre-implemented kernel or lowered to low-level code.
-The tile-kernel module is a library that contains all the implementations of tile primitives.
-The cost model builds a performance database and provides lightweight performance feedback for specific optimization plans. This feedback is used by the compiler module to optimize the program.
-Finally, the backend module defines a configurable hardware architecture following the HDA abstraction. Unlike existing compilers that target few specific hardware, TileScale can compile a program to any user-defined architecture.
-
-### Memory management
-
-A tensor tile can be allocated at a specified memory layer for a certain scale compute. For example, the above example allocates a block-scale tile that physically resides in L0 (i.e., register) memory. This means the tile will be partitioned into each individual thread's registers, similar to the concept of a fragment in CUDA.
-To use the tile at different levels of scale, we can use the T.view primitive to reference the specific partition of the tile within the corresponding scale. In the above example, it could be viewed as a warpgroup-, warp-, or thread-scale tile.
-The layout and partition dimensions are either automatically inferred through a layout inference pass or specified by the user.
-<div align="center">    <img src="./images/view.png" alt="T.alloc and T.view" width=50% />
-</div>
-
-### Parallel task scheduling
-TileScale introduces a *T.Scale* primitive to control which hardware scale the current computations are conducted on.
-It follows the SPMD (Single Program Multiple Data) programming model that scale the specified computation to all parallel units at this level.
-For example, the following *T.gemm* represents a warp GEMM, which executes on all warps in parallel.
-```python
-# warp-level compute example
-with T.Scale("warp"):
-    T.gemm(A, B, C)
-```
-#### UTCMMA
-For NVIDIA latest CTA cluster level GEMM, e.g., UTCMMA, it is fundamentally a distributed GEMM running on two SMs. This can be easily expressed in TileScale. For example,
-```python
-# cluster-level GEMM example
-with T.Kernel(
-    cta_cluster=(2),
-    block=(block_M, block_N),
-    threads=256
-):
-    with T.Scale("cta_cluster"):
-        T.gemm(A, B, C)
-```
-#### Task(warp) specialization
-Additionally, the T.Scale primitive can also return the rank and the total number of ranks of the current scale level. This allows you to easily leverage the rank index for task specialization, such as warp specialization or any other scale-level specialization.
-
-```python
-# warp specialize example
-with T.Scale("warpgroup") as wg_id, wg_num:
-    if wg_id == 0:
-        # do something
-    else:
-        # do other thing
-```
-#### MPI-style programming
-Combined with the communication primitives, you can also implement MPI-like programs if a communication channel exists across those ranks. For those compute units without hardware links, TileScale can also implement software channels by passing data through lower-level memory.
-```python
-# communication example: send data to neighbor GPU
-with T.Scale("device") as dev_id, dev_num:
-    T.copy(remote_B, local_A, dst=(dev_id + 1) % dev_num)
-    T.barrier()
+```bash
+cmake -S . -B build -DUSE_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 ```
 
-## Example:
-```python
-# Example of GEMM
-# 4-GPU Tensor Parallelism, using L2 to communicate
-# 2-warpgroups split along K dimension and reduce, using L1 to communicate
-def gemm(
-        A: T.Tensor((M, K), dtype),
-        B: T.Tensor((K, N), dtype),
-        C: T.Tensor((M, N), dtype),
-):
-    with T.Kernel( # launch config
-        device=(4),
-        block=(T.ceildiv(N, block_N), T.ceildiv(M, block_M)),
-        threads=256
-    ):
-        with T.Scale("device"):
-            A_global = T.view(A, layout=T.FullCol)
-            B_global = T.view(B, layout=T.FullRow)
-            C_global = T.view(C, layout=T.Replica)
+The Python distribution is named `tilescale`, but it intentionally provides
+the `tilelang` import namespace as a TileLang fork/replacement. Do not install
+upstream `tilelang` and `tilescale` in the same environment.
 
-        with T.Scale("block"):
-            A_local = T.alloc((block_M, block_K), dtype, level="l0")
-            B_local = T.alloc((block_K, block_N), dtype, level="l0")
-            C_local = T.alloc((block_M, block_N), accum_dtype, level="l0")
-            T.clear(C_local)
+See the [installation guide](docs/get_started/Installation.md) for wheel,
+toolchain, Docker, and migration details.
 
-            for k in T.Pipelined(T.ceildiv(A_global.shape[1], block_K), num_stages=3):
-                with T.Scale("warpgroup") as wg_id, wg_num:
-                    A_local_wg = T.view(A_local, layout=T.FullCol)
-                    B_local_wg = T.view(B_local, layout=T.FullRow)
-                    C_local_wg = T.view(C_local, layout=T.Replica)
-                    T.copy(A_local_wg, A_global[by * block_M, k * block_K])
-                    T.copy(B_local_wg, B_global[k * block_K, bx * block_N])
-                    T.gemm(A_local_wg, B_local_wg, C_local_wg)
+## Running and Testing
 
-                    # Allreduce C_local_wg through software-defined channel on L1
-                    T.allreduce(C_local_wg)
-            T.copy(C_global[by * block_M, bx * block_N], C_local)
+Select the exact local GPU set before launching. Capability probes inspect all
+CUDA-visible devices. This command runs the validated CUDA IPC path on two
+GPUs:
 
-        with T.Scale("device") as dev_id, dev_num:
-            # Allreduce C on L2
-            T.allreduce(C_global)
-
-```
-```python
-# Example of FlashMLA
-# 4-GPU Context Parallelism, using L2 to communicate
-# 2-warpgroups split acc_S and all-gather, using L1 to communicate
-def flash_mla(
-        Q: T.Tensor([batch, heads, dim], dtype),
-        Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
-        KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
-        K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-        Output: T.Tensor([batch, heads, dim], dtype),
-):
-    with T.Kernel(
-        device=(4),
-        block=(batch, heads // min(block_H, kv_group_num),
-        threads=256)
-    ):
-        with T.Scale("device"):
-            Q_global = T.view(Q, layout=T.Replica)
-            Q_pe_global = T.view(Q_pe, layout=T.Replica)
-            KV_global = T.view(KV, layout=lambda i, j, k, l: j // (seqlen_kv // 4))
-            K_pe_global = T.view(K_pe, layout=lambda i, j, k, l: j // (seqlen_kv // 4))
-            output_global = T.view(Output, layout=T.Replica)
-            logsum_global = T.alloc([batch, heads], accum_dtype, level="l2")
-
-        with T.Scale("block"):
-            Q_shared = T.alloc([block_H, dim], dtype, level="l1")
-            Q_pe_shared = T.alloc([block_H, pe_dim], dtype, level="l1")
-            KV_shared = T.alloc([block_N, dim], dtype, level="l1")
-            K_pe_shared = T.alloc([block_N, pe_dim], dtype, level="l1")
-
-            acc_s = T.alloc([block_H, block_N], accum_dtype, level="l0")
-            acc_s_cast = T.alloc([block_H, block_N], dtype, level="l0")
-            acc_o = T.alloc([block_H, dim], accum_dtype, level="l0")
-            scores_max = T.alloc([block_H], accum_dtype, level="l0")
-            scores_max_prev = T.alloc([block_H], accum_dtype, level="l0")
-            scores_scale = T.alloc([block_H], accum_dtype, level="l0")
-            scores_sum = T.alloc([block_H], accum_dtype, level="l0")
-            logsum = T.alloc([block_H], accum_dtype, level="l0")
-
-            cur_kv_head = by // (kv_group_num // block_H)
-
-            T.copy(Q_shared, Q_global[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :])
-            T.copy(Q_pe_shared, Q_pe_global[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :])
-            T.fill(acc_o, 0)
-            T.fill(logsum, 0)
-            T.fill(scores_max, -T.infinity(accum_dtype))
-
-            loop_range = T.ceildiv(KV_global.shape[1], block_N)
-            for k in T.Pipelined(loop_range, num_stages=2):
-                T.copy(KV_shared, KV_global[bx, k * block_N:(k + 1) * block_N, cur_kv_head, :])
-                T.copy(K_pe_shared, K_pe_global[bx, k * block_N:(k + 1) * block_N, cur_kv_head, :])
-                T.clear(acc_s)
-
-                T.gemm(Q_shared, KV_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
-                T.gemm(Q_pe_shared, K_pe_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
-
-                T.copy(scores_max_prev, scores_max)
-                T.fill(scores_max, -T.infinity(accum_dtype))
-                T.reduce_max(acc_s, scores_max, dim=1, clear=False)
-                for i in T.Parallel(block_H):
-                    scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
-                for i, j in T.Parallel(block_H, block_N):
-                    acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
-                T.reduce_sum(acc_s, scores_sum, dim=1)
-
-                with T.Scale("warpgroup") as wg_id, wg_num:
-                    acc_s_local = T.view(acc_s, layout=T.FullCol)
-                    acc_s_cast_local = T.view(acc_s_cast, layout=T.Replica)
-                    T.copy(acc_s_cast_local[:, 0:block_N // 2], acc_s_local)
-                    # transfer on l0 using l1
-                    T.copy(acc_s_cast_local[:, block_N // 2:block_N], acc_s_local, dst=(wg_id + 1) % wg_num)
-                    # Or, you can use high level cooperative primitive
-                    # T.allgather(acc_s_local), and Cast ...
-
-                for i in T.Parallel(block_H):
-                    logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
-                for i, j in T.Parallel(block_H, dim):
-                    acc_o[i, j] *= scores_scale[i]
-                T.gemm(acc_s_cast, KV_shared, acc_o)
-            for i, j in T.Parallel(block_H, dim):
-                acc_o[i, j] /= logsum[i]
-            T.copy(output_global[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], acc_o)
-            T.copy(logsum_global[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H], logsum)
-
-        with T.Scale("device"):
-            # AllReduce on L2
-            T.allreduce(output_global, logsum_global, fn=...)
-            # Or, you can write copy output_global to peers and reduce by hand
+```bash
+CUDA_VISIBLE_DEVICES=0,1 TILESCALE_USE_VMM=0 \
+python examples/distributed/allgather_gemm/example_allgather_gemm_overlapped.py \
+  --num-processes 2
 ```
 
-## Installation
-For detailed instructions, please refer to the [Installation Guide](docs/get_started/Installation.md).
+Run the upstream-compatible test set and the distributed suite from the
+repository root:
 
-## Call for Contribution!!
-TileScale is in its early experimental stage and driven by the open-source community. We're looking for passionate contributors to help shape the future of distributed programming together! If you're excited about designing and developing the next-generation programming paradigm, please contact us: tile-ai@outlook.com. For more information, please check out our [roadmap](https://github.com/tile-ai/tilescale/issues/4).
+```bash
+python -m pytest -m "not perf and not slow" testing/python
+CUDA_VISIBLE_DEVICES=0,1 python -m pytest testing/python/distributed
+```
+
+With no override, a distributed allocator uses VMM only when the fabric probe
+succeeds and otherwise falls back to CUDA IPC. Diagnostic overrides are:
+
+```bash
+export TILESCALE_USE_VMM=0  # force CUDA IPC
+export TILESCALE_USE_VMM=1  # force VMM; failure does not fall back to IPC
+```
+
+VMM fabric and multicast require an IMEX channel readable by the process. On a
+compatible host, an administrator can configure a user-scoped channel with
+`tilelang/distributed/scripts/conf_vmm.sh`. The script requires `sudo` and does
+not make unsupported hardware fabric-capable.
+
+## Long-term Vision
+
+V0 is a pragmatic first step: expose enough fine-grained communication inside
+TileLang kernels to overlap local computation with single-host peer data
+movement. The longer-term goal is a tile-oriented programming and compiler
+stack for distributed AI systems, from tightly connected accelerators to
+multi-node deployments and emerging distributed accelerator designs.
+
+TileScale uses a Hierarchical Distributed Architecture as a conceptual model.
+At every hardware level, the compiler reasons about three resources:
+
+- **Compute:** the processing units that execute tile operations.
+- **Memory:** local, shared, and distributed storage with explicit locality.
+- **Network:** the links and synchronization mechanisms connecting peer units.
+
+This model is a direction for future work, not a claim that V0 virtualizes an
+entire system today. Planned research and engineering areas include:
+
+- topology-aware data placement, communication lowering, and scheduling;
+- compiler-assisted overlap of computation, memory movement, and collectives;
+- multi-node execution and portable transports beyond the current CUDA paths;
+- reusable distributed tile-kernel libraries for common model workloads;
+- performance modeling and autotuning across compute, memory, and network;
+- backend interfaces for heterogeneous and next-generation accelerators.
+
+The aim is to make locality, topology, communication, and synchronization
+first-class compiler concerns while preserving the direct, composable kernel
+programming style that makes TileLang useful.
+
+## Project Status and Contributing
+
+TileScale V0 is experimental. API details, capability gates, and performance
+behavior may change as the runtime is hardened. Contributions should include
+tests for the normal TileLang path as well as any distributed path they touch.
+Please use GitHub issues for design discussions and bug reports.
+
+Useful entry points:
+
+- [Distributed API reference](docs/distributed_api_reference.md)
+- [Distributed examples](examples/distributed)
+- [Distributed tests](testing/python/distributed)
+- [Release validation report](docs/release_v0_0726.md)
+
+## License
+
+TileScale is distributed under the terms in [LICENSE](LICENSE). Bundled and
+derived components are covered by their respective terms; see
+[THIRDPARTYNOTICES.txt](THIRDPARTYNOTICES.txt) and [LICENSES](LICENSES).
