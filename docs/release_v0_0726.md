@@ -54,7 +54,9 @@ distributed runtime are outside the 0.0.2 scope.
   CUTLASS documentation or media that are not build inputs, and smoke-tests the
   installed compatibility namespace and distributed FFI surface. The
   `apache-tvm-ffi` runtime is pinned to `0.1.11`, matching the vendored headers
-  used to build the native libraries.
+  used to build the native libraries. `z3-solver` is pinned to `4.15.4.0` for
+  both isolated builds and runtime installation so the linked Z3 SONAME remains
+  consistent.
 
 ## Upgrade
 

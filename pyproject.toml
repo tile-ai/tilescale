@@ -64,7 +64,8 @@ dependencies = [
     "setuptools; platform_system == 'Darwin'",
     "tqdm>=4.62.3",
     "typing-extensions>=4.10.0",
-    "z3-solver>=4.13.0,<4.15.5",
+    # Native libraries link against the Z3 SONAME supplied by this exact wheel.
+    "z3-solver==4.15.4.0",
 ]
 
 [project.optional-dependencies]
@@ -104,7 +105,7 @@ torch = [
 requires = [
     "cython>=3.1.0",
     "scikit-build-core",
-    "z3-solver>=4.13.0,<4.15.5",
+    "z3-solver==4.15.4.0",
     # Not for auditwheel, explicitly add patchelf for repairing libz3.so.
     # See tvm's CMakeLists.txt for more information.
     "patchelf>=0.17.2; platform_system == 'Linux'",

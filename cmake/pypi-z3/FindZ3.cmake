@@ -9,7 +9,7 @@ execute_process(
     RESULT_VARIABLE Z3_PYTHON_RESULT
 )
 if(NOT Z3_PYTHON_RESULT EQUAL 0 OR Z3_PATH STREQUAL "")
-    message(FATAL_ERROR "Failed to locate z3 Python package. Ensure z3-solver>=4.13.0 is installed.")
+    message(FATAL_ERROR "Failed to locate z3 Python package. Ensure z3-solver==4.15.4.0 is installed.")
 endif()
 message("-- Find Z3 in path: ${Z3_PATH}")
 find_path(Z3_INCLUDE_DIR NO_DEFAULT_PATH NAMES z3++.h PATHS ${Z3_PATH}/include)

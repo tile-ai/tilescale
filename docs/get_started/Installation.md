@@ -282,7 +282,7 @@ printf "#!/usr/bin/env bash\nexec \"%s\" \"\$@\"\n" "$LLVM_CONFIG_PATH" > /usr/l
 chmod +x /usr/local/bin/llvm-config-16
 
 # Match TileScale's declared isolated build requirements.
-pip install --no-cache-dir "cython>=3.1.0" "z3-solver>=4.13.0,<4.15.5"
+pip install --no-cache-dir "cython>=3.1.0" "z3-solver==4.15.4.0"
 
 # Clone + build TileScale (ROCm)
 # Default location: /opt/tilescale (adjust if you prefer a different path).
@@ -296,7 +296,7 @@ export CMAKE_ARGS="-DUSE_CUDA=OFF -DUSE_ROCM=ON -DROCM_PATH=/opt/rocm -DLLVM_CON
 # torch-c-dlpack-ext package, then build without dependency resolution.
 pip install "apache-tvm-ffi==0.1.11" cloudpickle ml-dtypes \
   "numpy>=1.23.5" psutil "tqdm>=4.62.3" "typing-extensions>=4.10.0" \
-  "z3-solver>=4.13.0,<4.15.5"
+  "z3-solver==4.15.4.0"
 TVM_FFI_DISABLE_TORCH_C_DLPACK=1 pip install . -v --no-build-isolation --no-deps
 # If you already installed torch-c-dlpack-ext and hit `libtorch_cuda.so` errors:
 # pip uninstall -y torch-c-dlpack-ext
