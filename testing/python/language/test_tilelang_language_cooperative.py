@@ -10,7 +10,9 @@ def grid_sync(N=1024):
 
     @T.prim_func
     def kernel(A: T.Tensor((N), T.float32)):
-        with T.Kernel(T.ceildiv(N, block), threads=128) as bx:
+        # Keep one worker per element. Using more threads than `block` makes
+        # fragment replication emit duplicate non-atomic updates after sync.
+        with T.Kernel(T.ceildiv(N, block), threads=block) as bx:
             A_local = T.alloc_fragment((block), dtype=T.float32)
             n_idx = bx * block
             for i in T.Parallel(block):

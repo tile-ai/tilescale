@@ -26,6 +26,18 @@ def _check(original, expected, target=sm100_target):
     tvm.ir.assert_structural_equal(mod["main"], expected_mod["main"], True)
 
 
+def _check_after_lower_opaque(original, expected, target=sm100_target):
+    mod = tvm.IRModule.from_expr(original.with_attr("global_symbol", "main"))
+    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tl.transform.LowerOpaqueBlock()(mod)
+    mod = tl.cuda.transform.InjectTcgen05Fence()(mod)
+
+    expected_mod = tvm.IRModule.from_expr(expected.with_attr("global_symbol", "main"))
+    expected_mod = tvm.tirx.transform.BindTarget(target)(expected_mod)
+    expected_mod = tl.transform.LowerOpaqueBlock()(expected_mod)
+    tvm.ir.assert_structural_equal(mod["main"], expected_mod["main"], True)
+
+
 def _count_calls(stmt, op_name: str):
     count = 0
 
@@ -198,6 +210,35 @@ def test_wait_and_arrive_are_rewritten_only_at_tmem_handoffs():
             T.ptx_arrive_barrier(mbarrier[0])
 
     _check(before, after)
+
+
+def test_trailing_wait_is_hoisted_from_tcgen05_lexical_scope():
+    @T.prim_func
+    def before():
+        with T.Kernel(1):
+            mbarrier = T.decl_buffer((1,), T.uint64, scope="shared.barrier")
+            C_tmem = T.decl_buffer((1,), T.uint32, scope="shared")
+            C_local = T.decl_buffer((128,), T.float32, scope="local")
+            with T.sblock("tcgen05_gemm"):
+                T.sblock_attr({"lexical_alloc_scope": 1})
+                T.tcgen05_mma_arrive(mbarrier[0])
+                T.mbarrier_wait_parity(mbarrier[0], 0)
+            T.evaluate(_tcgen05_ld_call(C_tmem[0], C_local))
+
+    @T.prim_func
+    def after():
+        with T.Kernel(1):
+            mbarrier = T.decl_buffer((1,), T.uint64, scope="shared.barrier")
+            C_tmem = T.decl_buffer((1,), T.uint32, scope="shared")
+            C_local = T.decl_buffer((128,), T.float32, scope="local")
+            with T.sblock("tcgen05_gemm"):
+                T.sblock_attr({"lexical_alloc_scope": 1})
+                T.tcgen05_mma_arrive(mbarrier[0])
+            T.mbarrier_wait_parity(mbarrier[0], 0)
+            T.tcgen05_after_thread_sync()
+            T.evaluate(_tcgen05_ld_call(C_tmem[0], C_local))
+
+    _check_after_lower_opaque(before, after)
 
 
 def test_wait_and_arrive_scan_across_neutral_statements():

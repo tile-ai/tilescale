@@ -201,15 +201,16 @@ def test_auto_ws_reg_hints_lower_into_matching_role_scopes():
     finally:
         tl.enable_cache()
 
-    producer_branch = src.index("if (((int)threadIdx.x) < 128) {")
-    consumer_branch = src.index("} else {", producer_branch)
     reg_dealloc = src.index("tl::warpgroup_reg_dealloc<40>();")
     reg_alloc = src.index("tl::warpgroup_reg_alloc<232>();")
+    producer_branch = src.rfind("if (", 0, reg_dealloc)
+    consumer_branch = src.rfind("} else {", reg_dealloc, reg_alloc)
 
+    assert src.count("tl::warpgroup_reg_dealloc<40>();") == 1
+    assert src.count("tl::warpgroup_reg_alloc<232>();") == 1
     assert "warpgroup_reg_dealloc" not in src[:producer_branch]
     assert "warpgroup_reg_alloc" not in src[:producer_branch]
-    assert producer_branch < reg_dealloc < consumer_branch
-    assert consumer_branch < reg_alloc
+    assert 0 <= producer_branch < reg_dealloc < consumer_branch < reg_alloc
 
 
 if __name__ == "__main__":

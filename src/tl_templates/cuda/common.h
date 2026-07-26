@@ -216,6 +216,37 @@ TL_DEVICE uint4 make_uint4(unsigned short x0, unsigned short x1,
   return result;
 }
 
+TL_DEVICE unsigned long long tl_pack_int8x8(unsigned char x0, unsigned char x1,
+                                            unsigned char x2, unsigned char x3,
+                                            unsigned char x4, unsigned char x5,
+                                            unsigned char x6,
+                                            unsigned char x7) {
+  return static_cast<unsigned long long>(x0) |
+         (static_cast<unsigned long long>(x1) << 8) |
+         (static_cast<unsigned long long>(x2) << 16) |
+         (static_cast<unsigned long long>(x3) << 24) |
+         (static_cast<unsigned long long>(x4) << 32) |
+         (static_cast<unsigned long long>(x5) << 40) |
+         (static_cast<unsigned long long>(x6) << 48) |
+         (static_cast<unsigned long long>(x7) << 56);
+}
+
+TL_DEVICE long long tl_pack_int8x8(signed char x0, signed char x1,
+                                   signed char x2, signed char x3,
+                                   signed char x4, signed char x5,
+                                   signed char x6, signed char x7) {
+  union {
+    unsigned long long u64;
+    long long i64;
+  } packed;
+  packed.u64 = tl_pack_int8x8(
+      static_cast<unsigned char>(x0), static_cast<unsigned char>(x1),
+      static_cast<unsigned char>(x2), static_cast<unsigned char>(x3),
+      static_cast<unsigned char>(x4), static_cast<unsigned char>(x5),
+      static_cast<unsigned char>(x6), static_cast<unsigned char>(x7));
+  return packed.i64;
+}
+
 // ============================================================================
 // Packed INT4 Buffer Access Helpers
 // ============================================================================

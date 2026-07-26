@@ -168,6 +168,15 @@ def _get_sm90_cuda_device():
     pytest.skip("CuTeDSL PDL runtime test requires an SM90+ CUDA device")
 
 
+def _cutedsl_arch_for_device(device) -> str:
+    """Return the architecture-specific CuTeDSL target for ``device``."""
+    torch = pytest.importorskip("torch")
+    from tilelang.contrib.nvcc import get_target_arch
+
+    capability = torch.cuda.get_device_capability(device)
+    return f"sm_{get_target_arch(capability)}"
+
+
 def _package_version(package_name: str) -> str:
     """Return an installed package version or a readable placeholder."""
     try:
@@ -285,7 +294,7 @@ def test_pdl_sync():
     assert "__restrict__" not in code
 
 
-def _lower_cutedsl_for_pdl(program):
+def _lower_cutedsl_for_pdl(program, arch="sm_90a"):
     """Lower a PDL program through CuTeDSL and build its host wrapper."""
 
     try:
@@ -301,9 +310,9 @@ def _lower_cutedsl_for_pdl(program):
     if not (hasattr(cute_arch, "griddepcontrol_launch_dependents") and hasattr(cute_arch, "griddepcontrol_wait")):
         pytest.skip("CuTeDSL PDL APIs are not available in this nvidia-cutlass-dsl build (introduced in 4.3.4)")
 
-    # PDL is an SM90/Hopper feature. Use an explicit arch so this codegen test
-    # does not depend on the default CUDA device, which may be sm_80 on mixed-GPU hosts.
-    target = determine_target({"kind": "cutedsl", "arch": "sm_90"})
+    # Codegen-only callers default to Hopper. Runtime callers pass the
+    # selected device's architecture so the resulting cubin can execute there.
+    target = determine_target({"kind": "cutedsl", "arch": arch})
     with target:
         artifact = tilelang.lower(program, target=target)
     mod = tilelang.tvm.IRModule({program.attrs["global_symbol"]: program})
@@ -320,7 +329,7 @@ def test_cutedsl_pdl_codegen_and_launcher_support():
     sync_artifact, sync_wrapper = _lower_cutedsl_for_pdl(kernels_with_pdl_sync(64, block_size=64))
     assert "tl.griddepcontrol_wait()" in sync_artifact.kernel_source
     assert "use_pdl=True" in sync_wrapper.host_func
-    assert "--gpu-arch=sm_90" in sync_wrapper.host_func
+    assert "--gpu-arch=sm_90a" in sync_wrapper.host_func
 
     launcher_cpp = sync_wrapper.get_launcher_cpp_code()
     assert "CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION" in launcher_cpp
@@ -338,13 +347,14 @@ def test_cutedsl_pdl_runtime_pipeline():
 
     torch = pytest.importorskip("torch")
     device = _get_sm90_cuda_device()
+    arch = _cutedsl_arch_for_device(device)
     N = 64
 
     with torch.cuda.device(device):
-        _lower_cutedsl_for_pdl(kernels_with_pdl_pipeline(N, block_size=64))
+        _lower_cutedsl_for_pdl(kernels_with_pdl_pipeline(N, block_size=64), arch=arch)
         kernel = tilelang.compile(
             kernels_with_pdl_pipeline(N, block_size=64),
-            target={"kind": "cutedsl", "arch": "sm_90"},
+            target={"kind": "cutedsl", "arch": arch},
         )
         a = torch.randn(N, dtype=torch.float32, device=device)
         b = torch.empty_like(a)
@@ -370,6 +380,7 @@ def test_cutedsl_pdl_overlap_microbenchmark():
 
     torch = pytest.importorskip("torch")
     device = _get_sm90_cuda_device()
+    arch = _cutedsl_arch_for_device(device)
     block_size = int(os.environ.get("TILELANG_PDL_BENCH_BLOCK_SIZE", "256"))
     num_blocks = int(os.environ.get("TILELANG_PDL_BENCH_BLOCKS", "1"))
     work_iters = int(os.environ.get("TILELANG_PDL_BENCH_WORK_ITERS", "8192"))
@@ -379,7 +390,7 @@ def test_cutedsl_pdl_overlap_microbenchmark():
 
     _print_pdl_benchmark_environment(device)
     print("PDL microbenchmark config:")
-    print("  target=cutedsl sm_90")
+    print(f"  target=cutedsl {arch}")
     print(f"  num_blocks={num_blocks}")
     print(f"  block_size={block_size}")
     print(f"  work_iters={work_iters}")
@@ -389,11 +400,11 @@ def test_cutedsl_pdl_overlap_microbenchmark():
     with torch.cuda.device(device):
         serial_kernel = tilelang.compile(
             kernels_without_pdl_overlap_window(N, block_size=block_size, work_iters=work_iters),
-            target={"kind": "cutedsl", "arch": "sm_90"},
+            target={"kind": "cutedsl", "arch": arch},
         )
         pdl_kernel = tilelang.compile(
             kernels_with_pdl_overlap_window(N, block_size=block_size, work_iters=work_iters),
-            target={"kind": "cutedsl", "arch": "sm_90"},
+            target={"kind": "cutedsl", "arch": arch},
         )
         a = torch.randn(N, dtype=torch.float32, device=device)
         serial_outputs = [torch.empty_like(a) for _ in range(4)]

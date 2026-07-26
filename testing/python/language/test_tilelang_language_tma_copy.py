@@ -224,6 +224,35 @@ def matmul_tma_copy_store(
     return main
 
 
+def dynamic_rank1_descriptor_tma_store(N=4096, block_N=512, threads=256):
+    @T.prim_func
+    def main(dst: T.Tensor((N,), T.bfloat16)):
+        with T.Kernel(1, threads=threads):
+            local_rank = T.get_rank()
+            offset = local_rank * block_N
+            acc = T.alloc_fragment((block_N,), T.bfloat16)
+            shard = T.alloc_shared((block_N,), T.bfloat16)
+            T.copy(acc, shard)
+            T.sync_threads()
+            T.tma_copy(shard, dst[offset : offset + block_N])
+            T.tma_store_wait(0, False)
+
+    return main
+
+
+def test_dynamic_rank1_descriptor_tma_store_codegen():
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100"})
+    with target:
+        artifact = tilelang.lower(
+            dynamic_rank1_descriptor_tma_store(),
+            target=target,
+            enable_device_compile=False,
+        )
+    kernel_source = str(artifact.kernel_source)
+    assert "tl::tma_store" in kernel_source
+    assert "CUtensorMap" in kernel_source
+
+
 def run_gemm_tma_copy_store(num_stages):
     M, N, K = 1024, 1024, 1024
     block_M, block_N, block_K = 128, 128, 32
@@ -343,26 +372,39 @@ def _fp4_tma_stack_int(block, index):
     return int(match.group(1))
 
 
-def _assert_fp4_packed_tma_descriptor(host_source, desc_name):
-    expected_tma_args = {
-        1: 13,  # CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B
-        2: 2,
-        4: 256,
-        5: 128,
-        6: 1,
-        7: 128,
-        8: 128,
-        9: 64,
-        10: 1,
-        11: 1,
-        12: 0,
-        13: 2,  # CU_TENSOR_MAP_SWIZZLE_64B
-        14: 2,
-        15: 0,
-    }
+def _fp4_tma_descriptor_fields(host_source, desc_name):
     block = _fp4_tma_descriptor_init_block(host_source, desc_name)
-    for index, expected in expected_tma_args.items():
-        assert _fp4_tma_stack_int(block, index) == expected
+    rank = _fp4_tma_stack_int(block, 2)
+    next_index = 4
+
+    def take(count):
+        nonlocal next_index
+        values = tuple(_fp4_tma_stack_int(block, i) for i in range(next_index, next_index + count))
+        next_index += count
+        return values
+
+    return {
+        "data_type": _fp4_tma_stack_int(block, 1),
+        "rank": rank,
+        "global_shape": take(rank),
+        "global_stride": take(rank),
+        "smem_box": take(rank),
+        "smem_stride": take(rank),
+        "options": take(4),
+    }
+
+
+def _assert_fp4_packed_tma_descriptor(host_source, desc_name):
+    fields = _fp4_tma_descriptor_fields(host_source, desc_name)
+    assert fields == {
+        "data_type": 13,  # CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B
+        "rank": 5,
+        "global_shape": (128, 128, 2, 1, 1),
+        "global_stride": (1, 128, 64, 16384, 16384),
+        "smem_box": (128, 64, 1, 1, 1),
+        "smem_stride": (1, 1, 1, 1, 1),
+        "options": (0, 2, 2, 0),  # interleave, 64B swizzle, L2 promotion, OOB fill
+    }
 
 
 def _assert_fp4_unpacked_tma_descriptor(host_source, desc_name, *, expect_swizzle=None):

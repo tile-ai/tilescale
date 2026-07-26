@@ -158,6 +158,18 @@ template <class T> struct enable_if<true, T> {
   using type = T;
 };
 
+template <bool B, class T = void>
+using enable_if_t = typename enable_if<B, T>::type;
+
+template <class T> struct is_floating_point : false_type {};
+
+template <> struct is_floating_point<float> : true_type {};
+template <> struct is_floating_point<double> : true_type {};
+template <> struct is_floating_point<long double> : true_type {};
+
+template <class T>
+inline constexpr bool is_floating_point_v = is_floating_point<T>::value;
+
 template <class T> struct remove_extent {
   using type = T;
 };

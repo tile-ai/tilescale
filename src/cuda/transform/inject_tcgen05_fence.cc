@@ -270,6 +270,40 @@ public:
     return SeqStmt(std::move(rewritten));
   }
 
+  Stmt VisitStmt_(const AttrStmtNode *op) final {
+    AttrStmt attr = Downcast<AttrStmt>(StmtExprMutator::VisitStmt_(op));
+    if (attr->attr_key != tl::attr::kLexicalAllocScope ||
+        !StmtUsesTcgen05OrTmem(attr->body)) {
+      return attr;
+    }
+
+    const auto *seq = attr->body.as<SeqStmtNode>();
+    if (seq == nullptr || seq->seq.size() < 2) {
+      return attr;
+    }
+
+    const Stmt &wait = seq->seq.back();
+    if (!IsMbarrierWaitParity(GetEvaluateCall(wait))) {
+      return attr;
+    }
+
+    // Synchronous TCGEN05 GEMM lowering appends its implicit wait inside the
+    // lexical scope used for descriptor temporaries. The equivalent async API
+    // leaves the explicit wait immediately after that scope. Hoist the trailing
+    // wait so the parent linear scan can see the following TMEM use and inject
+    // the required after_thread_sync fence for both forms.
+    Array<Stmt> scoped_seq;
+    scoped_seq.reserve(seq->seq.size() - 1);
+    for (size_t i = 0; i + 1 < seq->seq.size(); ++i) {
+      scoped_seq.push_back(seq->seq[i]);
+    }
+    Stmt scoped_body =
+        scoped_seq.size() == 1 ? scoped_seq[0] : Stmt(SeqStmt(scoped_seq));
+    Stmt scoped = AttrStmt(attr->node, attr->attr_key, attr->value,
+                           std::move(scoped_body), attr->span);
+    return SeqStmt({std::move(scoped), wait});
+  }
+
   Stmt VisitStmt_(const EvaluateNode *op) final {
     Stmt stmt = StmtExprMutator::VisitStmt_(op);
     if (in_seq_rewrite_) {

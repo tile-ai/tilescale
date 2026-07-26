@@ -6,30 +6,25 @@ gated the 1024-byte alignment of TMA-touched smem buffers on
 `TargetIsHopper(target)` (arch in `[90, 100)`). For sm_100 / sm_120 (also
 TMA-capable: see `cp.async.bulk.tensor.{1..5}d.shared::cta.global.*` PTX
 support gated by `TargetHasBulkCopy(target)` in `src/backend/common/target_utils.cc`)
-the planner fell back to the global default (16 bytes) and TMA destinations
-landed at 16-byte-aligned offsets. `cp.async.bulk.tensor.*` requires the
-destination smem pointer to be 128-byte aligned, so on sm_100/sm_120 this
-caused `CUDA_ERROR_MISALIGNED_ADDRESS` whenever the dynamic-smem arena
-started with a small (e.g. 4-byte float) buffer that pushed subsequent TMA
-buffers off the 128-byte boundary.
+the planner originally fell back to the global default (16 bytes). A later
+change raised Blackwell to 128 bytes, but B200 still produced incorrect TMA
+data when a small leading allocation placed the operand at a non-zero
+128-byte offset in the merged arena.
 
-Post-fix the predicate is `TargetHasBulkCopy(target)`, which is true for
-arch >= 90 (sm_90, sm_100, sm_103, sm_120 and any future TMA-capable
-target) — the correct set, since TMA support and TMA's alignment
-requirements are coextensive.
+Post-fix every `TargetHasBulkCopy(target)` architecture uses TileLang's
+conservative 1024-byte TMA/WGMMA alignment policy. This covers sm_90,
+sm_100, sm_103, sm_120, and future bulk-copy targets consistently.
 
 The test has two parts:
 
 1. **Generated TIR check** (host-independent). Lowers the buggy-arena
    kernel for explicit `{"kind": "cuda", "arch": "sm_{90,100,120}"}` targets and asserts
    every `tl.tma_load` destination `tirx.tvm_access_ptr` byte offset is
-   provably 128-byte aligned. Runs on any host.
+   provably 1024-byte aligned. Runs on any host.
 
 2. **Runtime check** on the host GPU. Compiles + executes the same kernel
-   for the host arch and asserts it doesn't raise
-   `CUDA_ERROR_MISALIGNED_ADDRESS`. Pre-fix on sm_120 this crashes; on
-   sm_90 (Hopper) the kernel happens to land buffers correctly even
-   pre-fix. Post-fix it passes on every TMA-capable arch.
+   for the host arch and checks GEMM correctness. This catches both explicit
+   misaligned-address failures and silent data corruption.
 """
 
 import torch
@@ -145,7 +140,7 @@ def _byte_offset(access_ptr):
     return access_ptr.args[2] * dtype.bytes * dtype.lanes
 
 
-def _assert_tma_destinations_128_aligned(arch: str, mod):
+def _assert_tma_destinations_1024_aligned(arch: str, mod):
     loads = _collect_tma_loads(mod)
     assert loads, f"[{arch}] expected at least one tl.tma_load in generated TIR — the kernel layout should produce TMA loads"
 
@@ -157,8 +152,8 @@ def _assert_tma_destinations_128_aligned(arch: str, mod):
             f"[{arch}] expected tl.tma_load destination argument to be tirx.tvm_access_ptr, got: {access_ptr}"
         )
         byte_offset = analyzer.simplify(_byte_offset(access_ptr))
-        assert analyzer.can_prove(byte_offset % 128 == 0), (
-            f"[{arch}] TMA load destination byte offset is not provably 128-byte aligned: {byte_offset}. access_ptr={access_ptr}"
+        assert analyzer.can_prove(byte_offset % 1024 == 0), (
+            f"[{arch}] TMA load destination byte offset is not provably 1024-byte aligned: {byte_offset}. access_ptr={access_ptr}"
         )
 
 
@@ -167,7 +162,7 @@ def test_tma_smem_alignment_codegen_sm90_hopper():
     """sm_90 (Hopper) — covered by the original `TargetIsHopper` predicate,
     pinned here as a regression test against re-narrowing."""
     mod = _lower_for("sm_90")
-    _assert_tma_destinations_128_aligned("sm_90", mod)
+    _assert_tma_destinations_1024_aligned("sm_90", mod)
 
 
 @tilelang.testing.requires_cuda
@@ -176,7 +171,7 @@ def test_tma_smem_alignment_codegen_sm100_blackwell_dc():
     16-byte alignment because `TargetIsHopper` is true only for arch
     `[90, 100)`."""
     mod = _lower_for("sm_100")
-    _assert_tma_destinations_128_aligned("sm_100", mod)
+    _assert_tma_destinations_1024_aligned("sm_100", mod)
 
 
 @tilelang.testing.requires_cuda
@@ -186,7 +181,7 @@ def test_tma_smem_alignment_codegen_sm120_blackwell_consumer():
     `CUDA_ERROR_MISALIGNED_ADDRESS` at runtime on real Blackwell consumer
     silicon."""
     mod = _lower_for("sm_120")
-    _assert_tma_destinations_128_aligned("sm_120", mod)
+    _assert_tma_destinations_1024_aligned("sm_120", mod)
 
 
 # --------------------------------------------------------------------------
@@ -197,11 +192,9 @@ def test_tma_smem_alignment_codegen_sm120_blackwell_consumer():
 @tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_tma_smem_alignment_runtime_hostarch():
     """Compile + execute the buggy-arena GEMM on the host's TMA-capable
-    GPU. Pre-fix on sm_100 / sm_120 this raises
-    `CUDA_ERROR_MISALIGNED_ADDRESS` on the first TMA load. On sm_90
-    (Hopper) the same kernel happens to land buffers at acceptable
-    offsets and runs even pre-fix. This is intentionally hardware-backed;
-    the compile-only regression coverage is the generated-TIR check above."""
+    GPU. Misalignment may raise a CUDA error or silently return incorrect
+    data, so this is intentionally hardware-backed; the compile-only
+    regression coverage is the generated-TIR check above."""
     M, N, K = 128, 128, 256
     BM, BN, BK = 64, 64, 32
     tilelang.disable_cache()

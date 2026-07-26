@@ -127,17 +127,29 @@ def tma_load(tma_desc, mbar: cute.Pointer, smem_ptr: cute.Pointer, crd: Int | tu
         # Ensure crd is a tuple (handle single coordinate case)
         if not isinstance(crd, tuple):
             crd = (crd,)
+        if hasattr(nvvm, "TMALoadMode"):
+            # CUTLASS DSL 4.6 renamed both the mode/group enums and the mode
+            # keyword used by the generated NVVM binding. Its CTA-only form
+            # avoids the obsolete intrinsic signature used by the old binding.
+            load_options = {
+                "mode": nvvm.TMALoadMode.TILE,
+                "is_cta_only": True,
+            }
+        else:
+            load_options = {
+                "load_mode": nvvm.CpAsyncBulkTensorLoadMode.TILE,
+                "group": nvvm.Tcgen05GroupKind.CTA_1,
+            }
         nvvm.cp_async_bulk_tensor_shared_cluster_global(
             dst_mem=smem_ptr.llvm_ptr,
             tma_descriptor=tma_desc_ptr.llvm_ptr,
             coordinates=[Int32(i).ir_value(loc=loc, ip=ip) for i in crd],
             mbar=mbar.llvm_ptr,
             im2col_offsets=[],
-            load_mode=nvvm.CpAsyncBulkTensorLoadMode.TILE,
-            group=nvvm.Tcgen05GroupKind.CTA_1,
             use_intrinsic=False,  # set to True would lead to compile error
             loc=loc,
             ip=ip,
+            **load_options,
         )
 
 
@@ -284,13 +296,32 @@ def prefetch_tma_descriptor(tma_desc, *, loc=None, ip=None) -> None:
     Prefetch a TMA descriptor.
     Corresponds to PTX instruction: prefetch.tensormap;
     """
+    # CUTLASS DSL 4.6 removed ``nvvm.prefetch_tensormap`` in favor of the
+    # public CopyAtom helper. Prefer that API when available, while retaining
+    # the pointer-based paths for older DSL releases and explicit descriptors.
+    nvgpu = getattr(cute, "nvgpu", None)
+    cpasync = getattr(nvgpu, "cpasync", None)
+    prefetch_descriptor = getattr(cpasync, "prefetch_descriptor", None)
+    if isinstance(tma_desc, cute.CopyAtom) and prefetch_descriptor is not None:
+        prefetch_descriptor(tma_desc, loc=loc, ip=ip)
+        return
+
     if isinstance(tma_desc, cute.CopyAtom):
         tma_desc_ptr = extract_tensormap_ptr(tma_desc)
     elif isinstance(tma_desc, cute.Tensor):
         tma_desc_ptr = tma_desc.iterator
     else:
         tma_desc_ptr = tma_desc
-    nvvm.prefetch_tensormap(tma_desc_ptr.llvm_ptr, loc=loc, ip=ip)
+
+    legacy_prefetch = getattr(nvvm, "prefetch_tensormap", None)
+    if legacy_prefetch is not None:
+        legacy_prefetch(tma_desc_ptr.llvm_ptr, loc=loc, ip=ip)
+        return
+
+    generic_prefetch = getattr(arch, "prefetch", None)
+    if generic_prefetch is None:
+        raise RuntimeError("This nvidia-cutlass-dsl version does not expose a TMA descriptor prefetch API")
+    generic_prefetch(tma_desc_ptr.llvm_ptr, tensormap=True, loc=loc, ip=ip)
 
 
 # ---------------------------------------------------------------------------

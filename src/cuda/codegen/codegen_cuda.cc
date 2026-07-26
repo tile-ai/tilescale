@@ -5048,6 +5048,27 @@ void CodeGenTileLangCUDA::VisitExpr_(const ShuffleNode *op,
 void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
                                      std::ostream &os) { // NOLINT(*)
   int lanes = static_cast<int>(Downcast<IntImm>(op->lanes)->value);
+  if ((op->dtype.is_int() || op->dtype.is_uint()) && op->dtype.bits() == 8 &&
+      lanes == 32) {
+    std::string value = PrintExpr(op->value);
+    os << (op->dtype.is_uint() ? "make_ulonglong4(" : "make_longlong4(");
+    for (int packed_lane = 0; packed_lane < 4; ++packed_lane) {
+      if (packed_lane != 0) {
+        os << ", ";
+      }
+      os << "tl_pack_int8x8(";
+      for (int byte = 0; byte < 8; ++byte) {
+        if (byte != 0) {
+          os << ", ";
+        }
+        os << value;
+      }
+      os << ')';
+    }
+    os << ')';
+    return;
+  }
+
   if ((op->dtype.is_int() || op->dtype.is_uint()) && op->dtype.bits() == 8) {
     const int64_t *p = as_const_int(op->value);
     if (p) {
@@ -5060,20 +5081,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
           os << "(uint)" << v;
         } else {
           os << "(int)" << v;
-        }
-        return;
-      } else if (lanes == 32) {
-        // make_int8x32
-        const int64_t *p = as_const_int(op->value);
-        ICHECK(p);
-        int64_t v = *p & 0xFF;
-        v = (v << 24) | (v << 16) | (v << 8) | v;
-        if (op->dtype.is_uint()) {
-          os << "make_ulonglong4(" << v << ", " << v << ", " << v << ", " << v
-             << ")";
-        } else {
-          os << "make_longlong4(" << v << ", " << v << ", " << v << ", " << v
-             << ")";
         }
         return;
       }

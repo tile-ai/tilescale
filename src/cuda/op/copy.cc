@@ -922,6 +922,14 @@ LayoutMap Copy::InferBulkLayout(const CopyNode &op, const LayoutInferArgs &T,
     if (is_store) {
       // For BulkStore, infer a swizzled shared-memory layout when possible.
       int dim = shared_tensor->shape.size();
+      ICHECK_GT(dim, 0) << "TMA store requires a non-scalar shared buffer";
+      if (dim == 1) {
+        // Conservative OOB analysis can select descriptor TMA for a rank-1
+        // region. It has no matrix axes to swizzle, so keep the shared
+        // allocation linear.
+        result_map.Set(shared_tensor, ComputeLinearLayout(shared_tensor));
+        return result_map;
+      }
       const int64_t mat_stride = *as_const_int(shared_tensor->shape[dim - 2]);
       const int64_t mat_continuous =
           *as_const_int(shared_tensor->shape[dim - 1]);

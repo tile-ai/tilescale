@@ -116,6 +116,8 @@ def test_cp_async_then_wgmma_injects_fence_proxy():
             desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             C_local = T.decl_buffer((32,), T.float16, scope="local")
+            T.reads(B_global[0:16], desc_a[0], desc_b[0], C_local[0:32])
+            T.writes(A_shared[0:16], C_local[0:32])
             T.ptx_cp_async(
                 T.tvm_access_ptr(T.type_annotation(T.uint8), A_shared.data, 0, 16, 2),
                 T.tvm_access_ptr(T.type_annotation(T.uint8), B_global.data, 0, 16, 1),
@@ -149,6 +151,8 @@ def test_cp_async_then_wgmma_injects_fence_proxy():
             desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             C_local = T.decl_buffer((32,), T.float16, scope="local")
+            T.reads(B_global[0:16], desc_a[0], desc_b[0], C_local[0:32])
+            T.writes(A_shared[0:16], C_local[0:32])
             T.ptx_cp_async(
                 T.tvm_access_ptr(T.type_annotation(T.uint8), A_shared.data, 0, 16, 2),
                 T.tvm_access_ptr(T.type_annotation(T.uint8), B_global.data, 0, 16, 1),
@@ -220,6 +224,8 @@ def test_unknown_extern_shared_store_then_wgmma_injects_fence_proxy():
             desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             C_local = T.decl_buffer((32,), T.float16, scope="local")
+            T.reads(desc_a[0], desc_b[0], C_local[0:32])
+            T.writes(smem[0:16], C_local[0:32])
             T.evaluate(
                 T.call_extern(
                     "handle",
@@ -254,6 +260,8 @@ def test_unknown_extern_shared_store_then_wgmma_injects_fence_proxy():
             desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             C_local = T.decl_buffer((32,), T.float16, scope="local")
+            T.reads(desc_a[0], desc_b[0], C_local[0:32])
+            T.writes(smem[0:16], C_local[0:32])
             T.evaluate(
                 T.call_extern(
                     "handle",
@@ -294,6 +302,8 @@ def test_unknown_extern_address_of_shared_then_wgmma_injects_fence_proxy():
             desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             C_local = T.decl_buffer((32,), T.float16, scope="local")
+            T.reads(desc_a[0], desc_b[0], C_local[0:32])
+            T.writes(smem[0], C_local[0:32])
             T.evaluate(T.call_extern("handle", "custom_ptr_store", T.address_of(smem[0])))
             T.warpgroup_arrive()
             T.ptx_wgmma_ss(
@@ -322,6 +332,8 @@ def test_unknown_extern_address_of_shared_then_wgmma_injects_fence_proxy():
             desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             C_local = T.decl_buffer((32,), T.float16, scope="local")
+            T.reads(desc_a[0], desc_b[0], C_local[0:32])
+            T.writes(smem[0], C_local[0:32])
             T.evaluate(T.call_extern("handle", "custom_ptr_store", T.address_of(smem[0])))
             T.warpgroup_arrive()
             T.fence_proxy_async()
@@ -353,6 +365,8 @@ def test_inject_fence_proxy_does_not_inject_tma_store_sync():
     def before():
         with T.Kernel(8):
             A_global = T.decl_buffer((128,), T.float16, scope="global")
+            T.reads(A_global[0:128])
+            T.writes()
             T.evaluate(T.call_intrin("handle", tirx.op.Op.get("tl.tma_store"), A_global.data))
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
@@ -387,6 +401,8 @@ def test_wgmma_marked_async():
             desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             C_local = T.decl_buffer((32,), T.float16, scope="local")
+            T.reads(desc_a[0], desc_b[0], C_local[0:32])
+            T.writes(A_shared[0], C_local[0:32])
             A_shared[0] = T.float16(0)
             T.warpgroup_arrive()
             T.ptx_wgmma_ss(
@@ -436,6 +452,8 @@ def test_shared_barrier_ops_do_not_trigger_fence_proxy():
             desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             C_local = T.decl_buffer((32,), T.float16, scope="local")
+            T.reads(mbarrier[0], desc_a[0], desc_b[0], C_local[0:32])
+            T.writes(smem[0:16], mbarrier[0], desc_a[0], desc_b[0], C_local[0:32])
 
             # Local stores should not be treated as generic proxy traffic.
             C_local[0] = T.float16(0)
@@ -491,6 +509,8 @@ def test_shared_barrier_ops_do_not_trigger_fence_proxy():
             desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             C_local = T.decl_buffer((32,), T.float16, scope="local")
+            T.reads(mbarrier[0], desc_a[0], desc_b[0], C_local[0:32])
+            T.writes(smem[0:16], mbarrier[0], desc_a[0], desc_b[0], C_local[0:32])
 
             C_local[0] = T.float16(0)
 
@@ -891,6 +911,8 @@ def test_ldmatrix_then_wgmma_does_not_inject_fence_proxy():
             desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             C_local = T.decl_buffer((32,), T.float16, scope="local")
+            T.reads(smem[0:16], desc_a[0], desc_b[0], C_local[0:32])
+            T.writes(regs[0:16], C_local[0:32])
             T.call_intrin(
                 "handle",
                 tirx.op.Op.get("tl.ptx_ldmatrix"),
@@ -931,6 +953,8 @@ def test_stmatrix_then_wgmma_injects_fence_proxy():
             desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             C_local = T.decl_buffer((32,), T.float16, scope="local")
+            T.reads(desc_a[0], desc_b[0], C_local[0:32])
+            T.writes(smem[0:16], C_local[0:32])
             T.call_intrin(
                 "handle",
                 tirx.op.Op.get("tl.ptx_stmatrix"),
@@ -966,6 +990,8 @@ def test_stmatrix_then_wgmma_injects_fence_proxy():
             desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             C_local = T.decl_buffer((32,), T.float16, scope="local")
+            T.reads(desc_a[0], desc_b[0], C_local[0:32])
+            T.writes(smem[0:16], C_local[0:32])
             T.call_intrin(
                 "handle",
                 tirx.op.Op.get("tl.ptx_stmatrix"),
@@ -1007,6 +1033,8 @@ def test_if_merge_may_be_generic_then_async_injects_fence_proxy():
             desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             C_local = T.decl_buffer((32,), T.float16, scope="local")
+            T.reads(desc_a[0], desc_b[0], C_local[0:32])
+            T.writes(smem[0], C_local[0:32])
             if flag == 1:
                 smem[0] = T.float16(0)
             T.warpgroup_arrive()
@@ -1036,6 +1064,8 @@ def test_if_merge_may_be_generic_then_async_injects_fence_proxy():
             desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             C_local = T.decl_buffer((32,), T.float16, scope="local")
+            T.reads(desc_a[0], desc_b[0], C_local[0:32])
+            T.writes(smem[0], C_local[0:32])
             if flag == 1:
                 smem[0] = T.float16(0)
             T.warpgroup_arrive()
@@ -1073,6 +1103,8 @@ def test_hoist_fence_proxy_out_of_if():
             desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             C_local = T.decl_buffer((32,), T.float16, scope="local")
+            T.reads(desc_a[0], desc_b[0], C_local[0:32])
+            T.writes(smem[0], C_local[0:32])
             smem[0] = T.float16(0)
             T.warpgroup_arrive()
             if flag == 1:
@@ -1121,6 +1153,8 @@ def test_hoist_fence_proxy_out_of_if():
             desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             C_local = T.decl_buffer((32,), T.float16, scope="local")
+            T.reads(desc_a[0], desc_b[0], C_local[0:32])
+            T.writes(smem[0], C_local[0:32])
             smem[0] = T.float16(0)
             T.warpgroup_arrive()
             T.fence_proxy_async()
@@ -1182,6 +1216,8 @@ def test_hoist_fence_proxy_out_of_unrolled_loop():
             desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             C_local = T.decl_buffer((32,), T.float16, scope="local")
+            T.reads(desc_a[0], desc_b[0], C_local[0:32])
+            T.writes(smem[0], C_local[0:32])
 
             smem[0] = T.float16(0)
             T.warpgroup_arrive()
@@ -1212,6 +1248,8 @@ def test_hoist_fence_proxy_out_of_unrolled_loop():
             desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             C_local = T.decl_buffer((32,), T.float16, scope="local")
+            T.reads(desc_a[0], desc_b[0], C_local[0:32])
+            T.writes(smem[0], C_local[0:32])
 
             smem[0] = T.float16(0)
             T.warpgroup_arrive()
@@ -1251,6 +1289,8 @@ def test_hoist_fence_proxy_out_of_while_loop():
             desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             C_local = T.decl_buffer((32,), T.float16, scope="local")
+            T.reads(counter[0], desc_a[0], desc_b[0], C_local[0:32])
+            T.writes(smem[0], counter[0], C_local[0:32])
             smem[0] = T.float16(0)
             counter[0] = 0
             while counter[0] < T.int32(12):
@@ -1283,6 +1323,8 @@ def test_hoist_fence_proxy_out_of_while_loop():
             desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             C_local = T.decl_buffer((32,), T.float16, scope="local")
+            T.reads(counter[0], desc_a[0], desc_b[0], C_local[0:32])
+            T.writes(smem[0], counter[0], C_local[0:32])
             smem[0] = T.float16(0)
             counter[0] = 0
             T.fence_proxy_async()
@@ -1322,6 +1364,8 @@ def test_loop_carried_generic_then_async_injects_fence_proxy():
             desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             C_local = T.decl_buffer((32,), T.float16, scope="local")
+            T.reads(desc_a[0], desc_b[0], C_local[0:32])
+            T.writes(smem[0], C_local[0:32])
             for _ in range(2):
                 T.warpgroup_arrive()
                 T.ptx_wgmma_ss(
@@ -1351,6 +1395,8 @@ def test_loop_carried_generic_then_async_injects_fence_proxy():
             desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             C_local = T.decl_buffer((32,), T.float16, scope="local")
+            T.reads(desc_a[0], desc_b[0], C_local[0:32])
+            T.writes(smem[0], C_local[0:32])
             for _ in range(2):
                 T.warpgroup_arrive()
                 T.fence_proxy_async()
@@ -1388,6 +1434,8 @@ def test_shared_load_does_not_trigger_fence_proxy():
             desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             C_local = T.decl_buffer((32,), T.float16, scope="local")
+            T.reads(smem[0], desc_a[0], desc_b[0], C_local[0:32])
+            T.writes(C_local[0:32])
             x = smem[0]
             C_local[0] = x
             T.warpgroup_arrive()
@@ -1417,6 +1465,8 @@ def test_shared_load_does_not_trigger_fence_proxy():
             desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
             C_local = T.decl_buffer((32,), T.float16, scope="local")
+            T.reads(smem[0], desc_a[0], desc_b[0], C_local[0:32])
+            T.writes(C_local[0:32])
             x = smem[0]
             C_local[0] = x
             T.warpgroup_arrive()

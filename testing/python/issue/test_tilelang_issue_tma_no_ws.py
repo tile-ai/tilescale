@@ -8,6 +8,48 @@ import torch
 from tilelang.utils.sparse import get_e_factor
 
 
+def _matching_brace(src, open_brace):
+    depth = 0
+    for index in range(open_brace, len(src)):
+        if src[index] == "{":
+            depth += 1
+        elif src[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+    raise AssertionError("Unbalanced generated CUDA source")
+
+
+def _find_auto_ws_role_sources(src):
+    """Find TMA producer/consumer branches independent of thread partition order."""
+
+    branch_pattern = re.compile(r"\bif\s*\([^\n{}]*threadIdx\.x[^\n{}]*\)\s*\{")
+    for match in branch_pattern.finditer(src):
+        producer_open = src.index("{", match.start(), match.end())
+        producer_close = _matching_brace(src, producer_open)
+        else_match = re.match(r"\s*else\s*\{", src[producer_close + 1 :])
+        if else_match is None:
+            continue
+        consumer_open = producer_close + 1 + else_match.end() - 1
+        consumer_close = _matching_brace(src, consumer_open)
+        producer_src = src[producer_open + 1 : producer_close]
+        consumer_src = src[consumer_open + 1 : consumer_close]
+        if "tl::tma_load" not in producer_src or "tl::tma_load" in consumer_src:
+            continue
+        if "warpgroup_reg_dealloc" in src:
+            assert "warpgroup_reg_dealloc" in producer_src
+        if "warpgroup_reg_alloc" in src:
+            assert "warpgroup_reg_alloc" in consumer_src
+        return src[: match.start()], producer_src, consumer_src
+    return None
+
+
+def _auto_ws_role_sources(src):
+    roles = _find_auto_ws_role_sources(src)
+    assert roles is not None, "Expected a TMA producer/consumer warp-specialized branch"
+    return roles
+
+
 def _compile_tvm_ffi(func, pass_configs, **kwargs):
     tilelang.disable_cache()
     try:
@@ -59,7 +101,7 @@ def test_num_stages_zero_pure_tma_does_not_auto_warp_specialize():
     src = kernel.get_kernel_source()
     assert "tl::tma_load" not in src
     assert "__launch_bounds__(160, 1)" not in src
-    assert "if (((int)threadIdx.x) < 128)" not in src
+    assert _find_auto_ws_role_sources(src) is None
 
     x = torch.randn((M, K), device="cuda", dtype=torch.float16)
     y = kernel(x)
@@ -104,7 +146,9 @@ def test_num_stages_one_pure_tma_keeps_auto_warp_specialize():
     src = kernel.get_kernel_source()
     assert "tl::tma_load" in src
     assert "__launch_bounds__(160, 1)" in src
-    assert "if (((int)threadIdx.x) < 128)" in src
+    _, producer_src, consumer_src = _auto_ws_role_sources(src)
+    assert "tl::tma_load" in producer_src
+    assert "tl::tma_load" not in consumer_src
 
     x = torch.randn((M, K), device="cuda", dtype=torch.float16)
     y = kernel(x)
@@ -151,7 +195,9 @@ def test_guarded_pure_tma_pipeline_keeps_auto_warp_specialize():
     src = kernel.get_kernel_source()
     assert "tl::tma_load" in src
     assert "__launch_bounds__(160, 1)" in src
-    assert "if (((int)threadIdx.x) < 128)" in src
+    _, producer_src, consumer_src = _auto_ws_role_sources(src)
+    assert "tl::tma_load" in producer_src
+    assert "tl::tma_load" not in consumer_src
 
     x = torch.randn((M, K), device="cuda", dtype=torch.float16)
     y = kernel(x, M)
@@ -191,7 +237,7 @@ def test_num_stages_zero_cp_async_only_does_not_auto_warp_specialize():
     assert "cp_async_gs<16>" in src
     assert "__launch_bounds__(32, 1)" in src
     assert "__launch_bounds__(160, 1)" not in src
-    assert "if (((int)threadIdx.x) < 128)" not in src
+    assert _find_auto_ws_role_sources(src) is None
 
     x = torch.randint(0, 256, (4 * bytes_per_copy,), device="cuda", dtype=torch.uint8)
     y = kernel(x)
@@ -231,7 +277,7 @@ def test_num_stages_one_cp_async_only_keeps_non_ws_launch_shape():
     assert "cp_async_gs<16>" in src
     assert "__launch_bounds__(32, 1)" in src
     assert "__launch_bounds__(160, 1)" not in src
-    assert "if (((int)threadIdx.x) < 128)" not in src
+    assert _find_auto_ws_role_sources(src) is None
 
     x = torch.randint(0, 256, (4 * bytes_per_copy,), device="cuda", dtype=torch.uint8)
     y = kernel(x)
@@ -289,12 +335,9 @@ def test_num_stages_one_mixed_tma_cp_async_keeps_auto_ws():
 
     src = kernel.get_kernel_source()
     assert "tl::tma_load" in src
-    producer_idx = src.index("if (((int)threadIdx.x) < 128)")
-    consumer_idx = src.index("} else {", producer_idx)
-    cp_async_idx = src.index("cp_async_gs<16>")
-
-    assert producer_idx < cp_async_idx < consumer_idx
-    assert "cp_async_gs<16>" not in src[consumer_idx:]
+    _, producer_src, consumer_src = _auto_ws_role_sources(src)
+    assert "cp_async_gs<16>" in producer_src
+    assert "cp_async_gs<16>" not in consumer_src
 
 
 @tilelang.testing.requires_cuda_compute_version(9, 0)
@@ -395,12 +438,9 @@ def test_sparse_ws_regular_metadata_copy_stays_in_producer():
     kernel = _compile_tvm_ffi(sparse_tensorcore_metadata_copy, pass_configs, out_idx=[3])
 
     src = kernel.get_kernel_source()
-    producer_idx = src.index("if (((int)threadIdx.x) < 128)")
-    consumer_idx = src.index("} else {", producer_idx)
-    metadata_copy_idx = src.index("tl::tma_load(E_desc")
-
-    assert producer_idx < metadata_copy_idx < consumer_idx
-    assert "tl::tma_load(E_desc" not in src[consumer_idx:]
+    _, producer_src, consumer_src = _auto_ws_role_sources(src)
+    assert "tl::tma_load(E_desc" in producer_src
+    assert "tl::tma_load(E_desc" not in consumer_src
 
 
 @tilelang.testing.requires_cuda_compute_version(9, 0)
@@ -488,11 +528,7 @@ def test_pure_tma_consumer_local_init_does_not_leak_into_producer():
     kernel = _compile_tvm_ffi(sparse_flash_attn, pass_configs, out_idx=[4])
 
     src = kernel.get_kernel_source()
-    producer_idx = src.index("if (((int)threadIdx.x) < 128)")
-    consumer_idx = src.index("} else {", producer_idx)
-    prelude_src = src[:producer_idx]
-    producer_src = src[producer_idx:consumer_idx]
-    consumer_src = src[consumer_idx:]
+    prelude_src, producer_src, consumer_src = _auto_ws_role_sources(src)
     flat_src = " ".join(src.split())
 
     assert src.count(".init(1);") == 3
@@ -564,10 +600,7 @@ def test_pure_tma_fragment_mask_copy_initializes_consumer_branch():
     kernel = _compile_tvm_ffi(sparse_attention_mask_copy, pass_configs, out_idx=[3])
 
     src = kernel.get_kernel_source()
-    producer_idx = src.index("if (((int)threadIdx.x) < 128)")
-    consumer_idx = src.index("} else {", producer_idx)
-    producer_src = src[producer_idx:consumer_idx]
-    consumer_src = src[consumer_idx:]
+    _, producer_src, consumer_src = _auto_ws_role_sources(src)
 
     assert "BlockSparseMask" in producer_src
     assert "BlockSparseMask" in consumer_src
