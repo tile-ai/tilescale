@@ -88,16 +88,17 @@ def multimem_tma_store(src, dst, reduce_op: MultimemReduceOp | None = None):
     """Async bulk TMA store from shared memory to multicast global address.
 
     A single thread emits one PTX instruction per call. Synchronization is
-    caller-managed: synchronize shared-memory producers first, then issue
-    ``T.fence_proxy_async()``, this operation, ``T.tma_store_arrive()``, and
-    ``T.tma_store_wait()`` from the same elected thread.
+    caller-managed: every shared-memory producer must first issue
+    ``T.fence_proxy_async()``, then the CTA must synchronize. One elected
+    thread then issues this operation, ``T.tma_store_arrive()``, and
+    ``T.tma_store_wait()``.
 
     Args:
         src: Shared memory source (Buffer, BufferLoad or BufferRegion, shared scope)
         dst: Multicast global destination (Buffer, BufferLoad or BufferRegion, global scope)
         reduce_op: None for plain store (broadcast), MultimemReduceOp.ADD/MIN/MAX for reduce-accumulate
 
-    NOTE: The current CUDA implementation requires SM100+ and CUDA toolkit 13.x.
+    NOTE: The current CUDA implementation requires SM100+ and CUDA toolkit 13.1+.
     Older toolkits can use an ordinary TMA store to the multicast virtual
     address where that path has been validated.
     """

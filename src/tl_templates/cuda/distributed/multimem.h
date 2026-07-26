@@ -560,10 +560,12 @@ template <> struct SignalAdd<int32_t> {
   }
 };
 
-// === Bulk async TMA-to-multicast (SM100+ / PTX 9.1+ / CUDA 13.0+) ===
+// === Bulk async TMA-to-multicast (SM100+ / PTX 9.1+ / CUDA 13.1+) ===
 // Both: shared::cta → global(mcast), bulk_group completion
 
-#if __CUDA_ARCH__ >= 1000 && __CUDACC_VER_MAJOR__ >= 13
+#if __CUDA_ARCH__ >= 1000 &&                                                   \
+    (__CUDACC_VER_MAJOR__ > 13 ||                                              \
+     (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 1))
 
 TL_DEVICE void cp_async_bulk(void *mcast_global, void *smem, uint32_t size) {
   uint32_t smem_int = smem_ptr_to_uint(smem);
@@ -673,7 +675,7 @@ TL_DEVICE void cp_reduce_async_bulk_add_bf16(void *mcast_global, void *smem,
   asm("trap;");
 }
 
-#endif // __CUDA_ARCH__ >= 1000 && __CUDACC_VER_MAJOR__ >= 13
+#endif // SM100+ and CUDA 13.1+
 
 } // namespace multimem
 } // namespace tl

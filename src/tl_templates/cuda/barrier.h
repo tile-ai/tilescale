@@ -130,7 +130,7 @@ TL_DEVICE void mbarrier_cp_async_arrive_noinc(BarrierType &smem_mbar) {
 }
 
 TL_DEVICE void fence_proxy_async() {
-  asm volatile("fence.proxy.async.shared::cta;" : :);
+  asm volatile("fence.proxy.async.shared::cta;" : : : "memory");
 }
 
 TL_DEVICE void fence_barrier_init() {
