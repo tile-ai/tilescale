@@ -10,7 +10,7 @@ body:
       description: Make sure you've completed the following steps before submitting your issue -- thank you!
       options:
         - label: >-
-            I have searched the [Issue Tracker](https://github.com/tile-ai/tilelang/issues)
+            I have searched the [Issue Tracker](https://github.com/tile-ai/tilescale/issues)
             that this hasn't already been reported. (comment there if it has.)
           required: true
 

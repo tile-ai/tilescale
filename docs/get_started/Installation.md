@@ -1,32 +1,53 @@
-# Installation Guide
+# TileScale Installation Guide
 
 ## Installing with pip
 
-**Prerequisites for installation via wheel or PyPI:**
+**Prerequisites for installation from a wheel:**
 
 - **glibc**: 2.28 (Ubuntu 20.04 or later)
 - **Python Version**: >= 3.10
-- **CUDA Version**: >= 10.0 (host installation), or pip-provided CUDA toolchain (>= 13.0)
+- **CUDA Version**: >= 11.4 (host installation), or pip-provided CUDA toolchain (>= 13.0)
 
-The easiest way to install tilelang is directly from PyPI using pip. To install the latest version, run the following command in your terminal:
+Blackwell/B200 compilation requires CUDA 12.8 or newer; CUDA 13.x is the
+recommended toolchain for the distributed B200 examples.
 
-```bash
-pip install tilelang
-```
+TileScale publishes the `tilescale` Python distribution and intentionally
+provides the `tilelang` import namespace. Do not install TileScale and upstream
+TileLang in the same environment.
 
-Alternatively, you may choose to install tilelang using prebuilt packages available on the Release Page:
-
-```bash
-pip install tilelang-0.0.0.dev0+ubuntu.20.4.cu120-py3-none-any.whl
-```
-
-To install the latest version of tilelang from the GitHub repository, you can run the following command:
+The old `tilescale==0.0.0.dev1/dev2` placeholder installed upstream TileLang as
+a dependency. `pip install -U` cannot safely remove that now-conflicting
+distribution. Use a fresh virtual environment, or migrate explicitly:
 
 ```bash
-pip install git+https://github.com/tile-ai/tilelang.git
+python -m pip uninstall -y tilescale tilelang
+python -m pip install "tilescale[distributed]>=0.0.2"
 ```
 
-After installing tilelang, you can verify the installation by running:
+Install a release wheel with:
+
+```bash
+pip install ./dist/tilescale-*.whl
+```
+
+For the single-node multi-GPU runtime, also install the distributed extra when
+building from a checkout, or install its two host dependencies next to a wheel:
+
+```bash
+pip install "cuda-python>=12.0" nvidia-ml-py
+```
+
+To install from source, clone the TileScale repository and initialize its pinned
+submodules:
+
+```bash
+git clone --recursive https://github.com/tile-ai/tilescale.git
+cd tilescale
+pip install -r requirements-dev.txt
+pip install --no-build-isolation ".[distributed]"
+```
+
+Verify the package through its compatibility namespace:
 
 ```bash
 python -c "import tilelang; print(tilelang.__version__)"
@@ -38,7 +59,9 @@ python -c "import tilelang; print(tilelang.__version__)"
 
 - **Operating System**: Linux or Windows
 - **Python Version**: >= 3.10
-- **CUDA Version**: >= 10.0 (host installation), or pip-provided CUDA toolchain (>= 13.0)
+- **CUDA Version**: >= 11.4 (host installation), or pip-provided CUDA toolchain (>= 13.0)
+
+Blackwell/B200 compilation requires CUDA 12.8 or newer.
 
 If you prefer Docker, please skip to the [Install Using Docker](#install-using-docker) section. The commands below use Ubuntu/Debian as the Linux example; Windows-specific notes are called out where they differ.
 
@@ -51,16 +74,20 @@ apt-get install -y python3 python3-dev python3-setuptools gcc zlib1g-dev build-e
 
 On Windows, install Python 3, CMake, and Visual Studio Build Tools with the MSVC C++ toolchain. Run the `pip install` commands below from a Visual Studio Developer Command Prompt (or `call VsDevCmd.bat` first) so that `cl.exe` is on `PATH` and CMake can detect the compiler.
 
-Then, clone the tilelang repository and install it using pip. The `-v` flag enables verbose output during the build process.
+Then, clone TileScale and install it using pip. The `-v` flag enables verbose output during the build process.
 
-> **Note**: Use the `--recursive` flag to include necessary submodules. Tilelang currently depends on a customized version of TVM, which is included as a submodule. If you prefer [Building with Existing TVM Installation](#using-existing-tvm), you can skip cloning the TVM submodule (but still need other dependencies).
+> **Note**: Use the `--recursive` flag to include necessary submodules. TileScale
+> inherits TileLang's customized TVM dependency. If you prefer
+> [Building with Existing TVM Installation](#using-existing-tvm), you can skip
+> cloning the TVM submodule while still initializing the other dependencies.
 
 ### With host CUDA toolchain
 
 ```bash
-git clone --recursive https://github.com/tile-ai/tilelang.git
-cd tilelang
-pip install . -v
+git clone --recursive https://github.com/tile-ai/tilescale.git
+cd tilescale
+pip install -r requirements-dev.txt
+pip install --no-build-isolation ".[distributed]" -v
 ```
 
 ### With pip-provided CUDA toolchain (no host CUDA required)
@@ -70,11 +97,11 @@ If you don't have CUDA installed on the host, you can use pip-provided CUDA pack
 **Option A** — pip toolchain in the current environment (use `--no-build-isolation`):
 
 ```bash
-git clone --recursive https://github.com/tile-ai/tilelang.git
-cd tilelang
+git clone --recursive https://github.com/tile-ai/tilescale.git
+cd tilescale
 pip install -r requirements-dev.txt
 pip install "nvidia-cuda-nvcc>=13" "nvidia-cuda-cccl>=13" "nvidia-cuda-nvrtc>=13"
-pip install . -v --no-build-isolation
+pip install ".[distributed]" -v --no-build-isolation
 ```
 
 **Option B** — pip toolchain in another virtualenv or path:
@@ -82,16 +109,12 @@ pip install . -v --no-build-isolation
 ```bash
 # Point to the cu<ver> directory inside another venv's site-packages
 export WITH_PIP_CUDA_TOOLCHAIN=/path/to/venv/lib/python3.x/site-packages/nvidia/cu13
-pip install . -v
+pip install ".[distributed]" -v --no-build-isolation
 ```
 
-If you want to install tilelang in development mode, you can use the `-e` flag so that any changes to the Python files will be reflected immediately without reinstallation.
-
-```bash
-pip install -e . -v
-```
-
-> **Note**: changes to C++ files require rebuilding the tilelang C++ library. See [Faster Rebuild for Developers](#faster-rebuild-for-developers) below. A default `build` directory will be created if you use `pip install`, so you can also directly run `make` in the `build` directory to rebuild it as [Working from Source via PYTHONPATH](#working-from-source-via-pythonpath) suggested below.
+Editable installs are not supported by this release build. For development,
+build the native library and run from the source tree through `PYTHONPATH` as
+described below.
 
 (working-from-source-via-pythonpath)=
 
@@ -116,7 +139,7 @@ ninja
 Then add the repository root to `PYTHONPATH` before importing `tilelang`, for example:
 
 ```bash
-export PYTHONPATH=/path/to/tilelang:$PYTHONPATH
+export PYTHONPATH=/path/to/tilescale:$PYTHONPATH
 python -c "import tilelang; print(tilelang.__version__)"
 ```
 
@@ -141,7 +164,9 @@ TVM_ROOT=<your-tvm-repo> pip install . -v
 
 ## Install Using Docker
 
-For users who prefer a containerized environment with all dependencies pre-configured, tilelang provides Docker images for different CUDA versions. This method is particularly useful for ensuring consistent environments across different systems.
+For users who prefer a containerized environment, TileScale retains TileLang's
+Dockerfiles for supported CUDA versions. Build the image from this checkout so
+that it contains the TileScale sources under evaluation.
 
 **Prerequisites:**
 - Docker installed on your system
@@ -150,21 +175,23 @@ For users who prefer a containerized environment with all dependencies pre-confi
 1. **Clone the Repository**:
 
 ```bash
-git clone --recursive https://github.com/tile-ai/tilelang
-cd tilelang
+git clone --recursive https://github.com/tile-ai/tilescale
+cd tilescale
 ```
 
 2. **Build Docker Image**:
 
 Navigate to the docker directory and build the image for your desired CUDA version:
 
+Run the build from the repository root so the Dockerfile receives the current
+TileScale checkout rather than fetching another branch:
+
 ```bash
-cd docker
-docker build -f Dockerfile.cu120 -t tilelang-cu120 .
+docker build -f docker/Dockerfile.cu128 -t tilescale-cu128 .
 ```
 
 Available Dockerfiles:
-- `Dockerfile.cu120` - For CUDA 12.0
+- `Dockerfile.cu128` - For CUDA 12.8 and B200
 - Other CUDA versions may be available in the docker directory
 
 3. **Run Docker Container**:
@@ -175,23 +202,23 @@ Start the container with GPU access and volume mounting:
 docker run -itd \
   --shm-size 32g \
   --gpus all \
-  -v /home/tilelang:/home/tilelang \
-  --name tilelang_b200 \
-  tilelang-cu120 \
+  -v /home/tilescale:/home/tilescale \
+  --name tilescale_b200 \
+  tilescale-cu128 \
   /bin/zsh
 ```
 
 **Command Parameters Explanation:**
 - `--shm-size 32g`: Increases shared memory size for better performance
 - `--gpus all`: Enables access to all available GPUs
-- `-v /home/tilelang:/home/tilelang`: Mounts host directory to container (adjust path as needed)
-- `--name tilelang_b200`: Assigns a name to the container for easy management
+- `-v /home/tilescale:/home/tilescale`: Mounts the source directory (adjust path as needed)
+- `--name tilescale_b200`: Assigns a name to the container for easy management
 - `/bin/zsh`: Uses zsh as the default shell
 
 4. **Access the Container and Verify Installation**:
 
 ```bash
-docker exec -it tilelang_b200 /bin/zsh
+docker exec -it tilescale_b200 /bin/zsh
 # Inside the container:
 python -c "import tilelang; print(tilelang.__version__)"
 ```
@@ -254,51 +281,49 @@ mkdir -p /usr/local/bin
 printf "#!/usr/bin/env bash\nexec \"%s\" \"\$@\"\n" "$LLVM_CONFIG_PATH" > /usr/local/bin/llvm-config-16
 chmod +x /usr/local/bin/llvm-config-16
 
-# TVM Python bits need Cython (for system Python used by the build)
-pip install --no-cache-dir "cython>=0.29.36,<3.0"
+# Match TileScale's declared isolated build requirements.
+pip install --no-cache-dir "cython>=3.1.0" "z3-solver>=4.13.0,<4.15.5"
 
-# Clone + build TileLang (ROCm)
-# Default location: /opt/tilelang (adjust if you prefer a different path).
-git clone --recursive https://github.com/tile-ai/tilelang.git /opt/tilelang
-cd /opt/tilelang
+# Clone + build TileScale (ROCm)
+# Default location: /opt/tilescale (adjust if you prefer a different path).
+git clone --recursive https://github.com/tile-ai/tilescale.git /opt/tilescale
+cd /opt/tilescale
 git submodule update --init --recursive
 export CMAKE_ARGS="-DUSE_CUDA=OFF -DUSE_ROCM=ON -DROCM_PATH=/opt/rocm -DLLVM_CONFIG=${LLVM_CONFIG}"
 
-# Avoid pulling CUDA wheels / reinstalling torch by skipping dependency resolution.
-# Assume torch is already installed in the container.
-pip install -e . -v --no-build-isolation --no-deps
-
-# Manually install required runtime deps when using --no-deps.
-# Note: skip torch-c-dlpack-ext on ROCm (its wheel expects CUDA libs).
-pip install "apache-tvm-ffi>=0.1.6" "z3-solver>=4.13.0"
+# Avoid pulling CUDA wheels or reinstalling the ROCm-enabled torch. Install the
+# runtime dependencies declared by pyproject.toml, except the CUDA-only
+# torch-c-dlpack-ext package, then build without dependency resolution.
+pip install "apache-tvm-ffi==0.1.11" cloudpickle ml-dtypes \
+  "numpy>=1.23.5" psutil "tqdm>=4.62.3" "typing-extensions>=4.10.0" \
+  "z3-solver>=4.13.0,<4.15.5"
+TVM_FFI_DISABLE_TORCH_C_DLPACK=1 pip install . -v --no-build-isolation --no-deps
 # If you already installed torch-c-dlpack-ext and hit `libtorch_cuda.so` errors:
 # pip uninstall -y torch-c-dlpack-ext
 
 # If you hit Cython compile errors like `PyLong_SHIFT`/`digit` not declared,
-# disable the stable ABI (abi3) for editable builds:
+# disable the stable ABI (abi3) for local builds:
 # export CMAKE_ARGS="-DUSE_CUDA=OFF -DUSE_ROCM=ON -DROCM_PATH=/opt/rocm -DLLVM_CONFIG=${LLVM_CONFIG} -DSKBUILD_SABI_VERSION="
-# pip install -e . -v --no-build-isolation --no-deps
+# pip install . -v --no-build-isolation --no-deps
 
 # Verify
 python -c "import tilelang; print(tilelang.__version__)"
 ```
 
-If you still want to use `pip install -e . -v --no-build-isolation` without `--no-deps`, pip will try to resolve TileLang dependencies and may download CUDA wheels (e.g., `nvidia_cudnn`, `nvidia_nvshmem`) and reinstall `torch`. To avoid that in ROCm containers, keep `--no-deps` and ensure required packages are already installed.
+Without `--no-deps`, pip may resolve large CUDA dependencies and reinstall
+`torch`. In a preconfigured ROCm container, keep `--no-deps` and install the
+required runtime packages explicitly.
 
-## Install with Nightly Version
+## Upstream TileLang Builds
 
-For users who want access to the latest features and improvements before official releases, we provide nightly builds of tilelang.
-
-```bash
-pip install tilelang -f https://tile-ai.github.io/whl/nightly
-# or pip install tilelang --find-links https://tile-ai.github.io/whl/nightly
-```
-
-> **Note:** Nightly builds contain the most recent code changes but may be less stable than official releases. They're ideal for testing new features or if you need a specific bugfix that hasn't been released yet.
+TileLang's PyPI and nightly wheels are separate distributions. Installing one
+over TileScale replaces the shared `tilelang` namespace, so use a separate
+environment when comparing against upstream.
 
 ## Install Configs
 
 ### Build-time environment variables
+
 `USE_CUDA`: If to enable CUDA support, default: `ON` on Linux, set to `OFF` to build a CPU version. By default, we'll use `/usr/local/cuda` for building tilelang. Set `CUDAToolkit_ROOT` to use different cuda toolkit.
 
 `USE_ROCM`: If to enable ROCm support, default: `OFF`. If your ROCm SDK does not located in `/opt/rocm`, set `USE_ROCM=<rocm_sdk>` to enable build ROCm against custom sdk path.
@@ -310,12 +335,12 @@ pip install tilelang -f https://tile-ai.github.io/whl/nightly
 `WITH_PIP_CUDA_TOOLCHAIN`: Path to a pip-installed CUDA toolkit directory (e.g., `/path/to/venv/lib/python3.x/site-packages/nvidia/cu13`). When set, the build system uses this directory instead of a host CUDA installation. If not set and no host CUDA is found, the build system will attempt to auto-detect pip-installed CUDA packages from the current Python environment.
 
 `NO_VERSION_LABEL` and `NO_TOOLCHAIN_VERSION`:
-When building tilelang, we'll try to embed SDK and version information into package version as below,
+When building TileScale, the version provider embeds SDK and revision information as below,
 where local version label could look like `<sdk>.git<git_hash>`. Set `NO_VERSION_LABEL=ON` to disable this behavior.
 ```
 $ python -mbuild -w
 ...
-Successfully built tilelang-0.1.6.post1+cu116.git0d4a74be-cp38-abi3-linux_x86_64.whl
+Successfully built tilescale-0.0.2+cu132.git<revision>-cp38-abi3-linux_x86_64.whl
 ```
 
 where `<sdk>={cuda,rocm,metal}`. Specifically, when `<sdk>=cuda` and `CUDA_VERSION` is provided via env,
@@ -330,7 +355,7 @@ Please refer to the `env.py` file for a full list of supported run-time environm
 
 ### IDE Configs
 
-Building tilelang locally will automatically generate a `compile_commands.json` file in `build` dir.
+Building TileScale locally will automatically generate a `compile_commands.json` file in the `build` directory.
 VSCode with clangd and [clangd extension](https://marketplace.visualstudio.com/items?itemName=llvm-vs-code-extensions.vscode-clangd) should be able to index that without extra configuration.
 
 ### Compile Cache
@@ -350,28 +375,23 @@ to repair them.
 `pip install` introduces extra [un]packaging and takes ~30 sec to complete,
 even if no source change.
 
-Developers who needs to recompile frequently could use:
+Developers who need to recompile frequently can use a source build:
 
 ```bash
 pip install -r requirements-dev.txt
 
-# For first time compilation
-pip install -e . -v --no-build-isolation
-
-# Or manually compile with cmake/ninja. Remember to set PYTHONPATH properly.
-mkdir build
-cd build
-cmake .. -G Ninja
-ninja
+# Configure once. Use a fresh build directory when changing generators.
+cmake -S . -B build -G Ninja -DUSE_CUDA=ON
+cmake --build build -j
 
 # Rebuild when you change the cpp code
-cd build; ninja
+cmake --build build -j
 ```
 
-When running in editable/developer mode,
-you'll see logs like below:
+Run directly from the source tree by setting `PYTHONPATH` to the repository root.
+Development imports log the native library selected from `build`:
 
 ```console
 $ python -c 'import tilelang'
-2025-10-14 11:11:29  [TileLang:tilelang.env:WARNING]: Loading tilelang libs from dev root: /Users/yyc/repo/tilelang/build
+2025-10-14 11:11:29  [TileLang:tilelang.env:WARNING]: Loading tilelang libs from dev root: /path/to/tilescale/build
 ```

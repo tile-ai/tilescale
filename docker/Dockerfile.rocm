@@ -22,17 +22,23 @@ ENV PYTORCH_ROCM_ARCH="gfx90a;gfx942;gfx950;gfx1201;gfx1100"
 RUN apt-get update && apt-get install -y python3 python3-dev python3-setuptools gcc libtinfo-dev zlib1g-dev build-essential cmake libedit-dev libxml2-dev && \
     apt-get clean autoclean && rm -rf /var/lib/apt/lists/{cache,log} /tmp/* /var/tmp/*
 
-RUN pip install 'numpy<2.0' --force-reinstall
+RUN pip install --no-cache-dir \
+    "apache-tvm-ffi==0.1.11" \
+    cloudpickle \
+    ml-dtypes \
+    "numpy>=1.23.5,<2.0" \
+    psutil \
+    "tqdm>=4.62.3" \
+    "typing-extensions>=4.10.0" \
+    "z3-solver>=4.13.0,<4.15.5"
 
-# Copy local tilelang directory instead of cloning from git
-# Build from tilelang root: docker build -f docker/Dockerfile.rocm -t tilelang_rocm:latest .
-COPY . /root/tilelang
+COPY . /root/TileScale
 
-RUN cd /root/tilelang && \
-    cp pyproject.toml pyproject.toml.bak && \
-    sed -i '/^[[:space:]]*\"torch/d' pyproject.toml && \
-    USE_ROCM=1 USE_CUDA=0 pip install -e . -v && \
-    mv pyproject.toml.bak pyproject.toml
+# The base image already provides a ROCm-enabled torch. Avoid resolving the
+# CUDA-only torch-c-dlpack-ext dependency while retaining isolated build deps.
+RUN cd /root/TileScale && \
+    TVM_FFI_DISABLE_TORCH_C_DLPACK=1 USE_ROCM=1 USE_CUDA=0 \
+    pip install . --no-deps -v
 
 SHELL ["/bin/bash", "-l", "-c"]
 

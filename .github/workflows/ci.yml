@@ -34,7 +34,8 @@ env:
 jobs:
   lint:
     name: Lint
-    runs-on: [self-hosted, tilescale]
+    # Lint untrusted fork pull requests only on an ephemeral GitHub-hosted runner.
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - name: Checkout repository
@@ -87,9 +88,19 @@ jobs:
 
   tests:
     name: NVIDIA CUDA Tests
+    # Never execute fork pull-request code on the persistent GPU runner. A
+    # maintainer can reproduce an external contribution from a trusted branch
+    # or start this workflow manually after review.
     if: |
       github.repository_owner == 'tile-ai' &&
-      (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+      (
+        github.event_name == 'workflow_dispatch' ||
+        (
+          github.event_name == 'pull_request' &&
+          !github.event.pull_request.draft &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        )
+      )
     needs: [lint]
     runs-on: [self-hosted, tilescale, nvidia]
     timeout-minutes: 120
@@ -216,15 +227,22 @@ jobs:
 
       - name: Run distributed CUDA tests
         env:
-          TILELANG_USE_DISTRIBUTED: "1"
           MASTER_ADDR: "127.0.0.1"
-          WORLD_SIZE: "1"
-          RANK: "0"
-          LOCAL_RANK: "0"
           NCCL_IB_DISABLE: "1"
           NCCL_DEBUG: "WARN"
         run: |
           cd testing
+          GPU_COUNT="$(uv run --no-project -- python -c 'import torch; print(torch.cuda.device_count())')"
+          echo "Visible CUDA GPUs: ${GPU_COUNT}"
+          if (( GPU_COUNT < 2 )); then
+            echo "::error::Distributed CI requires at least 2 visible CUDA GPUs; found ${GPU_COUNT}."
+            exit 1
+          fi
+
+          # Tests spawn their own multi-process groups. Do not inject a
+          # single-rank launcher environment that can hide a broken smoke run.
+          unset WORLD_SIZE RANK LOCAL_RANK LOCAL_WORLD_SIZE GROUP_RANK NNODES NODE_RANK
+
           PORT_SEED="${GITHUB_RUN_ID:-0}"
           MASTER_PORT=$((20000 + PORT_SEED % 20000))
           export MASTER_PORT

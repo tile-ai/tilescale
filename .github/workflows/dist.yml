@@ -57,6 +57,10 @@ jobs:
         run: |
           uv run --no-project --with=build -m -- build --sdist --outdir=dist
 
+      - name: Verify SDist contents
+        run: |
+          python3 maint/scripts/check_distribution_contents.py dist/*.tar.gz
+
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1
         with:
@@ -72,11 +76,15 @@ jobs:
 
       - name: Test SDist buildable
         run: |
-          TEMP_DIR="$(mktemp -d -t tilelang-sdist-test)"
+          TEMP_DIR="$(mktemp -d -t tilescale-sdist-test)"
           cp -r dist "${TEMP_DIR}/dist"
           cd "${TEMP_DIR}"
+          # Rebuilding an sdist must preserve its public version without
+          # relying on release-job environment inherited from the checkout.
+          unset NO_VERSION_LABEL NO_TOOLCHAIN_VERSION NO_GIT_VERSION
           uv pip install -v dist/*.tar.gz
-          python3 -c "import tilelang; print(tilelang.__version__)"
+          python3 "${GITHUB_WORKSPACE}/maint/scripts/smoke_test_distribution.py"
+          python3 -c 'from importlib.metadata import version; assert version("tilescale") == "0.0.2"'
 
       - name: Upload SDist
         # Not PR to save artifact storage, as SDist is only needed for releases.
@@ -198,6 +206,21 @@ jobs:
           python-version: ${{ matrix.target.python_version }}
           activate-environment: true
 
+      - name: Verify wheel contents
+        if: runner.os != 'Windows'
+        run: |
+          python3 maint/scripts/check_distribution_contents.py wheelhouse/*.whl
+
+      - name: Verify wheel contents (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $wheels = @(Get-ChildItem wheelhouse -Filter *.whl | ForEach-Object { $_.FullName })
+          if ($wheels.Count -eq 0) {
+            throw "No wheels found in wheelhouse"
+          }
+          & python maint/scripts/check_distribution_contents.py @wheels
+
       - name: Test built wheels
         if: runner.os != 'Windows'
         run: |
@@ -215,7 +238,8 @@ jobs:
               (
                 set -e
                 cd /
-                uv run --no-project -- python -c "import tilelang; print(tilelang.__version__)"
+                uv run --no-project -- python \
+                  "${GITHUB_WORKSPACE}/maint/scripts/smoke_test_distribution.py"
               )
               deactivate
               rm -rf test-venv
@@ -241,7 +265,7 @@ jobs:
             uv pip install -v --python $python $wheel
             Push-Location $env:RUNNER_TEMP
             try {
-              & $python -c "import tilelang; print(tilelang.__version__)"
+              & $python "$env:GITHUB_WORKSPACE/maint/scripts/smoke_test_distribution.py"
             } finally {
               Pop-Location
             }
@@ -262,11 +286,14 @@ jobs:
                 uv venv test-venv
                 source test-venv/bin/activate
 
-                uv pip install -v "${WHEEL}"
+                uv pip install -v "${WHEEL}[distributed]"
                 (
                   set -e
                   cd /
-                  uv run --no-project -- python -c "import tilelang, torch; print(tilelang.__version__, torch.__version__)" >> "$VERSION_LOG"
+                  uv run --no-project -- python \
+                    "${GITHUB_WORKSPACE}/maint/scripts/smoke_test_distribution.py" \
+                    --require-cuda-shared-memory >> "$VERSION_LOG"
+                  uv run --no-project -- python -c "import torch; print(torch.__version__)" >> "$VERSION_LOG"
                 )
                 deactivate
                 rm -rf test-venv
@@ -299,10 +326,11 @@ jobs:
               uv venv test-venv
               $python = Join-Path (Resolve-Path test-venv).Path "Scripts\python.exe"
 
-              uv pip install -v --python $python $wheel
+              uv pip install -v --python $python "${wheel}[distributed]"
               Push-Location $env:RUNNER_TEMP
               try {
-                & $python -c "import tilelang, torch; print(tilelang.__version__, torch.__version__)" | Out-File -Append -FilePath $versionLog -Encoding utf8
+                & $python "$env:GITHUB_WORKSPACE/maint/scripts/smoke_test_distribution.py" --require-cuda-shared-memory | Out-File -Append -FilePath $versionLog -Encoding utf8
+                & $python -c "import torch; print(torch.__version__)" | Out-File -Append -FilePath $versionLog -Encoding utf8
               } finally {
                 Pop-Location
               }
@@ -361,7 +389,7 @@ jobs:
     timeout-minutes: 15
     environment:
       name: pypi
-      url: https://pypi.org/p/tilelang
+      url: https://pypi.org/p/tilescale
     permissions:
       contents: read
       id-token: write

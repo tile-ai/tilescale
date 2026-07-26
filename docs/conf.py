@@ -1,7 +1,7 @@
 # General information about the project.
-project = "TileLang <br>"
-author = "Tile Lang Contributors"
-copyright = f"2025-2025, {author}"
+project = "TileScale V0"
+author = "TileScale and TileLang Contributors"
+copyright = f"2025-2026, {author}"
 
 # Version information.
 with open("../VERSION") as f:
@@ -57,14 +57,15 @@ html_theme = "furo"
 templates_path = []
 html_static_path = ["_static"]
 html_css_files = ["custom.css"]
-footer_copyright = "© 2025-2026 TileLang"
+footer_copyright = "Copyright 2025-2026 TileScale and TileLang Contributors"
 footer_note = " "
 
 html_theme_options = {"light_logo": "img/logo-v2.png", "dark_logo": "img/logo-v2.png"}
 
 header_links = [
-    ("Home", "https://github.com/tile-ai/tilelang"),
-    ("Github", "https://github.com/tile-ai/tilelang"),
+    ("Home", "https://github.com/tile-ai/tilescale"),
+    ("GitHub", "https://github.com/tile-ai/tilescale"),
+    ("Upstream TileLang", "https://github.com/tile-ai/tilelang"),
 ]
 
 html_context = {
@@ -73,7 +74,7 @@ html_context = {
     "header_links": header_links,
     "display_github": True,
     "github_user": "tile-ai",
-    "github_repo": "tilelang",
+    "github_repo": "tilescale",
     "github_version": "main/docs/",
     "theme_vcs_pageview_mode": "edit",
 }

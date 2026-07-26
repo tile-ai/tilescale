@@ -1,6 +1,7 @@
 # Requirements to run local build with `--no-build-isolation` or other developments
 
-apache-tvm-ffi~=0.1.0,>=0.1.10
+# Keep the local build ABI aligned with the vendored TVM-FFI headers.
+apache-tvm-ffi==0.1.11
 build
 cmake>=3.26
 cython>=3.1.0

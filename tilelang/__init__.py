@@ -34,10 +34,10 @@ def _compute_version() -> str:
     try:
         from importlib.metadata import version as _dist_version  # py3.8+
 
-        return _dist_version("tilelang")
+        return _dist_version("tilescale")
     except Exception as exc:
         warnings.warn(
-            f"tilelang version metadata unavailable ({exc!r}); using development version.",
+            f"tilescale version metadata unavailable ({exc!r}); using development version.",
             RuntimeWarning,
             stacklevel=2,
         )

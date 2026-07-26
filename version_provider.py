@@ -12,7 +12,7 @@ ROOT = Path(__file__).parent
 base_version = (ROOT / "VERSION").read_text().strip()
 # When installing a sdist,
 # the installed version needs to match the sdist version,
-# so pip will complain when we install `tilelang-0.1.6.post2+gitxxxx.tar.gz`.
+# so pip will complain when we install `tilescale-0.0.2+gitxxxx.tar.gz`.
 # To workaround that, when building sdist,
 # we do not add version label and use a file to store the git hash instead.
 git_pin = ROOT / ".git_commit.txt"
@@ -24,19 +24,25 @@ def _read_cmake_bool(i: str | None, default=False):
     return i.lower() not in ("0", "false", "off", "no", "n", "")
 
 
+def _is_git_checkout() -> bool:
+    """Return whether ROOT owns Git metadata, including worktree markers."""
+    marker = ROOT / ".git"
+    return marker.is_dir() or marker.is_file()
+
+
 @lru_cache(maxsize=1)
 def get_git_commit_id() -> str | None:
     """Get the current git commit hash by running git in the current file's directory."""
 
-    r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, encoding="utf-8")
-    if r.returncode == 0:
-        _git = r.stdout.strip()
-        git_pin.write_text(_git)
-        return _git
-    elif git_pin.exists():
+    if _is_git_checkout():
+        result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, encoding="utf-8")
+        if result.returncode == 0:
+            commit = result.stdout.strip()
+            git_pin.write_text(commit)
+            return commit
+    if git_pin.exists():
         return git_pin.read_text().strip()
-    else:
-        return None
+    return None
 
 
 def dynamic_metadata(field: str, settings: dict[str, object] | None = None) -> str:
@@ -46,6 +52,12 @@ def dynamic_metadata(field: str, settings: dict[str, object] | None = None) -> s
 
     # generate git version for sdist
     get_git_commit_id()
+
+    # An sdist or source archive must rebuild to the exact public version even
+    # when release-only environment variables are absent. The pin remains
+    # available for provenance but never becomes local version metadata.
+    if not _is_git_checkout():
+        return version
 
     if not _read_cmake_bool(os.environ.get("NO_VERSION_LABEL")):
         exts = []

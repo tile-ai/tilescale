@@ -1,12 +1,12 @@
-# 👋 Welcome to Tile Language
+# TileScale V0
 
-[GitHub](https://github.com/tile-ai/tilelang)
+[GitHub](https://github.com/tile-ai/tilescale)
 
-Tile Language (tile-lang) is a concise domain-specific language designed to streamline
-the development of high-performance GPU/CPU kernels (e.g., GEMM, Dequant GEMM, FlashAttention, LinearAttention).
-By employing a Pythonic syntax with an underlying compiler infrastructure on top of TVM,
-tile-lang allows developers to focus on productivity without sacrificing the
-low-level optimizations necessary for state-of-the-art performance.
+TileScale V0 is a single-node multi-GPU extension of TileLang. It preserves the
+TileLang compiler, JIT, and Python kernel language while adding CUDA IPC, VMM,
+multicast, remote-memory, and cross-GPU synchronization primitives. The Python
+distribution is `tilescale`; the compatibility import namespace remains
+`tilelang`.
 
 :::{toctree}
 :maxdepth: 2
@@ -15,6 +15,14 @@ low-level optimizations necessary for state-of-the-art performance.
 get_started/Installation
 get_started/overview
 get_started/targets
+distributed_api_reference
+:::
+
+:::{toctree}
+:maxdepth: 1
+:caption: RELEASE
+
+release_v0_0726
 :::
 
 :::{toctree}

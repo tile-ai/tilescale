@@ -1,11 +1,33 @@
 [project]
 name = "tilescale"
-description = "A tile level programming language to generate high performance code."
+description = "A TileLang extension for single-node multi-GPU kernel programming."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "TileLang Contributors" }, { name = "Tile-AI" }]
 maintainers = [{ name = "Lei Wang", email = "leiwang1999@outlook.com" }]
-license = "MIT"
+# The root notice contains an additional collaboration-terms statement and the
+# archives carry separately licensed third-party material. Keep the aggregate
+# metadata conservative; LICENSE and THIRDPARTYNOTICES.txt are authoritative.
+license = "LicenseRef-TileScale-Distribution"
+license-files = [
+    "LICENSE",
+    "THIRDPARTYNOTICES.txt",
+    "LICENSES/*.txt",
+    "3rdparty/tvm/LICENSE",
+    "3rdparty/tvm/NOTICE",
+    "3rdparty/tvm/licenses/*.txt",
+    "3rdparty/tvm/3rdparty/tvm-ffi/LICENSE",
+    "3rdparty/tvm/3rdparty/tvm-ffi/NOTICE",
+    "3rdparty/tvm/3rdparty/tvm-ffi/3rdparty/dlpack/LICENSE",
+    "3rdparty/tvm/3rdparty/tvm-ffi/3rdparty/libbacktrace/LICENSE",
+    "3rdparty/tvm/3rdparty/tvm-ffi/licenses/LICENSE.pytorch.txt",
+    "3rdparty/tvm/3rdparty/tvm-ffi/licenses/NOTICE.pytorch.txt",
+    "3rdparty/tvm/3rdparty/OpenCL-Headers/LICENSE",
+    "3rdparty/tvm/3rdparty/cutlass_fpA_intB_gemm/LICENSE",
+    "3rdparty/tvm/3rdparty/libflash_attn/LICENSE",
+    "3rdparty/cutlass/LICENSE.txt",
+    "3rdparty/composable_kernel/LICENSE",
+]
 keywords = ["BLAS", "CUDA", "HIP", "Code Generation", "TVM"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -25,9 +47,10 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-version = "0.0.1"
+dynamic = ["version"]
 dependencies = [
-    "apache-tvm-ffi~=0.1.0,>=0.1.10",
+    # Native libraries are built against the vendored TVM-FFI v0.1.11 headers.
+    "apache-tvm-ffi==0.1.11",
     # torch-c-dlpack-ext provides prebuilt torch extensions.
     # Without it, TVM FFI may require JIT compilation on first import.
     "torch-c-dlpack-ext; python_version < '3.14'",
@@ -45,6 +68,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# CUDA host bindings used by TileScale's distributed runtime helpers.
+distributed = [
+    "cuda-python>=12.0",
+    "nvidia-ml-py",
+]
 # mldtypes should be greater than 0.5.1
 # if you want to enable fp4
 fp4 = ["ml-dtypes>=0.5.1"]
@@ -55,7 +83,7 @@ nvcc = [
     "torch",
     "nvidia-cuda-nvcc>=13.0.48",
     "nvidia-cuda-cccl>=13.0.50",
-    # On Windows, ship nvrtc through the runtime deps so `pip install tilelang`
+    # On Windows, ship nvrtc through the runtime deps so `pip install tilescale`
     # works without a host CUDA install (TileLang JITs CUDA kernels via nvrtc).
     "nvidia-cuda-nvrtc>=13; platform_system == 'Windows'",
     # cuRAND is required when kernels use tilelang.language.random
@@ -120,6 +148,7 @@ include = [
     ".git_commit.txt",
     "./LICENSE",
     "THIRDPARTYNOTICES.txt",
+    "LICENSES/**",
     "version_provider.py",
     "requirements*.txt",
     "tilelang/jit/adapter/cython/cython_wrapper.pyx",
@@ -130,9 +159,11 @@ include = [
     # Need full TVM to build from source.
     "3rdparty/tvm",
     # CUTLASS
+    "3rdparty/cutlass/LICENSE.txt",
     "3rdparty/cutlass/include",
     "3rdparty/cutlass/tools",
     # Composable Kernel
+    "3rdparty/composable_kernel/LICENSE",
     "3rdparty/composable_kernel/include",
     "3rdparty/composable_kernel/library",
     # Vendored HIP headers (build-time only) so source builds work on hosts
@@ -140,12 +171,40 @@ include = [
     "3rdparty/hip-headers/include",
     "testing/**",
     "examples/**",
+    # Apply exclusions after every broad include above: scikit-build-core
+    # resolves later patterns last. Keep local caches and nested Git metadata
+    # out of source distributions.
+    "!**/.git",
+    "!**/.git/**",
+    "!**/__pycache__/**",
+    "!**/*.pyc",
+    "!**/*.pyo",
+    # CuTeDSL is distributed under a separate NVIDIA EULA and is not needed by
+    # TileScale. CUTLASS's generated documentation is not a build dependency
+    # and includes CuTeDSL documentation, so exclude it as a unit.
+    "!3rdparty/tvm/3rdparty/cutlass/EULA.txt",
+    "!3rdparty/tvm/3rdparty/cutlass/python/CuTeDSL/**",
+    "!3rdparty/tvm/3rdparty/cutlass/examples/python/CuTeDSL/**",
+    "!3rdparty/tvm/3rdparty/cutlass/docs/**",
+    "!3rdparty/tvm/3rdparty/cutlass/media/**",
+    "!3rdparty/tvm/3rdparty/cutlass_fpA_intB_gemm/cutlass/docs/**",
+    "!3rdparty/tvm/3rdparty/cutlass_fpA_intB_gemm/cutlass/media/**",
+    "!3rdparty/tvm/3rdparty/libflash_attn/cutlass/docs/**",
+    "!3rdparty/tvm/3rdparty/libflash_attn/cutlass/media/**",
+    "!3rdparty/cutlass/EULA.txt",
+    "!3rdparty/cutlass/python/CuTeDSL/**",
+    "!3rdparty/cutlass/examples/python/CuTeDSL/**",
+    "!3rdparty/cutlass/docs/**",
+    "!3rdparty/cutlass/media/**",
 ]
 exclude = [
     ".git",
     ".github",
     "**/.git",
     "**/.github",
+    "**/__pycache__",
+    "**/*.pyc",
+    "**/*.pyo",
     "3rdparty/**",
     "build",
 ]
@@ -245,8 +304,17 @@ ignore = [
 verbosity_assertions = 3
 filterwarnings = ["always"]
 markers = [
+    "cuda: tests that require the CUDA backend",
+    "gpu: tests that require a GPU backend",
+    "hexagon: tests that require the Hexagon backend",
+    "llvm: tests that require the LLVM backend",
+    "metal: tests that require the Metal backend",
+    "opencl: tests that require the OpenCL backend",
     "perf: benchmark and performance API tests skipped by default",
+    "rocm: tests that require the ROCm backend",
     "slow: long-running correctness sweeps",
+    "tensorcore: tests that require Tensor Core support",
+    "vulkan: tests that require the Vulkan backend",
 ]
 
 [tool.cibuildwheel]
