@@ -1,6 +1,9 @@
+import inspect
+
 import tilelang.testing
 import tilelang.layout
 import tilelang.language as T
+import pytest
 import torch
 
 
@@ -186,7 +189,7 @@ def run_atomic_return_prev(M, N, block_M, block_N, dtype=T.float32):
 
 
 @tilelang.jit
-def tma_atomic_add_program(out, explicit_swizzle=False, tma_wait_complete=False):
+def tma_atomic_add_program(out, explicit_swizzle=False, tma_wait=True, tma_wait_complete=False):
     out: T.Tensor[(16, 16), T.float32]
 
     with T.Kernel(
@@ -197,7 +200,25 @@ def tma_atomic_add_program(out, explicit_swizzle=False, tma_wait_complete=False)
             T.annotate_layout({out_shared: tilelang.layout.make_swizzled_layout(out_shared)})
         T.fill(out_shared, 1)
         for _ in range(16):
-            T.atomic_add(out, out_shared, use_tma=True, tma_wait_complete=tma_wait_complete)
+            T.atomic_add(
+                out,
+                out_shared,
+                None,
+                False,
+                True,
+                tma_wait_complete,
+                None,
+                tma_wait=tma_wait,
+            )
+
+
+def test_tma_atomic_add_wait_signature():
+    params = inspect.signature(T.atomic_add).parameters
+    assert list(params)[4:8] == ["use_tma", "tma_wait_complete", "dst_pe", "tma_wait"]
+    assert params["tma_wait_complete"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    assert params["tma_wait_complete"].default is False
+    assert params["tma_wait"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert params["tma_wait"].default is True
 
 
 @tilelang.testing.requires_cuda
@@ -213,6 +234,18 @@ def test_tma_atomic_add():
 
     kernel_with_complete_wait = tma_atomic_add_program.compile(out=T.Tensor[(16, 16), T.float32], tma_wait_complete=True)
     assert "tl::tma_store_wait<0, false>();" in kernel_with_complete_wait.get_kernel_source()
+
+    kernel_without_wait = tma_atomic_add_program.compile(out=T.Tensor[(16, 16), T.float32], tma_wait=False)
+    source_without_wait = kernel_without_wait.get_kernel_source()
+    assert "tl::tma_store_wait<0, true>();" not in source_without_wait
+    assert "tl::tma_store_wait<0, false>();" not in source_without_wait
+
+    with pytest.raises(ValueError, match="tma_wait_complete=True requires tma_wait=True"):
+        tma_atomic_add_program.compile(
+            out=T.Tensor[(16, 16), T.float32],
+            tma_wait=False,
+            tma_wait_complete=True,
+        )
 
     kernel_with_explicit_swizzle = tma_atomic_add_program.compile(out=T.Tensor[(16, 16), T.float32], explicit_swizzle=True)
     # Ensure auto swizzled layout is applied

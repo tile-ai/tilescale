@@ -190,6 +190,8 @@ def atomic_add(
     use_tma: bool = False,
     tma_wait_complete: bool = False,
     dst_pe: PrimExpr | int | None = None,
+    *,
+    tma_wait: bool = True,
 ) -> PrimExpr:
     """
     Atomically add `value` into `dst`, returning a handle to the operation.
@@ -204,6 +206,8 @@ def atomic_add(
         use_tma (bool): If True, use TMA (cp.reduce) to perform the atomic add. This is available only for sm90+ (default False).
         tma_wait_complete (bool): If True with use_tma, wait for TMA store completion instead of read-only wait.
         dst_pe (Optional[Union[PrimExpr, int]]): Remote PE for symmetric destination addressing.
+        tma_wait (bool): If False with use_tma, skip the automatic TMA store wait so callers can issue it explicitly.
+            This compatibility option is keyword-only and defaults to True.
 
     Returns:
         PrimExpr: A handle representing the atomic addition operation, or the previous value if return_prev is True.
@@ -236,6 +240,9 @@ def atomic_add(
         >>> global_grad = T.Tensor([1000], "float32", name="global_grad")
         >>> atomic_add(global_grad, gradients)
     """
+
+    if not tma_wait and tma_wait_complete:
+        raise ValueError("tma_wait_complete=True requires tma_wait=True")
 
     src_extent = get_extent(value)
     dst_extent = get_extent(dst)
@@ -284,6 +291,8 @@ def atomic_add(
 
     if use_tma:
         ann["use_tma"] = 1
+        if not tma_wait:
+            ann["tma_wait"] = 0
         if tma_wait_complete:
             ann["tma_wait_complete"] = 1
     if memory_order is not None:

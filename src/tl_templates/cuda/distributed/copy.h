@@ -2,8 +2,10 @@
 
 #include "../common.h"
 #include "../copy.h"
+#ifndef __CUDACC_RTC__
 #include <cstddef>
 #include <cstdint>
+#endif
 
 namespace tl {
 

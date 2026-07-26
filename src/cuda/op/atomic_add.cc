@@ -64,6 +64,15 @@ bool UseTMA(const AtomicAddNode &op) {
   return false;
 }
 
+bool TMAWait(const AtomicAddNode &op) {
+  if (auto val = op.annotations.Get("tma_wait")) {
+    if (auto int_val = val->as<IntImmNode>()) {
+      return int_val->value != 0;
+    }
+  }
+  return true;
+}
+
 bool TMAWaitComplete(const AtomicAddNode &op) {
   if (auto val = op.annotations.Get("tma_wait_complete")) {
     if (auto int_val = val->as<IntImmNode>()) {
@@ -525,9 +534,13 @@ struct AtomicAdd {
 
     auto op_annotations = op.annotations;
     op_annotations.erase("use_tma");
+    bool tma_wait = TMAWait(op);
+    op_annotations.erase("tma_wait");
     bool tma_wait_complete = TMAWaitComplete(op);
     op_annotations.erase("tma_wait_complete");
     op_annotations.erase("dst_pe");
+    ICHECK(tma_wait || !tma_wait_complete)
+        << "tma_wait_complete requires tma_wait to be enabled";
 
     Stmt tma_reduce;
     if (IsRemotePE(dst_pe)) {
@@ -549,12 +562,14 @@ struct AtomicAdd {
     }
 
     Array<Stmt> seq;
-    seq.reserve(3);
+    seq.reserve(tma_wait ? 3 : 2);
     seq.push_back(tma_reduce);
     seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_arrive(), {})));
-    seq.push_back(Evaluate(
-        Call(DataType::Handle(), tma_store_wait(),
-             {IntImm(DataType::Int(32), 0), Bool(!tma_wait_complete)})));
+    if (tma_wait) {
+      seq.push_back(Evaluate(
+          Call(DataType::Handle(), tma_store_wait(),
+               {IntImm(DataType::Int(32), 0), Bool(!tma_wait_complete)})));
+    }
     return IfThenElse(EQ(T.thread_var, T.thread_bounds->min),
                       SeqStmt(std::move(seq)));
   }

@@ -1,6 +1,8 @@
 #pragma once
 
+#ifndef __CUDACC_RTC__
 #include <cstdint>
+#endif
 
 #include "../common.h"
 

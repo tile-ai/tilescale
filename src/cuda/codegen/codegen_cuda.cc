@@ -683,7 +683,6 @@ std::string CodeGenTileLangCUDA::Finish() {
     decl_stream << "#include <tl_templates/cuda/distributed/atomic.h>\n";
     decl_stream << "#include <tl_templates/cuda/distributed/ldst.h>\n";
     decl_stream << "#include <tl_templates/cuda/distributed/copy.h>\n";
-    decl_stream << "extern \"C\" __constant__ uint64_t meta_data[1024];\n";
   }
   if (need_multimem_h_) {
     decl_stream << "#include <tl_templates/cuda/distributed/multimem.h>\n";
@@ -1997,6 +1996,21 @@ void CodeGenTileLangCUDA::PrintCallExtern(Type ret_type, String global_symbol,
                                           const Array<PrimExpr> &args,
                                           bool skip_first_arg,
                                           std::ostream &os) { // NOLINT(*)
+  static constexpr const char *kDistributedPrefixes[] = {
+      "tl::wait_",       "tl::barrier_blocks",
+      "tl::cp_warp",     "tl::cp_block",
+      "tl::st<",         "tl::ld<",
+      "tl::remote_load", "tl::remote_store",
+  };
+  for (const char *prefix : kDistributedPrefixes) {
+    size_t prefix_len = std::strlen(prefix);
+    if (global_symbol.size() >= prefix_len &&
+        std::strncmp(global_symbol.data(), prefix, prefix_len) == 0) {
+      use_distributed_ = true;
+      break;
+    }
+  }
+
   static constexpr char kMultimemPrefix[] = "tl::multimem::";
   static constexpr size_t kMultimemPrefixLen = sizeof(kMultimemPrefix) - 1;
   if (global_symbol.size() >= static_cast<size_t>(kMultimemPrefixLen) &&
@@ -4416,6 +4430,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
     // atomic_add_elem_op(dst_ptr, src_value[, memory_order])
     std::string dst_ptr = PrintExpr(op->args[0]);
     if (auto dst_pe = GetDstPEAnnotation(op)) {
+      use_distributed_ = true;
       dst_ptr = RemapRemotePointerExpr(dst_ptr, PrintExpr(dst_pe.value()));
     }
     std::string src_value = PrintExpr(op->args[1]);
@@ -4431,6 +4446,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
     // prev value
     std::string dst_ptr = PrintExpr(op->args[0]);
     if (auto dst_pe = GetDstPEAnnotation(op)) {
+      use_distributed_ = true;
       dst_ptr = RemapRemotePointerExpr(dst_ptr, PrintExpr(dst_pe.value()));
     }
     os << "AtomicAddRet(" << dst_ptr << ", " << PrintExpr(op->args[1]);
@@ -4443,6 +4459,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
     // atomic_addx2_elem_op(dst_ptr, src_ptr[, memory_order])
     std::string dst_ptr = PrintExpr(op->args[0]);
     if (auto dst_pe = GetDstPEAnnotation(op)) {
+      use_distributed_ = true;
       dst_ptr = RemapRemotePointerExpr(dst_ptr, PrintExpr(dst_pe.value()));
     }
     std::string src_ptr = PrintExpr(op->args[1]);

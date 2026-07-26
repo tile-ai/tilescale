@@ -299,10 +299,25 @@ private:
 // Implementation of TileScaleInitDistributedTable::operator()
 void TileScaleInitDistributedTable::operator()(const ffi::PackedArgs &args,
                                                ffi::Any *rv) const {
+  ICHECK_EQ(args.size(), 3)
+      << "__tilescale_init_table expects host pointer, table size, and stream";
+
   // Accept int64_t from Python and cast to pointers internally
   // This is necessary because TVM FFI doesn't auto-convert int to void*
   int64_t host_table_ptr = args[0].cast<int64_t>();
   int64_t table_size = args[1].cast<int64_t>();
+  int64_t stream_handle = args[2].cast<int64_t>();
+
+  ICHECK_GE(table_size, 0) << "Distributed table size must be non-negative";
+  ICHECK_LE(static_cast<size_t>(table_size), kMetaDataSize / sizeof(uint64_t))
+      << "Distributed table exceeds the 1024-entry device metadata capacity";
+  ICHECK_GE(stream_handle, 0) << "CUDA stream handle must be non-negative";
+  if (table_size == 0) {
+    *rv = 0;
+    return;
+  }
+  ICHECK_NE(host_table_ptr, 0) << "Distributed table pointer must be non-null "
+                                  "when table_size is non-zero";
 
   void *host_table = reinterpret_cast<void *>(host_table_ptr);
   auto *table_ptr = reinterpret_cast<const uint64_t *>(host_table);
@@ -310,6 +325,10 @@ void TileScaleInitDistributedTable::operator()(const ffi::PackedArgs &args,
 
   int device_id;
   CUDA_CALL(cudaGetDevice(&device_id));
+  ICHECK_GE(device_id, 0);
+  ICHECK_LT(device_id, kTileScaleMaxNumGPUs)
+      << "TileScale CUDA runtime supports at most " << kTileScaleMaxNumGPUs
+      << " devices per process";
 
   // Get the device pointer for meta_data symbol (lazy initialization).
   // Non-distributed helper kernels do not declare this symbol, so there is no
@@ -326,8 +345,10 @@ void TileScaleInitDistributedTable::operator()(const ffi::PackedArgs &args,
   // Copy data from host to device constant memory. The symbol lives in a
   // dynamically loaded CUmodule, so use the resolved device pointer directly.
   size_t bytes = static_cast<size_t>(table_size) * sizeof(uint64_t);
-  CUDA_CALL(cudaMemcpy(reinterpret_cast<void *>(pcache_[device_id]), host_table,
-                       bytes, cudaMemcpyHostToDevice));
+  auto stream =
+      reinterpret_cast<cudaStream_t>(static_cast<uintptr_t>(stream_handle));
+  CUDA_CALL(cudaMemcpyAsync(reinterpret_cast<void *>(pcache_[device_id]),
+                            host_table, bytes, cudaMemcpyHostToDevice, stream));
 
   // Return success
   *rv = 0;

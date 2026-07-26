@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Any, Generic, Literal, ParamSpec, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Literal, ParamSpec, TypeVar
 from collections.abc import Callable
 
 from tilelang.jit.adapter.utils import is_cutedsl_target, is_metal_target, is_cuda_target, is_hip_target
@@ -33,7 +33,8 @@ logger = logging.getLogger(__name__)
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
 
-from tilelang.distributed.allocator import BaseAllocator
+if TYPE_CHECKING:
+    from tilelang.distributed.allocator import BaseAllocator
 
 
 class JITKernel(Generic[_P, _T]):
@@ -476,9 +477,15 @@ class JITKernel(Generic[_P, _T]):
         stream: int | None = None,
     ):
         """Initialize base addr table for distributed kernels."""
+        from tilelang.distributed.allocator import BaseAllocator
+
         assert isinstance(allocator, BaseAllocator) and allocator.initialized(), "Allocator must be an initialized BaseAllocator"
 
+        if not 0 <= allocator.table_size <= 1024:
+            raise ValueError(f"Allocator table size must be between 0 and 1024 entries, got {allocator.table_size}")
         stream_val = stream if stream is not None else 0
+        if stream_val < 0:
+            raise ValueError(f"CUDA stream handle must be non-negative, got {stream_val}")
 
         if self.execution_backend == "tvm_ffi":
             result = self.adapter.init_table(

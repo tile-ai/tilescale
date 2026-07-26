@@ -82,20 +82,28 @@ PREDEF_INIT_TABLE_FUNC = """
 extern "C" TL_EXPORT int init_table(const void* host_table, size_t n, cudaStream_t stream) {{
     if (error_buf) error_buf[0] = '\\0';
 
-    if (host_table == nullptr) {{
-        if (error_buf) std::snprintf(error_buf, 256, "host_table is null");
+    if (n > 1024) {{
+        if (error_buf) std::snprintf(error_buf, 256, "table size %zu exceeds metadata capacity 1024", n);
         return -1;
     }}
     if (n == 0) {{
         return 0;
     }}
+    if (host_table == nullptr) {{
+        if (error_buf) std::snprintf(error_buf, 256, "host_table is null");
+        return -1;
+    }}
 
+#ifdef TL_ENABLE_DISTRIBUTED_METADATA
     size_t bytes = n * sizeof(uint64_t);
     cudaError_t err = cudaMemcpyToSymbolAsync(meta_data, host_table, bytes, 0, cudaMemcpyHostToDevice, stream);
     if (err != cudaSuccess) {{
         if (error_buf) std::snprintf(error_buf, 256, "cudaMemcpyToSymbolAsync failed: %s", cudaGetErrorString(err));
         return static_cast<int>(err);
     }}
+#else
+    (void)stream;
+#endif
     return 0;
 }}
 """
