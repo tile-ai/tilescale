@@ -100,6 +100,7 @@ def test_basic(local_rank: int, num_local_ranks: int):
         else:
             assert out_cpu[0].item() == num_ranks, f"rank {local_rank}: get_num_ranks() = {out_cpu[0].item()}, expected {num_ranks}"
 
+    allocator.close()
     dist.destroy_process_group()
 
 

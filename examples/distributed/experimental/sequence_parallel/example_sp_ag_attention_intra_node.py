@@ -363,11 +363,8 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     atol = 1e-2
     rtol = 1e-2
-    if torch.allclose(torch_out, tilescale_out, atol=atol, rtol=rtol):
-        print(f"rank {local_rank} check passed.✅")
-    else:
-        print(f"rank {local_rank} check failed.❌")
-        print(f"torch_out: {torch_out}, tilelang_out: {tilescale_out}")
+    torch.testing.assert_close(tilescale_out, torch_out, atol=atol, rtol=rtol)
+    print(f"rank {local_rank} check passed")
 
     tl_t = do_bench(
         lambda: tilescale_module(q_shard, k_shards, v_shards, cu_seqlens_q, cu_seqlens_k),

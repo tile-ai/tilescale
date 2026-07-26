@@ -158,6 +158,7 @@ def test_put_get(local_rank: int, num_ranks: int):
 
         assert torch.allclose(expected, dst, atol=1e-6, rtol=1e-6), f"rank {local_rank}: {name} mismatch"
 
+    allocator.close()
     dist.destroy_process_group()
 
 

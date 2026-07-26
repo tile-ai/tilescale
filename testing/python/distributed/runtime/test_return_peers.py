@@ -23,6 +23,7 @@ def test_return_peers(local_rank: int, num_ranks: int):
     from tilelang.distributed.host import init_dist
 
     rank, num_ranks, group = init_dist(local_rank, num_ranks)
+    allocator = None
     try:
         allocator = tilelang.get_allocator(
             size=2**20,
@@ -45,6 +46,8 @@ def test_return_peers(local_rank: int, num_ranks: int):
 
         assert torch.equal(peers[1][:10].cpu(), expected.cpu()), f"rank {rank}: peer tensor write was not visible"
     finally:
+        if allocator is not None:
+            allocator.close()
         dist.destroy_process_group()
 
 

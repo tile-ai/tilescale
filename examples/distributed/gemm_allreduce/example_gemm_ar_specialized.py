@@ -361,6 +361,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         max_diff = (torch_C.float() - tilelang_C.float()).abs().max().item()
         passed = torch.allclose(torch_C, tilelang_C, atol=args.atol, rtol=args.rtol)
         print(f"rank {local_rank} check {'passed' if passed else 'failed'}. max_diff={max_diff}")
+        assert passed, f"rank {local_rank}: all-reduce mismatch, max_diff={max_diff}"
         dist.barrier(group)
 
     reset_output()

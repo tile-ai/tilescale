@@ -149,11 +149,8 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     atol = 1e-2
     rtol = 1e-2
-    if torch.allclose(torch_out, tilelang_out, atol=atol, rtol=rtol):
-        print(f"rank {local_rank} check passed.✅")
-    else:
-        print(f"rank {local_rank} check failed.❌")
-        print(f"torch_out: {torch_out}, tilelang_out: {tilelang_out}")
+    torch.testing.assert_close(tilelang_out, torch_out, atol=atol, rtol=rtol)
+    print(f"rank {local_rank} check passed")
 
     tl_t = do_bench(
         lambda: gemm_rs_op(A, B, C, output, ctx, gemm_func, gemm_stream, rs_stream, local_rank),
@@ -171,7 +168,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num-processes", type=int, default=8, help="Number of processes to spawn (default: 2)")
+    parser.add_argument("--num-processes", type=int, default=8, help="Number of processes to spawn (default: 8)")
     parser.add_argument("--M", type=int, default=32768, help="M dimension")
     parser.add_argument("--N", type=int, default=6144, help="N dimension")
     parser.add_argument("--K", type=int, default=16384, help="K dimension")

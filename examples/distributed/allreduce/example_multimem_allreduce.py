@@ -116,6 +116,7 @@ def multimem_allreduce_two_shot_tma_copy_kernel(N, num_ranks, block_N, threads, 
                 reduce_op=T.MultimemReduceOp.ADD,
             )
             T.copy(acc, shard)
+            T.sync_threads()
             # TMA store to the multicast VA.
             T.tma_copy(shard, mcast_buf[offset : offset + block_N])
             # The CTA does not read this global data after issuing the store.
@@ -157,6 +158,7 @@ def _check_result(
     max_diff = (result.float() - expected.float()).abs().max().item()
     passed = torch.allclose(result, expected, atol=args.atol, rtol=args.rtol)
     print(f"rank {local_rank} {strategy} check {'passed' if passed else 'failed'}. max_diff={max_diff}")
+    assert passed, f"rank {local_rank}: {strategy} all-reduce mismatch, max_diff={max_diff}"
     dist.barrier(group)
 
 

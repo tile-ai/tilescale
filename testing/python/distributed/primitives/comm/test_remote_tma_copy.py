@@ -219,6 +219,7 @@ def test_remote_descriptor_tma_copy(local_rank: int, num_ranks: int):
         f"rank {rank}: remote descriptor TMA store touched unwritten columns"
     )
 
+    allocator.close()
     dist.destroy_process_group()
 
 
@@ -262,6 +263,7 @@ def test_remote_simt_fallback_edge_tile(local_rank: int, num_ranks: int):
     expected = src_refs[rank ^ 1]
     assert torch.allclose(expected, out, atol=1e-6, rtol=1e-6), f"rank {rank}: remote SIMT edge fallback mismatch"
 
+    allocator.close()
     dist.destroy_process_group()
 
 
@@ -348,6 +350,7 @@ def test_remote_tma_copy(local_rank: int, num_ranks: int):
     expected = src_refs[rank ^ 1]
     assert torch.allclose(expected, simt_out, atol=1e-6, rtol=1e-6), f"rank {rank}: remote SIMT fallback mismatch"
 
+    allocator.close()
     dist.destroy_process_group()
 
 

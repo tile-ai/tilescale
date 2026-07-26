@@ -298,11 +298,8 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     torch_ag_buffer = torch.empty([M, K], dtype=dtype, device="cuda")
     torch_C = torch_ag_gemm(group, A, B, torch_ag_buffer)
 
-    if torch.allclose(torch_C, tilelang_C, atol=1e-6, rtol=1e-6):
-        print(f"rank {local_rank} check passed.✅")
-    else:
-        print(f"rank {local_rank} check failed.❌")
-        print(f"torch_C: {torch_C}, tilelang_C: {tilelang_C}")
+    torch.testing.assert_close(tilelang_C, torch_C, atol=1e-6, rtol=1e-6)
+    print(f"rank {local_rank} check passed")
 
     tl_t = do_bench(
         lambda: ag_gemm_op(
@@ -335,7 +332,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num-processes", type=int, default=8, help="Number of processes to spawn (default: 2)")
+    parser.add_argument("--num-processes", type=int, default=8, help="Number of processes to spawn (default: 8)")
     parser.add_argument("--M", type=int, default=32768, help="M dimension")
     parser.add_argument("--N", type=int, default=16384, help="N dimension")
     parser.add_argument("--K", type=int, default=2048, help="K dimension")

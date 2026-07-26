@@ -75,6 +75,7 @@ def test_remote_copy(local_rank: int, num_ranks: int):
     expected = src_refs[rank ^ 1]
     assert torch.allclose(expected, dst, atol=1e-6, rtol=1e-6)
 
+    allocator.close()
     dist.destroy_process_group()
 
 

@@ -72,6 +72,7 @@ def test_remote_st(local_rank: int, num_ranks: int):
 
     assert torch.allclose(expected, dst, atol=1e-6, rtol=1e-6), f"rank {rank}: remote T.st mismatch"
 
+    allocator.close()
     dist.destroy_process_group()
 
 

@@ -238,6 +238,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         max_diff = (torch_out.float() - C_local.float()).abs().max().item()
         passed = torch.allclose(torch_out, C_local, atol=args.atol, rtol=args.rtol)
         print(f"rank {local_rank} check {'passed' if passed else 'failed'}. max_diff={max_diff}")
+        assert passed, f"rank {local_rank}: reduce-scatter mismatch, max_diff={max_diff}"
         dist.barrier(group)
 
     for _ in range(args.warmup):

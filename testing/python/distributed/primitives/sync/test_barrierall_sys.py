@@ -55,12 +55,9 @@ def main(local_rank: int, num_ranks: int, args: argparse.Namespace):
     kernel(A, barrier, output)
     torch.cuda.synchronize()
     dist.barrier(group)
-    if torch.all(output == blocks):
-        print(f"rank {local_rank} check passed.✅")
-    else:
-        print(f"rank {local_rank} check failed.❌")
-        print(f"output: {output}")
+    assert torch.all(output == blocks), f"rank {local_rank}: expected every output value to equal {blocks}, got {output}"
 
+    allocator.close()
     dist.destroy_process_group()
 
 

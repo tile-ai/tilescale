@@ -375,13 +375,11 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     torch_ag_buffer = torch.empty((M, K), dtype=dtype, device=f"cuda:{local_rank}")
     torch_C = torch_ag_gemm(group, A, B, torch_ag_buffer)
 
-    if torch.allclose(torch_C, tilelang_C, atol=1e-2, rtol=1e-2):
-        print(f"rank {local_rank} check passed. ✅")
-    else:
-        max_diff = (torch_C - tilelang_C).abs().max().item()
-        ag_max_diff = (torch_ag_buffer - gathered_A).abs().max().item()
-        print(f"rank {local_rank} check failed. ❌")
-        print(f"max_diff={max_diff}, ag_max_diff={ag_max_diff}")
+    max_diff = (torch_C.float() - tilelang_C.float()).abs().max().item()
+    ag_max_diff = (torch_ag_buffer.float() - gathered_A.float()).abs().max().item()
+    torch.testing.assert_close(tilelang_C, torch_C, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(gathered_A, torch_ag_buffer, atol=1e-2, rtol=1e-2)
+    print(f"rank {local_rank} check passed. max_diff={max_diff}, ag_max_diff={ag_max_diff}")
 
     tune_comm_sms = getattr(args, "tune_comm_sms", "")
     if tune_comm_sms:

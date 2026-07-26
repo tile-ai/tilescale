@@ -75,6 +75,7 @@ def test_signal_wait(local_rank: int, num_ranks: int):
     if local_rank == 1:
         assert out.cpu()[0].item() == 123
 
+    allocator.close()
     dist.destroy_process_group()
 
 
