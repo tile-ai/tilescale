@@ -138,14 +138,17 @@ host with CUDA 13.2. Validation covered both allocator paths. Before IMEX was
 configured, the forced-IPC distributed suite completed with 97 tests passing
 and 5 fabric-dependent capability skips. After an administrator exposed an
 IMEX channel, the 2026-07-27 follow-up automatically selected VMM and completed
-with 102 tests passing, including VMM, multicast, and multimem cases.
+with 103 tests passing, including VMM, multicast, and multimem cases.
 
 Four post-configuration 8-GPU test nodes also passed on every rank: specialized
 all-gather GEMM, specialized GEMM all-reduce, multimem one-shot/two-shot
 all-reduce, and the experimental ordinary-TMA store to multicast VA. Separate
-broad upstream-compatibility slices passed on the same candidate. Exact
-environment details, test records, and the two-stage validation timeline are in
-the [release validation report](docs/release_v0_0726.md).
+broad upstream-compatibility slices passed on the same candidate. A focused
+two-GPU forced-VMM rerun also executed the native SM100 multimem TMA broadcast
+and ADD instructions, which require CUDA 13.1+, and checked both GPUs' physical
+multicast backings. Exact environment details, test records, and the two-stage
+validation timeline are in the
+[release validation report](docs/release_v0_0726.md).
 
 ## Installation
 

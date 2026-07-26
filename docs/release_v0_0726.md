@@ -93,19 +93,22 @@ separately from passes.
 | Broad upstream-compatible group C | 149 passed, 125 hardware/backend skips, 1 performance case deselected | `/tmp/tl-release-broad-c.xml`, `34a70f3c63d3da59caa2abe2d53137c41a58a797cae19309c2ccf5bdbbfe475c` |
 | Reduction regressions | 53 passed | `/tmp/tl-release-reduce-final.xml`, `0dc8516152930f2ba63bb1ff92bd0e55a7504e89153b3b7a78da304bef419af7` |
 | CuTeDSL and PDL focused regressions | 7 passed | `/tmp/tl-release-cutedsl-pdl-final.xml`, `84d647cb34c965807e663ad83088144b8a4be386290342b5aeeb01537ed0087d` |
-| Fence-proxy transform regressions | 18 passed with a fresh disabled cache | `/tmp/tl-release-fence-proxy-final.xml`, `6daef2294d769e49f86e9ec87ef7fc120af88829d9ee9c1324c9e5b02eeac4a7` |
+| Fence-proxy transform and TMA-store regressions | 23 passed with a fresh cache | `/tmp/tilescale-fence-tma-final.xml`, `5a3f7308a6e273221bc66edc325068357f5285890ad82d9b5c7bc2c43b5a1080` |
 | Two-GPU distributed suite, forced CUDA IPC | 97 passed, 5 fabric/multicast capability skips | `/tmp/tilescale-distributed-final2-0726.xml`, `7ee9a2b26ae357eead449141510a048e8cb38fe3e1f95b82996d947c104ce42a` |
 | Eight-GPU executable examples, forced CUDA IPC | 3 passed on all 8 ranks | `/tmp/tilescale-8gpu-final2-0726.2AFSaz/`; per-case logs below |
 | Eight-GPU multicast-dependent example gates, before IMEX configuration | 3 IMEX/multicast capability skips | `/tmp/tilescale-8gpu-capability-final-0726.xml`, `c059d9b4bc495c13568c010d6356bf98dba026ffd283d62ff2f77b01d4c078d1` |
-| Two-GPU distributed suite, automatic VMM selection after IMEX configuration | 102 passed | `/tmp/tilescale-v0-release-2gpu-vmm-final.xml`, `30e30a054cb8208f8460c5a668c13d3037299099b423f1f96d071735f3de4c71` |
+| Two-GPU distributed suite, automatic VMM selection after IMEX configuration | 103 passed | `/tmp/tilescale-vmm-auto-full-final2.xml`, `e9a4adb00d353d4b7e27c56149cb9007f8303a51a667b42454858bf9daca0e6e` |
 | Eight-GPU VMM/multicast executable examples after IMEX configuration | 4 passed on all 8 ranks | `/tmp/tilescale-v0-release-8gpu-final.xml`, `57802a4abb76322442dab347b30fb48fb3c2307e00bd2f2a75b8ebe518a0fe34` |
+| Two-GPU VMM, multicast, and multimem primitives, forced VMM | 58 passed, 1 mutually exclusive IPC fallback test deselected | `/tmp/tilescale-vmm-explicit-final3.xml`, `18305ec0c51f7111c083d753b7a431a13238b78797d5dccf4b8468fe42225149` |
+| Native SM100 multimem TMA broadcast and ADD, forced VMM | 1 passed with exact checks of both physical backings | `/tmp/tilescale-vmm-multimem-tma-final.xml`, `b68fb4556df7c7c6fc91a5e95bf0d8786d6a43faa835fce4dad3f376ac3c78a0` |
 | Rank-1 descriptor TMA store and neighboring TMA-copy regressions | 12 passed | `/tmp/tilescale-v0-release-tma-copy-final.xml`, `87d4e871afdb76316976f9f03eca36a55ff503088498113d403efc09cd134bc1` |
 
 The forced-IPC two-GPU record contains 17 real two-rank distributed test nodes
 and 34 workers that exited cleanly. It covers peer put/get, remote copy, remote
 load/store and TMA, signals and barriers, peer tensor views, IPC fallback, and
 compile-once coordination, including collective allocator fault recovery. The
-post-IMEX VMM record adds the VMM, multicast allocator, and multimem nodes.
+post-IMEX automatic-VMM record contains 21 real two-rank distributed nodes and
+42 workers; it adds the VMM, multicast allocator, and multimem nodes.
 
 The pre-IMEX forced-IPC candidate directory contains these three executable
 records. Every example used a separate disabled cache and process-group port.
@@ -122,6 +125,15 @@ all-reduce, and ordinary TMA store to multicast VA. It completed in 80.73 s.
 All eight ranks passed every correctness check. The two-GPU suite selected VMM
 without an override and executed its VMM, multicast, and multimem tests.
 
+The focused forced-VMM record isolates the low-level VMM allocation and handle
+exchange, multicast allocator, and multimem tests. Its one deselected node is
+`test_distributed_ipc_fallback`, which intentionally asserts that VMM is
+disabled and is therefore incompatible with `TILESCALE_USE_VMM=1`. The native
+multimem TMA node separately exercised both `multimem.cp.async.bulk` broadcast
+and `multimem.cp.reduce.async.bulk.add.f32` on two B200 GPUs. Every rank checked
+its physical multicast backing exactly, including ADD behavior with nonzero and
+zero initial values.
+
 The release manager should archive the `/tmp` JUnit and log records outside the
 validation host before signing the release.
 
@@ -136,10 +148,12 @@ full NVSwitch topology alone did not satisfy the runtime requirements.
 An administrator subsequently configured an IMEX channel accessible to the
 release user. The runtime VMM-fabric and multicast probes then both returned
 true. Fresh-cache reruns selected VMM automatically and completed the two-GPU
-distributed suite and all four named eight-GPU capability examples. These
-follow-up results validate the paths on the stated B200/CUDA 13.2/IMEX
-configuration; they do not remove the runtime capability gates or imply support
-on systems without an accessible IMEX channel.
+distributed suite and all four named eight-GPU capability examples. A later
+forced-VMM rerun also completed the focused VMM/multicast/multimem suite and the
+native SM100 multimem TMA broadcast and ADD test. These follow-up results
+validate the paths on the stated B200/CUDA 13.2/IMEX configuration; they do not
+remove the runtime capability gates or imply support on systems without an
+accessible IMEX channel.
 
 ## Publication Gates
 

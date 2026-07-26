@@ -249,8 +249,20 @@ and `NONE`.
 | `T.multimem_signal_add(addr, value)` | Add a `uint32`, `int32`, or `uint64` signal through a multicast address |
 
 The signal type is inferred from `addr`; there is no `dtype_tag` argument.
-`multimem_tma_store` is CTA-collective and currently requires CUDA Toolkit 13.x
-in addition to suitable TMA hardware.
+`multimem_tma_store` currently requires SM100+ and CUDA Toolkit 13.1+. Shared
+memory producer synchronization and async bulk-group completion are managed by
+the caller. Every producer thread must make its shared-memory writes visible to
+the async proxy before the CTA synchronizes. A single elected thread then
+issues the store, commit, and wait sequence:
+
+```python
+T.fence_proxy_async()
+T.sync_threads()
+if T.get_thread_binding() == 0:
+    T.multimem_tma_store(shared, multicast)
+    T.tma_store_arrive()
+    T.tma_store_wait(0, False)
+```
 
 ## Host Utilities
 
