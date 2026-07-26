@@ -293,7 +293,14 @@ def torch_assert_close(
         return True
 
 
-def tensor(*args, **kwargs):
+def tensor(shape, dtype, device=None, allocator=None, return_peers=None):
+    """Allocate a tensor, loading distributed allocator support only on demand."""
     from tilelang.distributed.tensor import tensor as distributed_tensor
 
-    return distributed_tensor(*args, **kwargs)
+    return distributed_tensor(
+        shape,
+        dtype,
+        device=device,
+        allocator=allocator,
+        return_peers=return_peers,
+    )

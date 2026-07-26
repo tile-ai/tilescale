@@ -5,6 +5,8 @@ All ops registered via TVM FFI under tl.shared_memory.* namespace.
 
 import ctypes
 import ctypes.util
+import operator
+import warnings
 
 import torch
 import tvm_ffi
@@ -80,6 +82,7 @@ _dtype_str_to_torch = {
     "long": torch.int64,
     "uint8": torch.uint8,
     "byte": torch.uint8,
+    "uint16": torch.uint16,
     "int8": torch.int8,
     "bool": torch.bool,
     "uint32": torch.uint32,
@@ -104,7 +107,10 @@ _torch_dtype_to_typestr = {
 class _ExternalCUDAArray:
     """Minimal __cuda_array_interface__ provider for zero-copy tensor creation."""
 
-    def __init__(self, ptr: int, shape: tuple, typestr: str):
+    def __init__(self, ptr: int, shape: tuple, typestr: str, owner=None):
+        # PyTorch retains the producer for the lifetime of the resulting
+        # storage. Keeping the allocation here therefore also protects aliases.
+        self._owner = owner
         self.__cuda_array_interface__ = {
             "data": (ptr, False),
             "shape": shape,
@@ -120,8 +126,11 @@ def tensor_from_ptr(
     dtype_str: str = "float32",
     device: int = 0,
     take_ownership: bool = False,
+    _owner=None,
 ) -> torch.Tensor:
     """Create a CUDA tensor viewing external device memory (zero-copy)."""
+    if take_ownership:
+        raise NotImplementedError("tensor_from_ptr does not yet support ownership transfer")
     if ptr_val == 0:
         raise RuntimeError("Received null pointer (0).")
 
@@ -129,10 +138,14 @@ def tensor_from_ptr(
     if dtype is None:
         raise ValueError(f"Unsupported dtype string: '{dtype_str}'")
 
-    if isinstance(shape, (list, tuple)):
-        shape = tuple(shape)
-    else:
+    if not isinstance(shape, (list, tuple)):
         shape = (shape,)
+    try:
+        shape = tuple(operator.index(dim) for dim in shape)
+    except TypeError as exc:
+        raise TypeError("shape dimensions must be integers") from exc
+    if any(dim < 0 for dim in shape):
+        raise ValueError("shape dimensions must be non-negative")
 
     numel = 1
     for s in shape:
@@ -143,8 +156,8 @@ def tensor_from_ptr(
     typestr = _torch_dtype_to_typestr.get(dtype)
     if typestr is not None:
         # Standard path via __cuda_array_interface__
-        arr = _ExternalCUDAArray(ptr_val, shape, typestr)
-        return torch.as_tensor(arr, device=f"cuda:{device}")
+        arr = _ExternalCUDAArray(ptr_val, shape, typestr, _owner)
+        tensor = torch.as_tensor(arr, device=f"cuda:{device}")
     else:
         # bfloat16 / uint32 / uint64: create as matching-size int type, then view
         element_size = torch.empty((), dtype=dtype).element_size()
@@ -160,9 +173,13 @@ def tensor_from_ptr(
         else:
             raise ValueError(f"Cannot handle dtype {dtype} with element_size={element_size}")
 
-        arr = _ExternalCUDAArray(ptr_val, shape, proxy_typestr)
+        arr = _ExternalCUDAArray(ptr_val, shape, proxy_typestr, _owner)
         t = torch.as_tensor(arr, device=f"cuda:{device}")
-        return t.view(dtype)
+        tensor = t.view(dtype)
+
+    if _owner is not None:
+        tensor.untyped_storage()._tilelang_managed_allocation = _owner
+    return tensor
 
 
 # ---------- Higher-level Python wrappers ----------
@@ -194,12 +211,39 @@ def _create_tensor(shape, dtype):
     return torch.empty(shape, dtype=dtype, device="cuda")
 
 
+class _ManagedAllocation:
+    """Own one cudaMallocManaged allocation until every tensor alias is gone."""
+
+    def __init__(self, ptr: int, cudart):
+        self.ptr = ptr
+        self.cudart = cudart
+
+    def __del__(self):
+        ptr = getattr(self, "ptr", 0)
+        if not ptr:
+            return
+        # Consume the pointer before cudaFree so finalization can never retry a
+        # pointer whose state is uncertain after a runtime error.
+        self.ptr = 0
+        rc = self.cudart.cudaFree(ctypes.c_void_p(ptr))
+        if rc != 0:
+            warnings.warn(
+                f"cudaFree failed while releasing managed allocation: error code {rc}",
+                ResourceWarning,
+                stacklevel=2,
+            )
+
+
 def create_host_device_tensor(shape, dtype):
     """Create host/device tensor views backed by one CUDA managed allocation."""
     if not isinstance(shape, (list, tuple)):
         shape = (shape,)
-    else:
-        shape = tuple(shape)
+    try:
+        shape = tuple(operator.index(dim) for dim in shape)
+    except TypeError as exc:
+        raise TypeError("shape dimensions must be integers") from exc
+    if any(dim <= 0 for dim in shape):
+        raise ValueError("managed tensor shape dimensions must be positive")
 
     numel = 1
     for s in shape:
@@ -217,22 +261,19 @@ def create_host_device_tensor(shape, dtype):
     if rc != 0:
         raise RuntimeError(f"cudaMallocManaged failed with error code {rc}")
 
-    class _ManagedAllocation:
-        def __init__(self, ptr):
-            self.ptr = ptr
-            self.cudart = cudart
-            self.buffer = (ctypes.c_byte * nbytes).from_address(ptr.value)
-
-        def __del__(self):
-            if getattr(self, "ptr", None) and self.ptr.value:
-                self.cudart.cudaFree(self.ptr)
-                self.ptr = ctypes.c_void_p()
-
-    allocation = _ManagedAllocation(ptr)
-    host = torch.frombuffer(allocation.buffer, dtype=dtype, count=numel).reshape(shape)
-    device = tensor_from_ptr(ptr.value, list(shape), str(dtype).split(".")[-1], torch.cuda.current_device(), False)
-    host._tilelang_managed_allocation = allocation
-    device._tilelang_managed_allocation = allocation
+    allocation = _ManagedAllocation(ptr.value, cudart)
+    buffer = (ctypes.c_byte * nbytes).from_address(ptr.value)
+    buffer._tilelang_managed_allocation = allocation
+    host = torch.frombuffer(buffer, dtype=dtype, count=numel).reshape(shape)
+    host.untyped_storage()._tilelang_managed_allocation = allocation
+    device = tensor_from_ptr(
+        ptr.value,
+        list(shape),
+        str(dtype).split(".")[-1],
+        torch.cuda.current_device(),
+        False,
+        allocation,
+    )
     return host, device
 
 

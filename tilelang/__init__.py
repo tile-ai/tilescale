@@ -214,8 +214,32 @@ if not env.is_light_import():
     from . import rocm as rocm  # noqa: F401
     from . import metal as metal  # noqa: F401
 
-    # Distributed extensions (optional)
-    from .distributed.tensor import tensor  # noqa: F401
-    from .distributed.allocator import get_allocator  # noqa: F401
+    # Keep optional distributed dependencies out of the normal TileLang import.
+    from .utils.tensor import tensor  # noqa: F401
+
+    def get_allocator(
+        size: int = 2**30,
+        device="cuda",
+        is_distributed: bool = True,
+        local_rank: int = 0,
+        num_local_ranks: int = 1,
+        group=None,
+        use_vmm: bool | None = None,
+        mcast_size: int | None = None,
+    ):
+        """Create a distributed allocator without importing its CUDA helpers eagerly."""
+        from .distributed.allocator import get_allocator as _get_allocator
+
+        return _get_allocator(
+            size=size,
+            device=device,
+            is_distributed=is_distributed,
+            local_rank=local_rank,
+            num_local_ranks=num_local_ranks,
+            group=group,
+            use_vmm=use_vmm,
+            mcast_size=mcast_size,
+        )
+
 
 del _lazy_load_lib
