@@ -1,4 +1,6 @@
 # Modified from: https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/utils/index.py
+# Copyright (c) 2023-2026 Songlin Yang, Yu Zhang, Zhiyuan Li. Licensed under
+# MIT; see THIRDPARTYNOTICES.txt and LICENSES/Flash-Linear-Attention.txt.
 import torch
 import torch.nn.functional as F
 import functools

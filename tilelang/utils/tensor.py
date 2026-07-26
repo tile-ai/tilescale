@@ -1,5 +1,8 @@
 """The profiler and convert to torch utils"""
 
+# Portions adapted from PyTorch under its BSD-style license. See
+# THIRDPARTYNOTICES.txt and the packaged PyTorch license and notice.
+
 from enum import Enum
 import torch
 from tvm import tirx

@@ -1,4 +1,8 @@
 from __future__ import annotations
+
+# _find_cuda_home is adapted from PyTorch under its BSD-style license. See
+# THIRDPARTYNOTICES.txt and the packaged PyTorch license and notice.
+
 import importlib.metadata
 import sys
 import os

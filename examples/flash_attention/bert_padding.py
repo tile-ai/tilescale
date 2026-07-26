@@ -1,4 +1,8 @@
-# Adapted from https://github.com/mlcommons/training_results_v1.1/blob/main/NVIDIA/benchmarks/bert/implementations/pytorch/padding.py
+# Modified from Dao-AILab/flash-attention's bert_padding.py, which is adapted
+# from the NVIDIA BERT implementation in MLCommons training_results_v1.1.
+# Copyright (c) 2019-2021 NVIDIA CORPORATION. All rights reserved.
+# BSD-3-Clause and Apache-2.0 terms apply; see THIRDPARTYNOTICES.txt,
+# 3rdparty/tvm/3rdparty/libflash_attn/LICENSE, and 3rdparty/tvm/LICENSE.
 # ruff: noqa
 import torch
 import torch.nn.functional as F

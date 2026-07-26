@@ -7,7 +7,6 @@
 #define TVM_TL_OP_UTILS_H_
 
 #include "./operator.h"
-#include "cuda/stubs/cuda.h"
 #include "region.h"
 #include "support/check.h"
 #include "tvm/runtime/base.h"
@@ -19,7 +18,9 @@ namespace tl {
 
 using namespace tirx;
 
-// Maps TVM DataType to CUDA's CUtensorMapDataType enum value.
+// Maps TVM DataType to the integer value of CUDA's CUtensorMapDataType enum.
+// Keeping the public interface integer-only lets the common op library build
+// without requiring a CUDA toolkit.
 TVM_DLL int to_CUtensorMapDataType(DataType dtype);
 
 // Reverses an array (used for row-major/column-major layout conversion).

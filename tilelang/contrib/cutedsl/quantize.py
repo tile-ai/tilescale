@@ -1,5 +1,7 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
+# FP4 twiddling portions are adapted from Triton under MIT; see
+# THIRDPARTYNOTICES.txt and LICENSES/Triton.txt.
 """
 Quantization/dequantization functions for CuTeDSL backend.
 These implement the same functionality as the CUDA templates in tilelang/quantize/lop3.py

@@ -1,4 +1,6 @@
 # Schedule adapted from DeepGEMM.
+# Portions Copyright (c) 2025 DeepSeek, licensed under MIT. See
+# THIRDPARTYNOTICES.txt and LICENSES/DeepGEMM.txt.
 
 import argparse
 from typing import Tuple

@@ -1,3 +1,7 @@
+# Portions adapted from Triton. Copyright 2018-2020 Philippe Tillet and
+# Copyright 2020-2022 OpenAI. Licensed under MIT; see
+# THIRDPARTYNOTICES.txt and LICENSES/Triton.txt.
+
 from typing import Literal
 from tilelang import language as T
 

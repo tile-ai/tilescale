@@ -1,4 +1,6 @@
 # This benchmark script is modified based on: https://github.com/deepseek-ai/FlashMLA/blob/main/benchmark/bench_flash_mla.py
+# Copyright (c) 2025 DeepSeek. Licensed under MIT; see
+# THIRDPARTYNOTICES.txt and LICENSES/FlashMLA.txt.
 # ruff: noqa
 import argparse
 import math

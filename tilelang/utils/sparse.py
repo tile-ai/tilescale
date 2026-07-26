@@ -1,3 +1,8 @@
+"""Sparse utilities, including PyTorch-derived reference conversions."""
+
+# Portions adapted from PyTorch under its BSD-style license. See
+# THIRDPARTYNOTICES.txt and the packaged PyTorch license and notice.
+
 import torch
 import tilelang
 import tilelang.language as T

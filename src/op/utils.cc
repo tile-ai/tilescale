@@ -148,12 +148,25 @@ PrimExpr MakeAccessPtrFromBufferLoad(const BufferLoad &load, int rw_mask) {
   return Call(DataType::Handle(), builtin::tvm_access_ptr(), acc_args);
 }
 
+// These values are part of the CUDA Driver API ABI. Keep them local to the
+// common op library so CPU-only builds do not require the CUDA toolkit headers.
+enum TensorMapDataTypeValue : int {
+  kTensorMapDataTypeUInt8 = 0,
+  kTensorMapDataTypeUInt16 = 1,
+  kTensorMapDataTypeUInt32 = 2,
+  kTensorMapDataTypeInt32 = 3,
+  kTensorMapDataTypeUInt64 = 4,
+  kTensorMapDataTypeInt64 = 5,
+  kTensorMapDataTypeFloat16 = 6,
+  kTensorMapDataTypeFloat32 = 7,
+  kTensorMapDataTypeFloat64 = 8,
+  kTensorMapDataTypeBFloat16 = 9,
+  kTensorMapDataType16U4Align8B = 13,
+  kTensorMapDataType16U4Align16B = 14,
+};
+
 // Maps TVM DataType to CUDA's CUtensorMapDataType enum value.
 int to_CUtensorMapDataType(DataType dtype) {
-  // CUDA 13 adds packed U4 TensorMap formats. The vendored CUDA stub may lag
-  // the installed toolkit, so keep the enum value by CUDA's documented order.
-  constexpr int kTensorMapDataType16U4Align8B = 13;
-  constexpr int kTensorMapDataType16U4Align16B = 14;
   if (dtype.is_float4_e2m1_unpacked()) {
     return kTensorMapDataType16U4Align16B;
   }
@@ -161,44 +174,44 @@ int to_CUtensorMapDataType(DataType dtype) {
     return kTensorMapDataType16U4Align8B;
   }
 
-  CUtensorMapDataType tp;
+  int tp;
   if (dtype.is_float()) {
     switch (dtype.bits()) {
     case 64:
-      tp = CU_TENSOR_MAP_DATA_TYPE_FLOAT64;
+      tp = kTensorMapDataTypeFloat64;
       break;
     case 32:
-      tp = CU_TENSOR_MAP_DATA_TYPE_FLOAT32;
+      tp = kTensorMapDataTypeFloat32;
       break;
     case 16:
-      tp = CU_TENSOR_MAP_DATA_TYPE_FLOAT16;
+      tp = kTensorMapDataTypeFloat16;
       break;
     case 8:
-      tp = CU_TENSOR_MAP_DATA_TYPE_UINT8;
+      tp = kTensorMapDataTypeUInt8;
       break;
     default:
       ICHECK(0) << dtype;
     }
   } else if (dtype.is_bfloat16()) {
-    tp = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
+    tp = kTensorMapDataTypeBFloat16;
   } else if (dtype.is_tfloat32()) {
     // tfloat32 uses same memory layout as float32
-    tp = CU_TENSOR_MAP_DATA_TYPE_FLOAT32;
+    tp = kTensorMapDataTypeFloat32;
   } else if (dtype.is_float8()) {
-    tp = CU_TENSOR_MAP_DATA_TYPE_UINT8;
+    tp = kTensorMapDataTypeUInt8;
   } else if (dtype.is_int()) {
     switch (dtype.bits()) {
     case 64:
-      tp = CU_TENSOR_MAP_DATA_TYPE_INT64;
+      tp = kTensorMapDataTypeInt64;
       break;
     case 32:
-      tp = CU_TENSOR_MAP_DATA_TYPE_INT32;
+      tp = kTensorMapDataTypeInt32;
       break;
     case 16:
-      tp = CU_TENSOR_MAP_DATA_TYPE_UINT16;
+      tp = kTensorMapDataTypeUInt16;
       break;
     case 8:
-      tp = CU_TENSOR_MAP_DATA_TYPE_UINT8;
+      tp = kTensorMapDataTypeUInt8;
       break;
     default:
       ICHECK(0) << dtype;
@@ -206,16 +219,16 @@ int to_CUtensorMapDataType(DataType dtype) {
   } else if (dtype.is_uint()) {
     switch (dtype.bits()) {
     case 64:
-      tp = CU_TENSOR_MAP_DATA_TYPE_UINT64;
+      tp = kTensorMapDataTypeUInt64;
       break;
     case 32:
-      tp = CU_TENSOR_MAP_DATA_TYPE_UINT32;
+      tp = kTensorMapDataTypeUInt32;
       break;
     case 16:
-      tp = CU_TENSOR_MAP_DATA_TYPE_UINT16;
+      tp = kTensorMapDataTypeUInt16;
       break;
     case 8:
-      tp = CU_TENSOR_MAP_DATA_TYPE_UINT8;
+      tp = kTensorMapDataTypeUInt8;
       break;
     default:
       ICHECK(0) << dtype;
@@ -223,7 +236,7 @@ int to_CUtensorMapDataType(DataType dtype) {
   } else {
     ICHECK(0) << dtype;
   }
-  return static_cast<int>(tp);
+  return tp;
 }
 
 } // namespace tl

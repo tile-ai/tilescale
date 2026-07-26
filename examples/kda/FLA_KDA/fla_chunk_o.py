@@ -1,4 +1,6 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Licensed under MIT and modified for TileScale. See THIRDPARTYNOTICES.txt and
+# LICENSES/Flash-Linear-Attention.txt.
 
 import torch
 import triton

@@ -70,6 +70,8 @@ Fragment makeGemmFragment8x8Transposed() {
 
 /*
 From https://github.com/RadeonOpenCompute/amd_matrix_instruction_calculator
+Copyright (c) 2022-2024 Advanced Micro Devices, Inc. Licensed under MIT;
+see THIRDPARTYNOTICES.txt and LICENSES/AMD-Matrix-Instruction-Calculator.txt.
 ./matrix_calculator.py --architecture cdna1 --instruction v_mfma_f32_16x16x16f16
 --detail-instruction
 */

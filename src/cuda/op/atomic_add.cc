@@ -11,6 +11,7 @@
 
 #include "backend/common/target_utils.h"
 #include "cuda/op/copy.h"
+#include "cuda/stubs/cuda.h"
 #include "layout/layout.h"
 #include "op/builtin.h"
 #include "op/distributed_utils.h"

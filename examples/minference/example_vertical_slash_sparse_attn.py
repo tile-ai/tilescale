@@ -1,5 +1,6 @@
 # Copyright (c) 2024-2025 Microsoft
-# Licensed under The MIT License [see LICENSE for details]
+# Licensed under MIT; see THIRDPARTYNOTICES.txt and LICENSES/MInference.txt.
+# Modified for TileScale.
 
 import math
 import argparse

@@ -12,7 +12,6 @@
 #include <tvm/tirx/op_attr_types.h>
 
 #include "backend/common/target_utils.h"
-#include "cuda/stubs/cuda.h"
 
 namespace tvm {
 namespace tl {

@@ -1,4 +1,6 @@
 # Adapted from tilelang/examples/flash_attention/example_gqa_bwd.py
+# Attention-sink portions are modified from OpenAI gpt-oss under Apache-2.0.
+# See THIRDPARTYNOTICES.txt and 3rdparty/tvm/LICENSE.
 
 import torch
 import tilelang

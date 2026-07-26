@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+# Copyright 2023-2024 SGLang Team. Modified for TileScale; see
+# THIRDPARTYNOTICES.txt and 3rdparty/tvm/LICENSE.
 
 # Adapted from https://github.com/sgl-project/sglang/pull/2575
 from typing import Optional, Tuple

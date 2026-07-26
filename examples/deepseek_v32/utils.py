@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Licensed under MIT and modified for TileScale. See THIRDPARTYNOTICES.txt and
+# LICENSES/Flash-Linear-Attention.txt.
 # ruff: noqa
 
 import torch

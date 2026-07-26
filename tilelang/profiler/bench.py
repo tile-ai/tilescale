@@ -1,5 +1,8 @@
 """Profiler and benchmarking utilities for PyTorch functions."""
 
+# Portions adapted from DeepGEMM, Copyright (c) 2025 DeepSeek, under MIT.
+# See THIRDPARTYNOTICES.txt and LICENSES/DeepGEMM.txt.
+
 from __future__ import annotations
 
 import os

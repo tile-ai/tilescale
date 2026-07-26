@@ -1,3 +1,6 @@
+# Modified from vLLM v0.5.5 under Apache License 2.0. See
+# THIRDPARTYNOTICES.txt and 3rdparty/tvm/licenses/LICENSE.vllm.txt.
+
 import contextlib
 import gc
 import os
