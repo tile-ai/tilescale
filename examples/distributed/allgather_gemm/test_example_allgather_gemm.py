@@ -9,7 +9,7 @@ import example_allgather_gemm_overlapped
 import example_allgather_gemm_specialized
 
 
-@distributed_test(nprocs=8)
+@distributed_test(nprocs=4)
 def test_example_allgather_gemm_overlapped(local_rank: int, num_ranks: int):
     args = argparse.Namespace(
         num_processes=num_ranks,
@@ -29,7 +29,7 @@ def test_example_allgather_gemm_overlapped(local_rank: int, num_ranks: int):
     example_allgather_gemm_overlapped.main(local_rank, num_ranks, args)
 
 
-@distributed_test(nprocs=8, require_multicast=True)
+@distributed_test(nprocs=4, require_multicast=True)
 def test_example_allgather_gemm_specialized(local_rank: int, num_ranks: int):
     args = argparse.Namespace(
         num_processes=num_ranks,

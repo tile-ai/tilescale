@@ -3,7 +3,7 @@
 Both ops are tested in a single spawn session.  Kernels are pre-compiled at
 module import time so children load from disk cache.
 
-Requirements: >= 2 GPUs, compute >= 9.0.
+CI configuration: 4 GPUs, compute >= 9.0.
 """
 
 from __future__ import annotations
@@ -66,7 +66,7 @@ _KERNELS = [_kernel_get_rank, _kernel_get_num_ranks]
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
-@distributed_test()
+@distributed_test(nprocs=4)
 def test_basic(local_rank: int, num_local_ranks: int):
     from tilelang.distributed.host import init_dist
 

@@ -9,7 +9,7 @@ import example_gemm_rs_overlapped
 import example_gemm_rs_specialized
 
 
-@distributed_test(nprocs=8)
+@distributed_test(nprocs=4)
 def test_example_gemm_rs_overlapped(local_rank: int, num_ranks: int):
     args = argparse.Namespace(
         num_processes=num_ranks,
@@ -24,6 +24,7 @@ def test_example_gemm_rs_overlapped(local_rank: int, num_ranks: int):
     example_gemm_rs_overlapped.main(local_rank, num_ranks, args)
 
 
+# The remote TMA descriptor selection remains specialized for eight ranks.
 @distributed_test(nprocs=8)
 def test_example_gemm_rs_specialized(local_rank: int, num_ranks: int):
     args = argparse.Namespace(

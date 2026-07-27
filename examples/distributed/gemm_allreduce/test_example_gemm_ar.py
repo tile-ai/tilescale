@@ -8,7 +8,7 @@ from testing.python.distributed._utils import distributed_test
 import example_gemm_ar_specialized
 
 
-@distributed_test(nprocs=8, require_multicast=True)
+@distributed_test(nprocs=4, require_multicast=True)
 def test_example_gemm_ar_specialized(local_rank: int, num_ranks: int):
     args = argparse.Namespace(
         num_processes=num_ranks,

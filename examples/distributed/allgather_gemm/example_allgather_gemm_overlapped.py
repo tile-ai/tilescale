@@ -332,7 +332,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num-processes", type=int, default=8, help="Number of processes to spawn (default: 8)")
+    parser.add_argument("--num-processes", type=int, default=4, help="Number of processes to spawn (default: 4)")
     parser.add_argument("--M", type=int, default=32768, help="M dimension")
     parser.add_argument("--N", type=int, default=16384, help="N dimension")
     parser.add_argument("--K", type=int, default=2048, help="K dimension")

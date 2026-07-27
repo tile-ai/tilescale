@@ -2,7 +2,7 @@
 Multicast (NVSwitch SHARP) shared-memory operations.
 
 Single-GPU tests run directly under pytest.
-Multi-GPU tests use torch.multiprocessing.spawn and require >= 2 GPUs.
+Multi-GPU tests use torch.multiprocessing.spawn and are configured for 4 GPUs.
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ def test_supports_multicast():
 # ---------------------------------------------------------------------------
 
 
-@distributed_test(nprocs=None, require_multicast=True)
+@distributed_test(nprocs=4, require_multicast=True)
 def test_distributed_multicast_allocator(local_rank: int, num_ranks: int):
     """Create multicast buffer via BaseAllocator and verify multimem access."""
     from tilelang.distributed.host import init_dist

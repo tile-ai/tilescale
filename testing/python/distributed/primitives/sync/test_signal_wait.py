@@ -46,7 +46,7 @@ def _signal_wait_kernel():
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
-@distributed_test()
+@distributed_test(nprocs=2)
 def test_signal_wait(local_rank: int, num_ranks: int):
     from tilelang.distributed.host import init_dist
 

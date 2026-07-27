@@ -1,6 +1,6 @@
 """Tests for distributed remote scalar store via T.st(..., dst_pe=...).
 
-Requirements: >= 2 GPUs, compute >= 9.0.
+CI configuration: 4 GPUs, compute >= 9.0.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ def _kernel_remote_st(M: int, block_M: int, threads: int):
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
-@distributed_test()
+@distributed_test(nprocs=4)
 def test_remote_st(local_rank: int, num_ranks: int):
     from tilelang.distributed.host import init_dist
 

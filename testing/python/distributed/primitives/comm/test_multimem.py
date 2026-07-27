@@ -120,7 +120,7 @@ def _assert_all_ranks_equal(actual: torch.Tensor, expected: torch.Tensor, group,
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
-@distributed_test(nprocs=None, require_multicast=True)
+@distributed_test(nprocs=4, require_multicast=True)
 def test_multimem(local_rank: int, num_ranks: int):
     from tilelang.distributed.host import init_dist
 

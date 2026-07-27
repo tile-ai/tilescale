@@ -1,6 +1,6 @@
 """Tests for distributed allocator peer tensor views.
 
-Requirements: >= 2 GPUs.
+CI configuration: 4 GPUs.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ os.environ.setdefault("NCCL_DEBUG", "WARN")
 _M = 1024
 
 
-@distributed_test()
+@distributed_test(nprocs=4)
 def test_return_peers(local_rank: int, num_ranks: int):
     from tilelang.distributed.host import init_dist
 

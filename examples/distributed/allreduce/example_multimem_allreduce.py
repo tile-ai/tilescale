@@ -297,7 +297,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num-processes", type=int, default=8)
+    parser.add_argument("--num-processes", type=int, default=4)
     parser.add_argument("--N", type=int, default=16 * 1024 * 1024)
     parser.add_argument("--block-n", type=int, default=512)
     parser.add_argument("--threads", type=int, default=256)

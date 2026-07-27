@@ -61,13 +61,13 @@ def main(local_rank: int, num_ranks: int, args: argparse.Namespace):
     dist.destroy_process_group()
 
 
-@distributed_test()
+@distributed_test(nprocs=4)
 def test_barrierall_sys(local_rank: int, num_ranks: int):
     main(local_rank, num_ranks, argparse.Namespace(blocks=64, threads=128))
 
 
 # Trigger pre-compile
-get_test_barrierall_sys_kernel(2, 64, 128)
+get_test_barrierall_sys_kernel(4, 64, 128)
 
 
 if __name__ == "__main__":

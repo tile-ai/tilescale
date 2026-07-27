@@ -2,7 +2,7 @@
 VMM (Virtual Memory Management) and IPC shared-memory operations.
 
 Single-GPU tests run directly under pytest.
-Multi-GPU tests use torch.multiprocessing.spawn and require >= 2 GPUs.
+Multi-GPU tests use torch.multiprocessing.spawn and are configured for 4 GPUs.
 """
 
 from __future__ import annotations
@@ -717,7 +717,7 @@ def test_vmm_handle_export_import():
 # ---------------------------------------------------------------------------
 
 
-@distributed_test(require_fabric=True)
+@distributed_test(nprocs=4, require_fabric=True)
 def test_distributed_vmm(local_rank: int, num_ranks: int):
     from tilelang.distributed.host import init_dist
     from tilelang.distributed.allocator import BaseAllocator
@@ -747,7 +747,7 @@ def test_distributed_vmm(local_rank: int, num_ranks: int):
     dist.destroy_process_group()
 
 
-@distributed_test()
+@distributed_test(nprocs=4)
 def test_distributed_ipc_fallback(local_rank: int, num_ranks: int):
     from tilelang.distributed.allocator import BaseAllocator
     from tilelang.distributed.host import init_dist
@@ -780,7 +780,7 @@ def test_distributed_ipc_fallback(local_rank: int, num_ranks: int):
     dist.destroy_process_group()
 
 
-@distributed_test()
+@distributed_test(nprocs=4)
 def test_distributed_allocator_collective_fault_recovery(local_rank: int, num_ranks: int):
     from tilelang.distributed.allocator import BaseAllocator
     from tilelang.distributed.host import init_dist

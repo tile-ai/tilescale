@@ -8,7 +8,7 @@ from testing.python.distributed._utils import distributed_test
 import example_multimem_allreduce
 
 
-@distributed_test(nprocs=8, require_multicast=True)
+@distributed_test(nprocs=4, require_multicast=True)
 def test_example_multimem_allreduce(local_rank: int, num_ranks: int):
     args = argparse.Namespace(
         num_processes=num_ranks,
@@ -27,7 +27,7 @@ def test_example_multimem_allreduce(local_rank: int, num_ranks: int):
     example_multimem_allreduce.main(local_rank, num_ranks, args)
 
 
-@distributed_test(nprocs=8, require_multicast=True)
+@distributed_test(nprocs=4, require_multicast=True)
 def test_example_multimem_allreduce_tma_copy(local_rank: int, num_ranks: int):
     args = argparse.Namespace(
         num_processes=num_ranks,

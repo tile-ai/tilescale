@@ -420,7 +420,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num-processes", type=int, default=8)
+    parser.add_argument("--num-processes", type=int, default=4)
     parser.add_argument("--M", type=int, default=4096)
     parser.add_argument("--N", type=int, default=4096)
     parser.add_argument("--K", type=int, default=512)

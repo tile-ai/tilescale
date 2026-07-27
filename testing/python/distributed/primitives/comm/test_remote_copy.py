@@ -36,7 +36,7 @@ def _kernel_remote_copy(M: int, block_M: int, threads: int):
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
-@distributed_test()
+@distributed_test(nprocs=4)
 def test_remote_copy(local_rank: int, num_ranks: int):
     from tilelang.distributed.host import init_dist
 

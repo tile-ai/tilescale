@@ -34,7 +34,7 @@ def _jit_identity_kernel():
     return _identity_kernel()
 
 
-@distributed_test()
+@distributed_test(nprocs=4)
 def test_compile_once_root_runs_before_non_root(local_rank: int, num_ranks: int):
     from tilelang.distributed.host import init_dist
 
@@ -66,7 +66,7 @@ def test_compile_once_root_runs_before_non_root(local_rank: int, num_ranks: int)
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
-@distributed_test()
+@distributed_test(nprocs=4)
 def test_compile_once_compile_api(local_rank: int, num_ranks: int):
     from tilelang.distributed.host import init_dist
 
@@ -83,7 +83,7 @@ def test_compile_once_compile_api(local_rank: int, num_ranks: int):
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
-@distributed_test()
+@distributed_test(nprocs=4)
 def test_compile_once_jit_api(local_rank: int, num_ranks: int):
     from tilelang.distributed.host import init_dist
 
@@ -102,7 +102,7 @@ def test_compile_once_jit_api(local_rank: int, num_ranks: int):
         dist.destroy_process_group()
 
 
-@distributed_test()
+@distributed_test(nprocs=4)
 def test_compile_once_nonzero_root(local_rank: int, num_ranks: int):
     from tilelang.distributed.host import init_dist
 
@@ -138,7 +138,7 @@ def test_compile_once_nonzero_root(local_rank: int, num_ranks: int):
         dist.destroy_process_group()
 
 
-@distributed_test()
+@distributed_test(nprocs=4)
 def test_compile_once_root_failure_reaches_all_ranks(local_rank: int, num_ranks: int):
     from tilelang.distributed.host import init_dist
 

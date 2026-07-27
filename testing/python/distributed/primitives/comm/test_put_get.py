@@ -4,7 +4,7 @@ All four ops are tested in a single spawn session to avoid paying per-test
 import / NCCL setup overhead (~10s per spawn).  pytest -k can select individual
 ops via the test names reported by the worker.
 
-Requirements: >= 2 GPUs, compute >= 9.0.
+CI configuration: 4 GPUs, compute >= 9.0.
 """
 
 from __future__ import annotations
@@ -110,7 +110,7 @@ _OP_NAMES = ["get_block", "get_warp", "put_block", "put_warp"]
 _KERNEL_FNS = [_kernel_get_block, _kernel_get_warp, _kernel_put_block, _kernel_put_warp]
 
 for _fn in _KERNEL_FNS:
-    tilelang.compile(_fn(_M, 2, _BLOCK_M, _THREADS))
+    tilelang.compile(_fn(_M, 4, _BLOCK_M, _THREADS))
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +119,7 @@ for _fn in _KERNEL_FNS:
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
-@distributed_test()
+@distributed_test(nprocs=4)
 def test_put_get(local_rank: int, num_ranks: int):
     from tilelang.distributed.host import init_dist
 
