@@ -102,7 +102,8 @@ separately from passes.
 | Two-GPU distributed suite, automatic VMM selection after IMEX configuration | 103 passed | `/tmp/tilescale-vmm-auto-full-final2.xml`, `e9a4adb00d353d4b7e27c56149cb9007f8303a51a667b42454858bf9daca0e6e` |
 | Eight-GPU VMM/multicast executable examples after IMEX configuration | 4 passed on all 8 ranks | `/tmp/tilescale-release-8gpu-final.xml`, `57802a4abb76322442dab347b30fb48fb3c2307e00bd2f2a75b8ebe518a0fe34` |
 | Two-GPU VMM, multicast, and multimem primitives, forced VMM | 58 passed, 1 mutually exclusive IPC fallback test deselected | `/tmp/tilescale-vmm-explicit-final3.xml`, `18305ec0c51f7111c083d753b7a431a13238b78797d5dccf4b8468fe42225149` |
-| Native SM100 multimem TMA broadcast and ADD, forced VMM | 1 passed with exact checks of both physical backings | `/tmp/tilescale-vmm-multimem-tma-final.xml`, `b68fb4556df7c7c6fc91a5e95bf0d8786d6a43faa835fce4dad3f376ac3c78a0` |
+| Final four-GPU distributed suite on B200 with IMEX configured | 140 passed | `/tmp/tilescale-pr61-distributed-final.xml`, `f7b876706397a2d024cea3f736b88197815635228bbefd8353ee3e4a8c42bea2` |
+| Native multimem TMA broadcast and ADD on B200 (SM100), forced VMM | 1 passed with exact checks of both physical backings | `/tmp/tilescale-vmm-multimem-tma-final.xml`, `b68fb4556df7c7c6fc91a5e95bf0d8786d6a43faa835fce4dad3f376ac3c78a0` |
 | Rank-1 descriptor TMA store and neighboring TMA-copy regressions | 12 passed | `/tmp/tilescale-release-tma-copy-final.xml`, `87d4e871afdb76316976f9f03eca36a55ff503088498113d403efc09cd134bc1` |
 
 The forced-IPC two-GPU record contains 17 real two-rank distributed test nodes
@@ -152,7 +153,7 @@ release user. The runtime VMM-fabric and multicast probes then both returned
 true. Fresh-cache reruns selected VMM automatically and completed the two-GPU
 distributed suite and all four named eight-GPU capability examples. A later
 forced-VMM rerun also completed the focused VMM/multicast/multimem suite and the
-native SM100 multimem TMA broadcast and ADD test. These follow-up results
+native multimem TMA broadcast and ADD test on B200 (SM100). These follow-up results
 validate the paths on the stated B200/CUDA 13.2/IMEX configuration; they do not
 remove the runtime capability gates or imply support on systems without an
 accessible IMEX channel.
@@ -177,14 +178,28 @@ Two publication topologies are maintained:
   `v0-release-0726-public` snapshot. It has the same final source tree without
   inheriting any existing repository history.
 
-Before merging the review branch, verify its public base, absence of private
-ancestry, final-tree equivalence, and restricted-path history:
+Before merging the review branch, verify its public base, reconstruction fork,
+absence of merge/private/CI ancestry, final-tree equivalence, restricted-path
+history, and unchanged CI workflow:
 
 ```bash
-test "$(git merge-base 4704282 release/v0.0.2-tilelang-550e25d)" = 4704282a16fd0e7ff2c2c13f87772b42e4dc6163
-! git merge-base --is-ancestor v0-release-0726 release/v0.0.2-tilelang-550e25d
-git diff --exit-code release/v0.0.2-tilelang-550e25d v0-release-0726
-test -z "$(git log --format='%H' release/v0.0.2-tilelang-550e25d -- \
+release_ref=release/v0.0.2-tilelang-550e25d
+public_base=4704282a16fd0e7ff2c2c13f87772b42e4dc6163
+private_fork=8205791dfb65272b4d5bcb812f88456cf918b895
+excluded_ci=2035db5636f1f09476a0311c255ab1955e4ef769
+ci_parent=c3fefac1101bc05b786dd4a5784ce313cfbd273b
+
+test "$(git merge-base "$public_base" "$release_ref")" = "$public_base"
+test "$(git merge-base v0-release-0726 "$release_ref")" = "$private_fork"
+test -z "$(git rev-list --merges "${public_base}..${release_ref}")"
+! git merge-base --is-ancestor "$excluded_ci" "$release_ref"
+test "$(git rev-parse "${release_ref}^{tree}")" = \
+  "$(git rev-parse 'v0-release-0726^{tree}')"
+test "$(git rev-parse "${release_ref}^{tree}")" = \
+  "$(git rev-parse 'v0-release-0726-public^{tree}')"
+test "$(git rev-parse "${release_ref}:.github/workflows/ci.yml")" = \
+  "$(git rev-parse "${ci_parent}:.github/workflows/ci.yml")"
+test -z "$(git log --format='%H' "$release_ref" -- \
   src/cuda/stubs/vendor/cuda.h examples/mega_moe/reference.py)"
 ```
 
@@ -194,6 +209,7 @@ and that the commit has no parent:
 ```bash
 git rev-list --count v0-release-0726-public
 git show -s --format='%H %P' v0-release-0726-public
+git diff --exit-code release/v0.0.2-tilelang-550e25d v0-release-0726-public
 ```
 
 The first command must print `1`; the second must print only the snapshot

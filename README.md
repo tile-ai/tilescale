@@ -144,11 +144,11 @@ with 103 tests passing, including VMM, multicast, and multimem cases.
 Four post-configuration 8-GPU test nodes also passed on every rank: specialized
 all-gather GEMM, specialized GEMM all-reduce, multimem one-shot/two-shot
 all-reduce, and the experimental ordinary-TMA store to multicast VA. Separate
-broad upstream-compatibility slices passed on the same candidate. A focused
-two-GPU forced-VMM rerun also executed the native SM100 multimem TMA broadcast
-and ADD instructions, which require CUDA 13.1+, and checked both GPUs' physical
-multicast backings. Exact environment details, test records, and the two-stage
-validation timeline are in the
+broad upstream-compatibility slices passed on the same candidate. Focused
+forced-VMM runs also exercised native multimem TMA broadcast and reduction on
+B200 (SM100) and checked every participating GPU's physical multicast backing.
+These instructions require SM90+ and CUDA 13.1+. Exact environment details,
+test records, and the two-stage validation timeline are in the
 [release validation report](docs/release_v0_0726.md).
 
 ## Installation
@@ -184,13 +184,12 @@ toolchain, Docker, and migration details.
 ## Running and Testing
 
 Select the exact local GPU set before launching. Capability probes inspect all
-CUDA-visible devices. This command runs the validated CUDA IPC path on two
-GPUs:
+CUDA-visible devices. This command runs the maintained four-GPU CUDA IPC path:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 TILESCALE_USE_VMM=0 \
+CUDA_VISIBLE_DEVICES=0,1,2,3 TILESCALE_USE_VMM=0 \
 python examples/distributed/allgather_gemm/example_allgather_gemm_overlapped.py \
-  --num-processes 2
+  --num-processes 4
 ```
 
 Run the upstream-compatible test set and the distributed suite from the
@@ -198,7 +197,7 @@ repository root:
 
 ```bash
 python -m pytest -m "not perf and not slow" testing/python
-CUDA_VISIBLE_DEVICES=0,1 python -m pytest testing/python/distributed
+CUDA_VISIBLE_DEVICES=0,1,2,3 python -m pytest testing/python/distributed
 ```
 
 With no override, a distributed allocator uses VMM only when the fabric probe

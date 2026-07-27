@@ -248,12 +248,27 @@ and `NONE`.
 | `T.multimem_signal(addr, value)` | Store a `uint32` or `uint64` signal through a multicast address |
 | `T.multimem_signal_add(addr, value)` | Add a `uint32`, `int32`, or `uint64` signal through a multicast address |
 
-The signal type is inferred from `addr`; there is no `dtype_tag` argument.
-`multimem_tma_store` currently requires SM100+ and CUDA Toolkit 13.1+. Shared
-memory producer synchronization and async bulk-group completion are managed by
-the caller. Every producer thread must make its shared-memory writes visible to
-the async proxy before the CTA synchronizes. A single elected thread then
-issues the store, commit, and wait sequence:
+The signal type is inferred from `addr`; there is no `dtype_tag` argument. The
+direct `multimem_ld_reduce` and `multimem_red` paths currently expose ADD;
+unsupported PTX dtype/operation combinations are rejected during lowering.
+Direct multimem operations and signals require SM90+ and CUDA Toolkit 12.0+.
+Packed `float16`/`bfloat16` regions additionally require an even last extent,
+pair-aligned multicast rows, a full local fragment region, and a fragment layout
+that preserves contiguous-pair thread ownership.
+
+Bulk `multimem_tma_store` additionally requires CUDA Toolkit 13.1+. Its source and
+destination regions must have matching rank, extents, and dtype. Both regions
+must be in bounds, physically contiguous, byte-addressable, and start at a
+provably 16-byte-aligned address. The positive transfer size must be divisible
+by 16 bytes and fit in an unsigned 32-bit byte count. Layout-remapped buffers
+are rejected. Plain bulk stores accept matching byte-addressable scalar or
+vector dtypes. Bulk reductions accept ADD for `float32`, `float16`, and
+`bfloat16`, and MIN/MAX for `float16` and `bfloat16`.
+
+Shared-memory producer synchronization and async bulk-group completion are
+managed by the caller. Every producer thread must make its shared-memory writes
+visible to the async proxy before the CTA synchronizes. A single elected thread
+then issues the store, commit, and wait sequence:
 
 ```python
 T.fence_proxy_async()
@@ -350,12 +365,13 @@ This creates a zero-copy CUDA tensor view. Supported dtype strings are
 
 ## Validation Boundaries
 
-Most cross-rank pytest cases request two spawned processes and skip when fewer
-than two GPUs are visible. Cases declared with `nprocs=None` use all visible
-GPUs. Fabric and multicast cases additionally skip when their runtime
-capability probes fail. A skipped capability test is not evidence that the
-corresponding path works on that host; release validation should record the GPU
-count and which capability-gated cases actually ran.
+Most maintained cross-rank compatibility cases request four spawned processes
+and skip when fewer than four GPUs are visible. A small number of tests retain
+two or eight processes when the primitive or algorithm requires that topology.
+Fabric and multicast cases additionally skip when their runtime capability
+probes fail. A skipped capability test is not evidence that the corresponding
+path works on that host; release validation should record the GPU count and
+which capability-gated cases actually ran.
 
 The maintained examples and tests are under `examples/distributed` and
 `testing/python/distributed`. This reference intentionally does not label every

@@ -2,10 +2,10 @@
  * \file tl/op/multimem.h
  * \brief Unified multimem operator that reuses T.copy's layout inference.
  *
- * Design: MakeSIMTLoop creates element-wise BufferLoad/BufferStore loop,
- * then ParallelOp + InferLayout + VectorizeLoop runs the standard pipeline.
- * Post-process replaces vectorized loads/stores on mcast buffers with
- * multimem call_extern instructions.
+ * Design: direct modes use the standard ParallelOp layout/vectorization
+ * pipeline before replacing multicast accesses with call_extern instructions.
+ * Bulk modes validate and lower one physically contiguous shared-to-multicast
+ * region directly.
  */
 
 #ifndef TVM_TL_OP_MULTIMEM_H_
@@ -34,12 +34,15 @@ enum class MultimemMode : int {
 /*!
  * \brief Unified multimem operator for NVSwitch SHARP multicast operations.
  *
- * Supports three modes:
+ * Supports five modes:
  *  - kLdReduce: load-reduce from multicast address into local buffer
  *  - kSt: store to multicast address (broadcast)
  *  - kRed: reduce into multicast address (no read-back)
+ *  - kTmaStore: bulk async store from shared memory to multicast global memory
+ *  - kTmaRedStore: bulk async reduce-store from shared memory to multicast
+ *    global memory
  *
- * Lower flow:
+ * Direct-mode lower flow:
  *  1. MakeSIMTLoop: creates element-wise parallel loop (BufferLoad ->
  * BufferStore)
  *  2. ParallelLoopFuser::Fuse + ParallelLoopTransformer::Substitute
@@ -47,6 +50,10 @@ enum class MultimemMode : int {
  *  4. LowerParallelLoop (PartitionLoop + VectorizeLoop)
  *  5. MultimemRewriter: post-process to replace mcast buffer accesses with
  * call_extern
+ *
+ * Bulk TMA modes bypass the SIMT pipeline and use LowerBulkCopy after
+ * validating rank, dtype, bounds, physical contiguity, alignment, and transfer
+ * size.
  */
 class MultimemOpNode : public TileOperatorNode {
 public:

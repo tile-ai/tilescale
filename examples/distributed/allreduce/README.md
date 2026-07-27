@@ -1,8 +1,8 @@
 # Multimem Allreduce Notes
 
 This example implements intranode NVSwitch allreduce with TileLang multimem
-primitives. The current CI target is a Hopper-class 4-GPU node with multicast VA
-support.
+primitives. The maintained test configuration targets four multicast-capable
+GPUs on one NVSwitch host.
 
 ## Strategies
 

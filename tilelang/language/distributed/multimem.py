@@ -56,7 +56,9 @@ def multimem_ld_reduce(src, dst, reduce_op: MultimemReduceOp = MultimemReduceOp.
     according to alignment and tail predicates. Source and destination regions
     must have matching rank, extent, and scalar dtype. Float16 and bfloat16 use
     packed x2 instructions, so their local region must cover the full fragment,
-    their last extent must be even, and multicast rows must be pair-aligned.
+    their last extent must be even, multicast rows must be pair-aligned, and the
+    fragment layout must preserve the packed lowering's contiguous-pair thread
+    ownership.
 
     Args:
         src: Multicast source (Buffer, BufferLoad with slice, or BufferRegion)
@@ -104,12 +106,24 @@ def multimem_tma_store(src, dst, reduce_op: MultimemReduceOp | None = None):
     thread then issues this operation, ``T.tma_store_arrive()``, and
     ``T.tma_store_wait()``.
 
+    Source and destination regions must have matching rank, extents, and dtype.
+    Each region must be in bounds, physically contiguous, byte-addressable, and
+    start at a provably 16-byte-aligned address. The positive transfer size must
+    be divisible by 16 bytes and fit in an unsigned 32-bit byte count. Layout-
+    remapped buffers are rejected because their physical contiguity cannot be
+    inferred from the logical region.
+
+    Plain stores support matching byte-addressable scalar or vector dtypes. Bulk
+    reductions support ADD for float32, float16, and bfloat16, plus MIN/MAX for
+    float16 and bfloat16. Other dtype/operation combinations are rejected during
+    lowering.
+
     Args:
         src: Shared memory source (Buffer, BufferLoad or BufferRegion, shared scope)
         dst: Multicast global destination (Buffer, BufferLoad or BufferRegion, global scope)
         reduce_op: None for plain store (broadcast), MultimemReduceOp.ADD/MIN/MAX for reduce-accumulate
 
-    NOTE: The current CUDA implementation requires SM100+ and CUDA toolkit 13.1+.
+    NOTE: The current CUDA implementation requires SM90+ and CUDA toolkit 13.1+.
     Older toolkits can use an ordinary TMA store to the multicast virtual
     address where that path has been validated.
     """
