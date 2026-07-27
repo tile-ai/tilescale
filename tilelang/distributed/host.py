@@ -68,12 +68,12 @@ def init_dist(local_rank: int, num_local_ranks: int, master_port: int | None = N
         if legacy_world_size != 1 or legacy_rank != 0:
             raise NotImplementedError(
                 "Ambiguous WORLD_SIZE/RANK launcher environment without LOCAL_WORLD_SIZE; "
-                "TileScale v0 supports local spawn or single-node torchrun only."
+                "TileScale supports local spawn or single-node torchrun only."
             )
 
     if num_nodes != 1 or node_rank != 0:
         raise NotImplementedError(
-            "TileScale v0 currently supports only single-node process groups; multi-node launch requires a node-local allocator group."
+            "TileScale currently supports only single-node process groups; multi-node launch requires a node-local allocator group."
         )
 
     torch.cuda.set_device(local_rank)

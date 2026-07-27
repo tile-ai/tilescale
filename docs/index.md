@@ -1,8 +1,8 @@
-# TileScale V0
+# TileScale
 
 [GitHub](https://github.com/tile-ai/tilescale)
 
-TileScale V0 is a single-node multi-GPU extension of TileLang. It preserves the
+TileScale is a single-node multi-GPU extension of TileLang. It preserves the
 TileLang compiler, JIT, and Python kernel language while adding CUDA IPC, VMM,
 multicast, remote-memory, and cross-GPU synchronization primitives. The Python
 distribution is `tilescale`; the compatibility import namespace remains

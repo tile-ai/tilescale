@@ -100,10 +100,10 @@ separately from passes.
 | Eight-GPU executable examples, forced CUDA IPC | 3 passed on all 8 ranks | `/tmp/tilescale-8gpu-final2-0726.2AFSaz/`; per-case logs below |
 | Eight-GPU multicast-dependent example gates, before IMEX configuration | 3 IMEX/multicast capability skips | `/tmp/tilescale-8gpu-capability-final-0726.xml`, `c059d9b4bc495c13568c010d6356bf98dba026ffd283d62ff2f77b01d4c078d1` |
 | Two-GPU distributed suite, automatic VMM selection after IMEX configuration | 103 passed | `/tmp/tilescale-vmm-auto-full-final2.xml`, `e9a4adb00d353d4b7e27c56149cb9007f8303a51a667b42454858bf9daca0e6e` |
-| Eight-GPU VMM/multicast executable examples after IMEX configuration | 4 passed on all 8 ranks | `/tmp/tilescale-v0-release-8gpu-final.xml`, `57802a4abb76322442dab347b30fb48fb3c2307e00bd2f2a75b8ebe518a0fe34` |
+| Eight-GPU VMM/multicast executable examples after IMEX configuration | 4 passed on all 8 ranks | `/tmp/tilescale-release-8gpu-final.xml`, `57802a4abb76322442dab347b30fb48fb3c2307e00bd2f2a75b8ebe518a0fe34` |
 | Two-GPU VMM, multicast, and multimem primitives, forced VMM | 58 passed, 1 mutually exclusive IPC fallback test deselected | `/tmp/tilescale-vmm-explicit-final3.xml`, `18305ec0c51f7111c083d753b7a431a13238b78797d5dccf4b8468fe42225149` |
 | Native SM100 multimem TMA broadcast and ADD, forced VMM | 1 passed with exact checks of both physical backings | `/tmp/tilescale-vmm-multimem-tma-final.xml`, `b68fb4556df7c7c6fc91a5e95bf0d8786d6a43faa835fce4dad3f376ac3c78a0` |
-| Rank-1 descriptor TMA store and neighboring TMA-copy regressions | 12 passed | `/tmp/tilescale-v0-release-tma-copy-final.xml`, `87d4e871afdb76316976f9f03eca36a55ff503088498113d403efc09cd134bc1` |
+| Rank-1 descriptor TMA store and neighboring TMA-copy regressions | 12 passed | `/tmp/tilescale-release-tma-copy-final.xml`, `87d4e871afdb76316976f9f03eca36a55ff503088498113d403efc09cd134bc1` |
 
 The forced-IPC two-GPU record contains 17 real two-rank distributed test nodes
 and 34 workers that exited cleanly. It covers peer put/get, remote copy, remote

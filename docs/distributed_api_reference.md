@@ -1,10 +1,10 @@
-# TileScale V0 Distributed API Reference
+# TileScale Distributed API Reference
 
 TileScale extends TileLang with experimental single-node, multi-GPU CUDA
 primitives. The supported process model is one process per local GPU on one
 host, using an NCCL process group for host-side coordination. Multi-node
 execution, NVSHMEM, and a general-purpose distributed runtime are outside the
-V0 scope.
+current scope.
 
 The Python distribution is `tilescale`, while the import namespace remains
 `tilelang`. Install the optional host dependencies with
@@ -53,11 +53,11 @@ rank, world_size, group = init_dist(
 `init_dist` sets `cuda:local_rank`, creates an NCCL process group, and returns
 its rank, size, and `dist.group.WORLD`.
 
-V0 requires a contiguous rank-to-device mapping: process rank `i` uses CUDA
-ordinal `i`, and participating devices must appear as ordinals `0..N-1` in
-every process. Restrict `CUDA_VISIBLE_DEVICES` to the participating GPUs before
-launching. A non-contiguous subgroup inside a larger visible device set is not
-currently supported by multicast VA access setup.
+The current implementation requires a contiguous rank-to-device mapping:
+process rank `i` uses CUDA ordinal `i`, and participating devices must appear
+as ordinals `0..N-1` in every process. Restrict `CUDA_VISIBLE_DEVICES` to the
+participating GPUs before launching. A non-contiguous subgroup inside a larger
+visible device set is not currently supported by multicast VA access setup.
 
 Two launch modes are accepted:
 

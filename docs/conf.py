@@ -1,5 +1,5 @@
 # General information about the project.
-project = "TileScale V0"
+project = "TileScale"
 author = "TileScale and TileLang Contributors"
 copyright = f"2025-2026, {author}"
 
