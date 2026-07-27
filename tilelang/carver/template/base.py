@@ -1,5 +1,4 @@
 # Import necessary modules and classes
-from __future__ import annotations
 from abc import ABC, abstractmethod  # For defining abstract base classes
 from dataclasses import dataclass, field  # For defining data classes
 from ..arch import (  # Import architecture-related utilities and classes
@@ -7,11 +6,12 @@ from ..arch import (  # Import architecture-related utilities and classes
     is_volta_arch,
     is_ampere_arch,
     is_cdna_arch,
+    is_rdna_arch,
     auto_infer_current_arch,
 )
 from ..roller.hint import Hint  # Import the Hint class
 from ..roller.node import OutputNode  # Import the OutputNode class
-from tvm.tir import PrimFunc  # Import PrimFunc for handling tensor IR functions
+from tvm.tirx import PrimFunc  # Import PrimFunc for handling tensor IR functions
 
 
 @dataclass
@@ -23,7 +23,7 @@ class BaseTemplate(ABC):
     """
 
     # The architecture of the device, inferred automatically unless explicitly set
-    _arch: TileDevice = field(default=auto_infer_current_arch(), init=False, repr=False)
+    _arch: TileDevice = field(default_factory=auto_infer_current_arch, init=False, repr=False)
 
     # The function associated with this template, initially None
     _func: PrimFunc = field(default=None, init=False, repr=False)
@@ -47,7 +47,7 @@ class BaseTemplate(ABC):
         """
         pass
 
-    def with_arch(self, arch: TileDevice) -> BaseTemplate:
+    def with_arch(self, arch: TileDevice) -> "BaseTemplate":
         """
         Sets the architecture for this template and returns itself.
 
@@ -96,6 +96,15 @@ class BaseTemplate(ABC):
         """
         return is_cdna_arch(self._arch) if self._arch is not None else False
 
+    def is_rdna_arch(self) -> bool:
+        """
+        Checks if the current architecture is an RDNA architecture.
+
+        Returns:
+            bool: True if the architecture is RDNA, False otherwise.
+        """
+        return is_rdna_arch(self._arch) if self._arch is not None else False
+
     def equivalent_function(self) -> PrimFunc:
         """
         Returns the function associated with this template.
@@ -115,7 +124,7 @@ class BaseTemplate(ABC):
         """
         raise NotImplementedError("initialize_function is not implemented")
 
-    def set_function(self, func: PrimFunc) -> BaseTemplate:
+    def set_function(self, func: PrimFunc) -> "BaseTemplate":
         """
         Sets the function for this template and returns itself.
 
@@ -128,7 +137,7 @@ class BaseTemplate(ABC):
         self._func = func
         return self
 
-    def set_output_nodes(self, output_nodes: list[OutputNode]) -> BaseTemplate:
+    def set_output_nodes(self, output_nodes: list[OutputNode]) -> "BaseTemplate":
         """
         Sets the output nodes for this template and returns itself.
 

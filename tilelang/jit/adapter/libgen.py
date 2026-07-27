@@ -3,6 +3,7 @@ import ctypes
 import logging
 import os
 import subprocess
+import sys
 import tempfile
 from typing import Any
 
@@ -10,9 +11,16 @@ from tvm.target import Target
 
 from tilelang import tvm as tvm
 from tilelang.transform import PassConfigKey
-from tilelang.contrib.nvcc import get_nvcc_compiler, get_target_arch, get_target_compute_version
+from tilelang.contrib.nvcc import (
+    get_cuda_library_dirs,
+    get_nvcc_compiler,
+    get_target_arch,
+    get_target_compute_version,
+)
 from tilelang.contrib.rocm import find_rocm_path, get_rocm_arch
-from tilelang import env
+from tilelang.env import TILELANG_TEMPLATE_PATH
+from tilelang.utils.target import target_get_mcpu
+from tilelang.contrib.hip_resource_info import filter_and_record
 
 from .utils import is_cpu_target, is_cuda_target, is_hip_target
 
@@ -50,37 +58,51 @@ class LibraryGenerator:
         return ctypes.CDLL(lib_path)
 
     def compile_lib(self, timeout: float = None):
-        disable_rdc = self.pass_configs.get(PassConfigKey.TL_DISABLE_RDC, False)
-
         target = self.target
         verbose = self.verbose
         if is_cuda_target(target):
             from tilelang.env import CUTLASS_INCLUDE_DIR
 
+            _lib_ext = ".dll" if sys.platform == "win32" else ".so"
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)  # noqa: SIM115
             target_arch = get_target_arch(get_target_compute_version(target))
-            libpath = src.name.replace(".cu", ".so")
+            libpath = src.name.replace(".cu", _lib_ext)
 
             enable_fast_math = self.pass_configs.get(PassConfigKey.TL_ENABLE_FAST_MATH, False)
 
             ptxas_usage_level = self.pass_configs.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL, None)
+            if ptxas_usage_level is not None:
+                ptxas_usage_level = int(ptxas_usage_level)
             verbose_ptxas_output = self.pass_configs.get(PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT, False)
+            cuda_library_flags = [f"-L{lib_dir}" for lib_dir in get_cuda_library_dirs()]
 
             command = [
                 get_nvcc_compiler(),
-                "-std=c++17",
-                "-w",  # Disable all warning messages
+                # tl_templates/cuda/reduce.h uses explicit lambda template
+                # parameters (`[&]<typename T>(T) { ... }`) which are a C++20
+                # feature.
+                "-std=c++20",
+                "-w",
                 "-Xcudafe",
                 "--diag_suppress=177",
-                "--compiler-options",
-                "-fPIC",
                 "-lineinfo",
                 "--shared",
                 src.name,
+                *cuda_library_flags,
                 "-lcuda",
                 "-gencode",
                 f"arch=compute_{target_arch},code=sm_{target_arch}",
             ]
+            if sys.platform == "win32":
+                # /Zc:__cplusplus forces MSVC to report the actual C++ standard
+                # via __cplusplus. Without it cuda.h's `alignas(128)` on
+                # CUtensorMap is dropped (it is gated on
+                # ``__cplusplus >= 201103L``), so NVCC emits a kernel param
+                # with .align 8 and cuLaunchKernel later fails with
+                # CUDA_ERROR_MISALIGNED_ADDRESS.
+                command += ["-Xcompiler", "/Zc:preprocessor /Zc:__cplusplus"]
+            else:
+                command += ["--compiler-options", "-fPIC"]
             if enable_fast_math:
                 command += ["--use_fast_math"]
             if ptxas_usage_level is not None:
@@ -92,12 +114,12 @@ class LibraryGenerator:
             ]
 
         elif is_hip_target(target):
-            from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR
+            from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR, TILELANG_HIP_SAVE_TEMP_FILES
 
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)  # noqa: SIM115
             libpath = src.name.replace(".cpp", ".so")
             rocm_path = find_rocm_path()
-            arch = get_rocm_arch(rocm_path)
+            arch = target_get_mcpu(target) or get_rocm_arch(rocm_path)
             command = [
                 "hipcc",
                 "-std=c++17",
@@ -105,10 +127,13 @@ class LibraryGenerator:
                 f"--offload-arch={arch}",
                 "--shared",
                 src.name,
+                "-Rpass-analysis=kernel-resource-usage",
             ]
             command += [
                 "-I" + COMPOSABLE_KERNEL_INCLUDE_DIR,
             ]
+            if TILELANG_HIP_SAVE_TEMP_FILES != "0":
+                command += ["--save-temps", "-g"]
         elif is_cpu_target(target):
             from tilelang.contrib.cc import get_cplus_compiler
 
@@ -117,22 +142,14 @@ class LibraryGenerator:
 
             command = [get_cplus_compiler(), "-std=c++17", "-fPIC", "-shared", src.name]
             command += [
-                "-I" + env.TILELANG_TEMPLATE_PATH,
+                "-I" + TILELANG_TEMPLATE_PATH,
             ]
         else:
             raise ValueError(f"Unsupported target: {target}")
 
         command += [
-            "-I" + env.TILELANG_TEMPLATE_PATH,
+            "-I" + TILELANG_TEMPLATE_PATH,
         ]
-
-        if env.USE_NVSHMEM and is_cuda_target(target):
-            assert env.NVSHMEM_INCLUDE_DIR is not None, "env.NVSHMEM_INCLUDE_DIR is not set"
-            assert env.NVSHMEM_LIB_PATH is not None, "env.NVSHMEM_LIB_PATH is not set"
-            command += ["-diag-suppress=20013"]
-            if not disable_rdc:
-                command += ["-rdc=true"]
-            command += ["-I" + env.NVSHMEM_INCLUDE_DIR, "-L" + env.NVSHMEM_LIB_PATH, "-lnvshmem_host", "-lnvshmem_device"]
 
         if self.compile_flags:
             command += [item for flag in self.compile_flags for item in flag.split() if item not in command]
@@ -141,15 +158,43 @@ class LibraryGenerator:
 
         src.write(self.lib_code)
         src.flush()
+        if sys.platform == "win32":
+            src.close()
+
+        # On Windows, two concerns matter for parallel autotune:
+        # 1. nvcc needs MSVC's host compiler env (cl.exe, INCLUDE, LIB).
+        # 2. Concurrent subprocesses sharing the parent's console handle can
+        #    deadlock when their output interleaves with tqdm progress bars.
+        # Pipe stdio + isolate stdin to make the launch self-contained.
+        run_kwargs: dict[str, Any] = {"timeout": timeout}
+        if sys.platform == "win32":
+            from tilelang.contrib.nvcc import get_nvcc_subprocess_env
+
+            run_kwargs.update(
+                env=get_nvcc_subprocess_env(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+        if is_hip_target(target):
+            run_kwargs.setdefault("stdout", subprocess.PIPE)
+            run_kwargs.setdefault("stderr", subprocess.STDOUT)
+
         try:
             if verbose:
                 print(f"compile_lib compilation command: {' '.join(command)}")
-            ret = subprocess.run(command, timeout=timeout)
+            ret = subprocess.run(command, **run_kwargs)
         except Exception as e:
             raise RuntimeError(f"Compile kernel failed because of {e}") from e
 
         if ret.returncode != 0:
-            raise RuntimeError(f"Compilation Failed! {command}\n {self.lib_code}")
+            captured = ret.stdout.decode("utf-8", errors="replace") if ret.stdout else ""
+            raise RuntimeError(f"Compilation Failed! {command}\n{captured}\n{self.lib_code}")
+
+        if is_hip_target(target) and ret.stdout is not None:
+            captured = filter_and_record(ret.stdout.decode("utf-8", errors="replace"))
+            if verbose and captured.strip():
+                print(captured)
 
         self.srcpath = src.name
         self.libpath = libpath

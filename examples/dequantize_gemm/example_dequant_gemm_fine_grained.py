@@ -8,6 +8,11 @@ import tilelang.language as T
 tilelang.testing.set_random_seed(0)
 
 
+def _unpack_unsigned_int4_to_half(qB):
+    qB = qB.to(torch.uint8)
+    return torch.stack((qB & 0x0F, qB >> 4), dim=-1).reshape(qB.shape[0], qB.shape[1] * 2).to(torch.half)
+
+
 @tilelang.jit(out_idx=[2])
 def matmul(
     M,
@@ -120,10 +125,7 @@ def run_gemm(
     def ref_program(A, qB):
         import torch
 
-        B = torch.zeros(qB.shape[0], qB.shape[1] * 8 // 4, dtype=torch.half).to(torch.half).to(A.device)
-        for i in range(B.shape[0]):
-            for j in range(B.shape[1]):
-                B[i][j] = ((qB[i][j // 2] >> (4 * (j % 2))) & 0xF).to(torch.half)
+        B = _unpack_unsigned_int4_to_half(qB)
         C = torch.matmul(A.to(torch.float), B.T.to(torch.float))
         C = C.to(torch.__getattribute__(out_dtype))
         return C
@@ -141,8 +143,8 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
     accum_dtype,
     transform_b,
 ):
-    from tilelang.intrinsics.mma_layout import make_mma_swizzle_layout as make_swizzle_layout
-    from tilelang.intrinsics.mma_macro_generator import (
+    from tilelang.cuda.intrinsics.layout.mma_layout import make_mma_swizzle_layout as make_swizzle_layout
+    from tilelang.cuda.intrinsics.macro.mma_macro_generator import (
         TensorCoreIntrinEmitterWithLadderTransform,
     )
 
@@ -302,8 +304,16 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
                         T.call_extern(
                             "handle",
                             "decode_i4u_to_f16",
-                            T.address_of(B_local[j * local_size_b // num_elems_per_byte]),
-                            T.address_of(B_dequantize_local[j * local_size_b]),
+                            T.access_ptr(
+                                B_local[j * local_size_b // num_elems_per_byte],
+                                "r",
+                                local_size_b // num_elems_per_byte,
+                            ),
+                            T.access_ptr(
+                                B_dequantize_local[j * local_size_b],
+                                "w",
+                                local_size_b,
+                            ),
                             8,
                         )
 
@@ -403,10 +413,7 @@ def assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4_correct
     # Ensure that the latency is not None
     assert latency is not None
 
-    B = torch.zeros(qB.shape[0], qB.shape[1] * 8 // 4, dtype=torch.half).to(torch.half).to(A.device)
-    for i in range(B.shape[0]):
-        for j in range(B.shape[1]):
-            B[i][j] = ((qB[i][j // 2] >> (4 * (j % 2))) & 0xF).to(torch.half)
+    B = _unpack_unsigned_int4_to_half(qB)
 
     # Get Reference Result
     ref_c = torch.matmul(A, B.T).to(getattr(torch, accum_dtype))

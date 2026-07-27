@@ -44,27 +44,44 @@ struct fp4_e2_t {
   TL_DEVICE operator __half() const { return __half(float(*this)); }
 };
 
-using fp4_e2x2_t = __nv_fp4x2_e2m1;
-using fp4_e2x4_t = __nv_fp4x4_e2m1;
-
-struct fp4_e2x8_t {
-  fp4_e2_t data[8];
+// Tag for tcgen05 unpacked FP4 shared-memory layout. The hardware atom carries
+// 16 4-bit payload values in the low 64 bits of a 128-bit aligned region.
+// See:
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#tcgen05-packing-formats-mxf8f6f4-smem
+struct float4_e2m1_unpacked_t {
+  uint8_t __x;
 };
 
-struct fp4_e2x16_t {
-  fp4_e2_t data[16];
-};
+class fp4_e2_2_t {
+public:
+  __nv_fp4x2_storage_t __x;
 
-struct __CUDA_ALIGN__(1) fp4_e2_2_t {
-  fp4_e2_t x;
-  fp4_e2_t y;
+  TL_DEVICE fp4_e2_2_t() = default;
+  TL_DEVICE fp4_e2_2_t(__nv_fp4x2_storage_t data) : __x(data) {}
+  TL_DEVICE fp4_e2_2_t(__nv_fp4x2_e2m1 data) : __x(data.__x) {}
+
+  // Get low 4 bits (first fp4)
+  TL_DEVICE fp4_e2_t x() const {
+    return fp4_e2_t(__nv_fp4_storage_t(__x & 0x0F));
+  }
+
+  // Get high 4 bits (second fp4)
+  TL_DEVICE fp4_e2_t y() const {
+    return fp4_e2_t(__nv_fp4_storage_t((__x >> 4) & 0x0F));
+  }
+
+  // Set low 4 bits (first fp4)
+  TL_DEVICE void set_x(fp4_e2_t val) { __x = (__x & 0xF0) | (val.__x & 0x0F); }
+
+  // Set high 4 bits (second fp4)
+  TL_DEVICE void set_y(fp4_e2_t val) {
+    __x = (__x & 0x0F) | ((val.__x & 0x0F) << 4);
+  }
 };
 
 struct __CUDA_ALIGN__(2) fp4_e2_4_t {
-  fp4_e2_t x;
-  fp4_e2_t y;
-  fp4_e2_t z;
-  fp4_e2_t w;
+  fp4_e2_2_t x;
+  fp4_e2_2_t y;
 };
 
 struct __CUDA_ALIGN__(4) fp4_e2_8_t {
@@ -97,9 +114,9 @@ struct __CUDA_ALIGN__(32) fp4_e2_64_t {
 
 // Pack two fp4_e2_t values.
 TL_DEVICE fp4_e2_2_t make_fp4_e2_2_t(fp4_e2_t x, fp4_e2_t y) {
+  __nv_fp4x2_storage_t packed = (x.__x & 0x0F) | ((y.__x & 0x0F) << 4);
   fp4_e2_2_t result;
-  result.x = x;
-  result.y = y;
+  result.__x = packed;
   return result;
 }
 
@@ -107,10 +124,8 @@ TL_DEVICE fp4_e2_2_t make_fp4_e2_2_t(fp4_e2_t x, fp4_e2_t y) {
 TL_DEVICE fp4_e2_4_t make_fp4_e2_4_t(fp4_e2_t x0, fp4_e2_t x1, fp4_e2_t x2,
                                      fp4_e2_t x3) {
   fp4_e2_4_t result;
-  result.x = x0;
-  result.y = x1;
-  result.z = x2;
-  result.w = x3;
+  result.x = make_fp4_e2_2_t(x0, x1);
+  result.y = make_fp4_e2_2_t(x2, x3);
   return result;
 }
 
@@ -159,9 +174,44 @@ TL_DEVICE fp4_e2_32_t make_fp4_e2_32_t(
 // ============================================================================
 // https://docs.nvidia.com/cuda/cuda-math-api/cuda_math_api/group__CUDA__MATH__FP4__MISC.html
 
+// Custom fp4_e2m1 -> half convertion for CUDA version < 13.0 to avoid using
+// `cvt.rn.relu.f16x2.e2m1x2`, as there are bugs in PTXAS related to
+// `cvt.rn.relu.f16x2.e2m1x2` between CUDA 12.6 and 12.9
+__device__ __half_raw __tl_cvt_fp4_to_halfraw_naive(
+    const __nv_fp4_storage_t x,
+    const __nv_fp4_interpretation_t fp4_interpretation) {
+  __half_raw res;
+  res.x = 0U;
+  // fp4_interpretation == __NV_E2M1
+  // convert to e2m3 first
+  __nv_fp6_storage_t fp6e2m3 = (x & 0xFU) << 2U;
+  res = __nv_cvt_fp6_to_halfraw(fp6e2m3, __NV_E2M3);
+  return res;
+}
+
+// Custom fp4_e2m1 -> half convertion for CUDA version < 13.0 to avoid using
+// `cvt.rn.relu.f16x2.e2m1x2`, as there are bugs in PTXAS related to
+// `cvt.rn.relu.f16x2.e2m1x2` between CUDA 12.6 and 12.9
+__device__ __half2_raw __tl_cvt_fp4x2_to_halfraw2_naive(
+    const __nv_fp4x2_storage_t x,
+    const __nv_fp4_interpretation_t fp4_interpretation) {
+  __half2_raw res;
+  res.x =
+      __tl_cvt_fp4_to_halfraw_naive((__nv_fp4_storage_t)x, fp4_interpretation)
+          .x;
+  res.y = __tl_cvt_fp4_to_halfraw_naive((__nv_fp4_storage_t)(x >> 4U),
+                                        fp4_interpretation)
+              .x;
+  return res;
+}
+
 // fp4_e2m1 -> half
 TL_DEVICE __half __tl_cvt_fp4_to_half(const __nv_fp4_storage_t src) {
+#if __CUDACC_VER_MAJOR__ >= 13
   __half_raw raw = __nv_cvt_fp4_to_halfraw(src, __NV_E2M1);
+#else
+  __half_raw raw = __tl_cvt_fp4_to_halfraw_naive(src, __NV_E2M1);
+#endif
   __half result;
   result = *reinterpret_cast<__half *>(&raw);
   return result;
@@ -169,7 +219,11 @@ TL_DEVICE __half __tl_cvt_fp4_to_half(const __nv_fp4_storage_t src) {
 
 // fp4_e2m1x2 (1 byte) -> half2
 TL_DEVICE half2 __tl_cvt_fp4x2_to_half2(const __nv_fp4x2_storage_t src) {
+#if __CUDACC_VER_MAJOR__ >= 13
   __half2_raw raw = __nv_cvt_fp4x2_to_halfraw2(src, __NV_E2M1);
+#else
+  __half2_raw raw = __tl_cvt_fp4x2_to_halfraw2_naive(src, __NV_E2M1);
+#endif
   half2 result;
   result = *reinterpret_cast<half2 *>(&raw);
   return result;
@@ -178,13 +232,13 @@ TL_DEVICE half2 __tl_cvt_fp4x2_to_half2(const __nv_fp4x2_storage_t src) {
 // half -> fp4_e2m1
 TL_DEVICE __nv_fp4_storage_t __tl_cvt_half_to_fp4(const __half src) {
   __half_raw raw = *reinterpret_cast<const __half_raw *>(&src);
-  return __nv_cvt_halfraw_to_fp4(raw, __NV_E2M1, cudaRoundZero);
+  return __nv_cvt_halfraw_to_fp4(raw, __NV_E2M1, cudaRoundNearest);
 }
 
 // half2 -> fp4_e2m1x2 (1 byte)
 TL_DEVICE __nv_fp4x2_storage_t __tl_cvt_half2_to_fp4x2(const half2 src) {
   __half2_raw raw = *reinterpret_cast<const __half2_raw *>(&src);
-  return __nv_cvt_halfraw2_to_fp4x2(raw, __NV_E2M1, cudaRoundZero);
+  return __nv_cvt_halfraw2_to_fp4x2(raw, __NV_E2M1, cudaRoundNearest);
 }
 
 // ============================================================================
@@ -207,12 +261,52 @@ TL_DEVICE float2 __tl_cvt_fp4x2_to_float2(const __nv_fp4x2_storage_t src) {
 
 // float -> fp4_e2m1
 TL_DEVICE __nv_fp4_storage_t __tl_cvt_float_to_fp4(const float src) {
-  return __nv_cvt_float_to_fp4(src, __NV_E2M1, cudaRoundZero);
+  return __nv_cvt_float_to_fp4(src, __NV_E2M1, cudaRoundNearest);
 }
 
 // float2 -> fp4_e2m1x2 (1 byte)
 TL_DEVICE __nv_fp4x2_storage_t __tl_cvt_float2_to_fp4x2(const float2 src) {
-  return __nv_cvt_float2_to_fp4x2(src, __NV_E2M1, cudaRoundZero);
+  return __nv_cvt_float2_to_fp4x2(src, __NV_E2M1, cudaRoundNearest);
+}
+
+// ============================================================================
+// Inline PTX FP4 Conversions with Stochastic Rounding
+// ============================================================================
+//
+// PTX ISA: cvt.rs.satfinite.e2m1x4.f32 d, {a, b, e, f}, rbits
+//   Input:  4 x f32 + 1 x uint32 random bits
+//   Output: __nv_fp4x4_storage_t (uint16_t, 4 x 4-bit = 16 bits)
+//   Layout: d[15:12]=a, d[11:8]=b, d[7:4]=e, d[3:0]=f
+// To get little-endian nibble order (nibble0=elem0), pass elements in reverse.
+
+// Full 4-element version (float4 input)
+TL_DEVICE __nv_fp4x4_storage_t
+__tl_cvt_f32x4_to_e2m1x4_rs_sat(float4 src, unsigned int rbits) {
+  __nv_fp4x4_storage_t result;
+  asm("cvt.rs.satfinite.e2m1x4.f32 %0, {%1, %2, %3, %4}, %5;"
+      : "=h"(result)
+      : "f"(src.w), "f"(src.z), "f"(src.y), "f"(src.x), "r"(rbits));
+  return result;
+}
+
+// 2-element version: pass src.x as f, src.y as e, returns lower byte as fp4x2
+TL_DEVICE __nv_fp4x2_storage_t
+__tl_cvt_f32x2_to_e2m1x2_rs_sat(float2 src, unsigned int rbits) {
+  __nv_fp4x4_storage_t tmp;
+  asm("cvt.rs.satfinite.e2m1x4.f32 %0, {%1, %2, %3, %4}, %5;"
+      : "=h"(tmp)
+      : "f"(0.0f), "f"(0.0f), "f"(src.y), "f"(src.x), "r"(rbits));
+  return static_cast<__nv_fp4x2_storage_t>(tmp & 0xFF);
+}
+
+// 1-element version: pass src as f (lowest position), returns low nibble as fp4
+TL_DEVICE __nv_fp4_storage_t
+__tl_cvt_f32x1_to_e2m1x1_rs_sat(float src, unsigned int rbits) {
+  __nv_fp4x4_storage_t tmp;
+  asm("cvt.rs.satfinite.e2m1x4.f32 %0, {%1, %2, %3, %4}, %5;"
+      : "=h"(tmp)
+      : "f"(0.0f), "f"(0.0f), "f"(0.0f), "f"(src), "r"(rbits));
+  return static_cast<__nv_fp4_storage_t>(tmp & 0x0F);
 }
 
 // ============================================================================
@@ -235,12 +329,12 @@ TL_DEVICE double2 __tl_cvt_fp4x2_to_double2(const __nv_fp4x2_storage_t src) {
 
 // double -> fp4_e2m1
 TL_DEVICE __nv_fp4_storage_t __tl_cvt_double_to_fp4(const double src) {
-  return __nv_cvt_double_to_fp4(src, __NV_E2M1, cudaRoundZero);
+  return __nv_cvt_double_to_fp4(src, __NV_E2M1, cudaRoundNearest);
 }
 
 // double2 -> fp4_e2m1x2
 TL_DEVICE __nv_fp4x2_storage_t __tl_cvt_double2_to_fp4x2(const double2 src) {
-  return __nv_cvt_double2_to_fp4x2(src, __NV_E2M1, cudaRoundZero);
+  return __nv_cvt_double2_to_fp4x2(src, __NV_E2M1, cudaRoundNearest);
 }
 
 // ============================================================================
@@ -262,14 +356,39 @@ __tl_cvt_fp4x2_to_bfloat162(const __nv_fp4x2_storage_t src) {
 // bfloat16 -> fp4_e2m1
 TL_DEVICE __nv_fp4_storage_t __tl_cvt_bfloat16_to_fp4(const __nv_bfloat16 src) {
   __nv_bfloat16_raw raw = *reinterpret_cast<const __nv_bfloat16_raw *>(&src);
-  return __nv_cvt_bfloat16raw_to_fp4(raw, __NV_E2M1, cudaRoundZero);
+  return __nv_cvt_bfloat16raw_to_fp4(raw, __NV_E2M1, cudaRoundNearest);
 }
 
 // bfloat162 -> fp4_e2m1x2
 TL_DEVICE __nv_fp4x2_storage_t
 __tl_cvt_bfloat162_to_fp4x2(const __nv_bfloat162 src) {
   __nv_bfloat162_raw raw = *reinterpret_cast<const __nv_bfloat162_raw *>(&src);
-  return __nv_cvt_bfloat16raw2_to_fp4x2(raw, __NV_E2M1, cudaRoundZero);
+  return __nv_cvt_bfloat16raw2_to_fp4x2(raw, __NV_E2M1, cudaRoundNearest);
+}
+
+// ============================================================================
+// FP4 Packed Buffer Access Helpers
+// ============================================================================
+// These helpers are used for accessing individual fp4 elements from packed
+// fp4_e2_2_t storage, where each byte stores 2 fp4 values.
+
+// Load a single fp4 element from packed storage
+// packed: pointer to fp4_e2_2_t array
+// idx: logical index of the fp4 element
+TL_DEVICE fp4_e2_t tl_fp4_packed_load(fp4_e2_2_t *packed, int idx) {
+  return (idx & 1) ? packed[idx >> 1].y() : packed[idx >> 1].x();
+}
+
+// Store a single fp4 element to packed storage
+// packed: pointer to fp4_e2_2_t array
+// idx: logical index of the fp4 element
+// val: value to store
+TL_DEVICE void tl_fp4_packed_store(fp4_e2_2_t *packed, int idx, fp4_e2_t val) {
+  if (idx & 1) {
+    packed[idx >> 1].set_y(val);
+  } else {
+    packed[idx >> 1].set_x(val);
+  }
 }
 
 #endif

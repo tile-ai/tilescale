@@ -1,7 +1,7 @@
-from __future__ import annotations
-import tvm.script.ir_builder.tir.ir as _ir
-from tvm.script.ir_builder.tir import frame
-from tvm.tir import PrimExpr
+import tvm.tirx.script.builder.ir as _ir
+from tvm.tirx.script.builder import frame
+from tvm.tirx import PrimExpr, IntImm, StringImm
+from tvm.tirx import _ffi_api as _tir_ffi
 from typing import Any
 import tilelang.language.tir.op as _tir_op
 import functools
@@ -193,6 +193,7 @@ exp2 = _op_wrapper(_tir_op.exp2)
 exp10 = _op_wrapper(_tir_op.exp10)
 floor = _op_wrapper(_tir_op.floor)
 ceildiv = _op_wrapper(_tir_op.ceildiv)
+cdiv = ceildiv
 floordiv = _op_wrapper(_tir_op.floordiv)
 floormod = _op_wrapper(_tir_op.floormod)
 fmod = _op_wrapper(_tir_op.fmod)
@@ -261,6 +262,7 @@ ptx_wait_group = _op_wrapper(_tir_op.ptx_wait_group)
 ptx_commit_group = _op_wrapper(_tir_op.ptx_commit_group)
 ptx_cp_async_barrier = _op_wrapper(_tir_op.ptx_cp_async_barrier)
 ptx_init_barrier_thread_count = _op_wrapper(_tir_op.ptx_init_barrier_thread_count)
+ptx_fence_barrier_init = _op_wrapper(_tir_op.ptx_fence_barrier_init)
 ptx_arrive_barrier = _op_wrapper(_tir_op.ptx_arrive_barrier)
 ptx_arrive_barrier_expect_tx = _op_wrapper(_tir_op.ptx_arrive_barrier_expect_tx)
 ptx_wait_barrier = _op_wrapper(_tir_op.ptx_wait_barrier)
@@ -277,7 +279,9 @@ anylist_setitem_call_packed = _op_wrapper(_tir_op.anylist_setitem_call_packed)
 anylist_setitem_call_cpacked = _op_wrapper(_tir_op.anylist_setitem_call_cpacked)
 vscale = _op_wrapper(_tir_op.vscale)
 
-reinterpret = _dtype_forward(_tir_op.reinterpret)
+# reinterpret = _dtype_forward(_tir_op.reinterpret)
+reinterpret = _tir_op.reinterpret
+
 call_extern = _dtype_forward(_tir_op.call_extern)
 call_intrin = _dtype_forward(_tir_op.call_intrin)
 call_llvm_intrin = _dtype_forward(_tir_op.call_llvm_intrin)
@@ -287,9 +291,12 @@ ptx_mma = _dtype_forward(_tir_op.ptx_mma)
 ptx_mma_sp = _dtype_forward(_tir_op.ptx_mma_sp)
 ptx_wgmma_ss = _dtype_forward(_tir_op.ptx_wgmma_ss)
 ptx_wgmma_rs = _dtype_forward(_tir_op.ptx_wgmma_rs)
+ptx_wgmma_sp_ss = _dtype_forward(_tir_op.ptx_wgmma_sp_ss)
+ptx_wgmma_sp_rs = _dtype_forward(_tir_op.ptx_wgmma_sp_rs)
 ptx_tcgen05_mma_ss = _dtype_forward(_tir_op.ptx_tcgen05_mma_ss)
 ptx_tcgen05_mma_ts = _dtype_forward(_tir_op.ptx_tcgen05_mma_ts)
-ptx_ldmatrix = _dtype_forward(_tir_op.ptx_ldmatrix)
+ptx_tcgen05_mma_blockscaled_ss = _dtype_forward(_tir_op.ptx_tcgen05_mma_blockscaled_ss)
+ptx_ldmatrix = _tir_op.ptx_ldmatrix
 ptx_cp_async = _dtype_forward(_tir_op.ptx_cp_async)
 ptx_cp_async_bulk = _dtype_forward(_tir_op.ptx_cp_async_bulk)
 mma_store = _dtype_forward(_tir_op.mma_store)
@@ -302,64 +309,69 @@ tvm_mfma_store = _dtype_forward(_tir_op.tvm_mfma_store)
 tvm_rdna_wmma = _dtype_forward(_tir_op.tvm_rdna_wmma)
 tvm_rdna_wmma_store = _dtype_forward(_tir_op.tvm_rdna_wmma_store)
 
-### Distributed enums ###
-import sys
-from enum import IntEnum
+
+# ---------------------------------------------------------------------------
+# Cast with optional CUDA/PTX rounding hints.
+#
+# Upstream ``tvm.tir.generic.cast`` only takes a generic ``annotations`` map
+# on the resulting CastNode (it is backend-agnostic). The tilelang wrapper
+# below exposes a friendly keyword API (``round`` / ``sat`` / ``rbits``) that
+# maps onto the PTX ``cvt`` instruction family used by the CUDA backend, and
+# translates the kwargs into entries on the CastNode annotations map:
+#
+#   round=<str>  -> "round" (StringImm)
+#   sat=False    -> "sat"   (IntImm bool 0; sat=True is the default and
+#                            emits no annotation)
+#   rbits=<expr> -> "rbits" (PrimExpr; required when round="rs")
+# ---------------------------------------------------------------------------
+
+_VALID_CAST_ROUNDING_MODES = {"", "rn", "rz", "rp", "rm", "rs"}
 
 
-class Team(IntEnum):
-    INVALID = -1
-    WORLD = 0
-    WORLD_INDEX = 0
-    SHARED = 1
-    SHARED_INDEX = 1
-    NODE = 2
-    NODE_INDEX = 2
-    SAME_MYPE_NODE = 3
-    SAME_MYPE_NODE_INDEX = 3
-    SAME_GPU = 4
-    SAME_GPU_INDEX = 4
-    GPU_LEADERS = 5
-    GPU_LEADERS_INDEX = 5
-    TEAMS_MIN = 6
-    TEAM_INDEX_MAX = sys.maxsize
+def cast(value, dtype, round: str = "", sat: bool = True, rbits=None, span=None):
+    """Cast ``value`` to ``dtype`` with optional PTX-style rounding hints.
 
+    Parameters
+    ----------
+    value : object
+        The source operand.
+    dtype : str
+        The target data type.
+    round : str, optional
+        PTX rounding modifier (e.g. ``"rn"``, ``"rz"``, ``"rp"``, ``"rm"``,
+        ``"rs"``). Empty string means use the backend default. Currently
+        only ``""`` and ``"rs"`` are lowered by the CUDA backend; the other
+        modifiers are reserved.
+    sat : bool, optional
+        Saturate to finite (``True`` = PTX ``.satfinite``, default).
+    rbits : PrimExpr, optional
+        Random bits operand for stochastic rounding (``round="rs"``).
+    span : Optional[Span]
+        The location of this operator in the source.
 
-class CmpType(IntEnum):
-    EQ = 0
-    NE = 1
-    GT = 2
-    LE = 3
-    LT = 4
-    GE = 5
-    SENTINEL = sys.maxsize
-
-
-class Amo(IntEnum):
-    """Atomic Memory Operation (AMO) types.
-    Note: Signal ops (AMO_SIGNAL_SET and AMO_SIGNAL_ADD) are
-    included as a part of the AMO operations.
+    Returns
+    -------
+    op : tvm.tir.PrimExpr
+        The cast expression.
     """
+    if round not in _VALID_CAST_ROUNDING_MODES:
+        raise ValueError(f"Invalid round '{round}'. Must be one of: {sorted(_VALID_CAST_ROUNDING_MODES)}")
+    if not isinstance(sat, bool):
+        raise ValueError(f"Invalid sat '{sat}'. Must be a bool (True for satfinite, False for no saturation)")
+    if round == "rs" and rbits is None:
+        raise ValueError("rbits is required when round='rs' (stochastic rounding)")
+    if round != "rs" and rbits is not None:
+        raise ValueError("rbits is only valid with round='rs' (stochastic rounding)")
 
-    AMO_ACK = 1
-    AMO_INC = 2
-    AMO_SET = 3
-    AMO_ADD = 4
-    AMO_AND = 5
-    AMO_OR = 6
-    AMO_XOR = 7
-    AMO_SIGNAL = 8
-    SIGNAL_SET = 9
-    SIGNAL_ADD = 10
-    AMO_SIGNAL_SET = 9  # the same as SIGNAL_SET
-    AMO_SIGNAL_ADD = 10  # the same as SIGNAL_ADD
-    AMO_END_OF_NONFETCH = 11  # end of nonfetch atomics
-    AMO_FETCH = 12
-    AMO_FETCH_INC = 13
-    AMO_FETCH_ADD = 14
-    AMO_FETCH_AND = 15
-    AMO_FETCH_OR = 16
-    AMO_FETCH_XOR = 17
-    AMO_SWAP = 18
-    AMO_COMPARE_SWAP = 19
-    AMO_OP_SENTINEL = sys.maxsize
+    annotations: dict = {}
+    if round:
+        annotations["round"] = StringImm(round)
+    if not sat:
+        annotations["sat"] = IntImm("bool", 0)
+    if rbits is not None:
+        annotations["rbits"] = rbits
+
+    # Go through the TIR FFI directly: ``tvm.tir.generic.cast`` is overridden
+    # by ``topi.math.cast`` (a 2/3-arg signature) via TVM's GenericFunc
+    # dispatch, so calling it would lose the ``annotations`` argument.
+    return _tir_ffi._cast(dtype, value, annotations or None, span)

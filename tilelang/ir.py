@@ -18,8 +18,8 @@ class AtomicAdd(Node, Scriptable): ...
 class Copy(Node, Scriptable): ...
 
 
-@tvm_ffi.register_object("tl.Conv2DIm2Col")
-class Conv2DIm2ColOp(Node, Scriptable): ...
+@tvm_ffi.register_object("tl.Im2Col")
+class Im2ColOp(Node, Scriptable): ...
 
 
 @tvm_ffi.register_object("tl.GemmWarpPolicy")
@@ -28,8 +28,8 @@ class GemmWarpPolicy(Node, Scriptable):
     m_warp: int
     n_warp: int
 
-    def compute_warp_partition(self, M: int, N: int, block_size: int, target: Target, is_wgmma: bool):
-        _ffi_api.GemmWarpPolicyComputeWarpPartition(self, int(M), int(N), int(block_size), target, is_wgmma)
+    def compute_warp_partition(self, M: int, N: int, block_size: int, target: Target, gemm_inst: str):
+        _ffi_api.GemmWarpPolicyComputeWarpPartition(self, int(M), int(N), int(block_size), target, gemm_inst)
         return self.m_warp, self.n_warp
 
 
@@ -39,17 +39,9 @@ class GemmSPWarpPolicy(Node, Scriptable):
     m_warp: int
     n_warp: int
 
-    def compute_warp_partition(self, M: int, N: int, block_size: int, target: Target, is_wgmma: bool, bits: int):
-        _ffi_api.GemmSPWarpPolicyComputeWarpPartition(self, int(M), int(N), int(block_size), target, is_wgmma, bits)
+    def compute_warp_partition(self, M: int, N: int, block_size: int, target: Target, gemm_inst: str):
+        _ffi_api.GemmSPWarpPolicyComputeWarpPartition(self, int(M), int(N), int(block_size), target, gemm_inst)
         return self.m_warp, self.n_warp
-
-
-@tvm_ffi.register_object("tl.Gemm")
-class Gemm(Node, Scriptable): ...
-
-
-@tvm_ffi.register_object("tl.GemmSP")
-class GemmSP(Node, Scriptable): ...
 
 
 @tvm_ffi.register_object("tl.FinalizeReducerOp")
@@ -66,6 +58,10 @@ class ReduceOp(Node, Scriptable): ...
 
 @tvm_ffi.register_object("tl.CumSumOp")
 class CumSumOp(Node, Scriptable): ...
+
+
+@tvm_ffi.register_object("tl.CumMaxOp")
+class CumMaxOp(Node, Scriptable): ...
 
 
 @tvm_ffi.register_object("tl.RegionOp")

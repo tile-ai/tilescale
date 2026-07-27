@@ -1,11 +1,10 @@
-import sys
-import os
+import contextlib
 import ctypes
-
 import logging
+import os
+import sys
 import warnings
 from pathlib import Path
-from tqdm.auto import tqdm
 
 
 def _compute_version() -> str:
@@ -46,39 +45,10 @@ def _compute_version() -> str:
 
 
 __version__ = _compute_version()
-
-from importlib.metadata import PackageNotFoundError, version
-
-try:
-    __version__ = version("tilelang")
-except PackageNotFoundError:
-    try:
-        from version_provider import dynamic_metadata
-
-        __version__ = dynamic_metadata("version")
-    except Exception as exc:
-        warnings.warn(
-            f"tilelang version metadata unavailable ({exc!r}); using development version.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        __version__ = "0.0.dev0"
+del _compute_version
 
 
-class TqdmLoggingHandler(logging.Handler):
-    """Custom logging handler that directs log output to tqdm progress bar to avoid interference."""
-
-    def __init__(self, level=logging.NOTSET):
-        """Initialize the handler with an optional log level."""
-        super().__init__(level)
-
-    def emit(self, record):
-        """Emit a log record. Messages are written to tqdm to ensure output in progress bars isn't corrupted."""
-        try:
-            msg = self.format(record)
-            tqdm.write(msg)
-        except Exception:
-            self.handleError(record)
+logger = logging.getLogger(__name__)
 
 
 def set_log_level(level):
@@ -90,16 +60,35 @@ def set_log_level(level):
     """
     if isinstance(level, str):
         level = getattr(logging, level.upper(), logging.INFO)
-    logger = logging.getLogger(__name__)
     logger.setLevel(level)
 
 
 def _init_logger():
     """Initialize the logger specific for this module with custom settings and a Tqdm-based handler."""
-    logger = logging.getLogger(__name__)
+    try:
+        from tqdm.auto import tqdm
+    except ImportError:
+        tqdm = None
+
+    class TqdmLoggingHandler(logging.Handler):
+        """Custom logging handler that directs log output to tqdm progress bar to avoid interference."""
+
+        def __init__(self, level=logging.NOTSET):
+            """Initialize the handler with an optional log level."""
+            super().__init__(level)
+
+        def emit(self, record):
+            """Emit a log record. Messages are written to tqdm to ensure output in progress bars isn't corrupted."""
+            try:
+                msg = self.format(record)
+                if tqdm is not None:
+                    tqdm.write(msg)
+            except Exception:
+                self.handleError(record)
+
     handler = TqdmLoggingHandler()
     formatter = logging.Formatter(
-        fmt="%(asctime)s  [TileLang:%(name)s:%(levelname)s]: %(message)s",
+        fmt="%(asctime)s  [TileLang:%(name)s:%(levelname)s] (%(filename)s:%(lineno)d): %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     handler.setFormatter(formatter)
@@ -108,74 +97,121 @@ def _init_logger():
     set_log_level("INFO")
 
 
-_init_logger()
-
-logger = logging.getLogger(__name__)
-
-from .env import enable_cache, disable_cache, is_cache_enabled  # noqa: F401
 from .env import env as env  # noqa: F401
 
-import tvm
-import tvm.base  # noqa: F401
-from tvm import DataType  # noqa: F401
+# Skip logger initialization in light import mode
+if not env.is_light_import():
+    _init_logger()
 
-# Setup tvm search path before importing tvm
-from . import libinfo
-
-
-def _load_tile_lang_lib():
-    """Load Tile Lang lib"""
-    if sys.platform.startswith("win32") and sys.version_info >= (3, 8):
-        for path in libinfo.get_dll_directories():
-            os.add_dll_directory(path)
-    # pylint: disable=protected-access
-    lib_name = "tilelang" if tvm.base._RUNTIME_ONLY else "tilelang_module"
-    # pylint: enable=protected-access
-    lib_path = libinfo.find_lib_path(lib_name)
-    return ctypes.CDLL(lib_path), lib_path
+del _init_logger
 
 
-# only load once here
-if env.SKIP_LOADING_TILELANG_SO == "0":
-    _LIB, _LIB_PATH = _load_tile_lang_lib()
+def _disable_rocm_tvm_ffi_torch_c_dlpack(torch_module):
+    if getattr(torch_module.version, "hip", None) is None:
+        return
 
-from .jit import jit, lazy_jit, JITKernel, compile, par_compile  # noqa: F401
-from .profiler import Profiler  # noqa: F401
-from .cache import clear_cache  # noqa: F401
+    os.environ.setdefault("TVM_FFI_DISABLE_TORCH_C_DLPACK", "1")
+    try:
+        from tvm_ffi import _optional_torch_c_dlpack
+    except Exception:
+        return
 
-from .utils import (
-    TensorSupplyType,  # noqa: F401
-    deprecated,  # noqa: F401
-)
+    # TVM Relax calls this loader directly while importing, bypassing the
+    # tvm-ffi module-level env guard.
+    def _disabled_torch_c_dlpack_extension(*_args, **_kwargs):
+        return None
 
-# TileScale distributed extensions (optional - only available when tilescale_ext is installed)
-try:
-    from .utils.tensor import tensor  # noqa: F401
-    from .utils.allocator import get_allocator  # noqa: F401
-except ImportError:
-    # tilescale_ext not installed - distributed features unavailable
-    tensor = None
-    get_allocator = None
+    _optional_torch_c_dlpack.load_torch_c_dlpack_extension = _disabled_torch_c_dlpack_extension
 
-from .layout import (
-    Layout,  # noqa: F401
-    Fragment,  # noqa: F401
-)
-from . import (
-    analysis,  # noqa: F401
-    transform,  # noqa: F401
-    language,  # noqa: F401
-    engine,  # noqa: F401
-    tools,  # noqa: F401
-)
-from .language.v2 import dtypes  # noqa: F401
-from .autotuner import autotune  # noqa: F401
-from .transform import PassConfigKey  # noqa: F401
 
-from .engine import lower, register_cuda_postproc, register_hip_postproc, register_c_postproc  # noqa: F401
+@contextlib.contextmanager
+def _lazy_load_lib():
+    import torch  # preload torch to avoid dlopen errors
 
-from .math import *  # noqa: F403
+    _disable_rocm_tvm_ffi_torch_c_dlpack(torch)
 
-from . import ir  # noqa: F401
+    if sys.platform.startswith("win32"):
+        yield
+        return
 
-from . import tileop  # noqa: F401
+    old_flags = sys.getdlopenflags()
+    old_init = ctypes.CDLL.__init__
+
+    def lazy_init(self, name, mode=ctypes.DEFAULT_MODE, *args, **kwargs):
+        return old_init(self, name, mode | os.RTLD_LAZY, *args, **kwargs)
+
+    sys.setdlopenflags(old_flags | os.RTLD_LAZY)
+    ctypes.CDLL.__init__ = lazy_init
+    try:
+        yield
+    finally:
+        sys.setdlopenflags(old_flags)
+        ctypes.CDLL.__init__ = old_init
+
+
+# Skip heavy imports in light import mode
+if not env.is_light_import():
+    with _lazy_load_lib():
+        from .env import (  # noqa: F401
+            enable_cache,
+            disable_cache,
+            is_cache_enabled,
+            get_windows_runtime_dll_dirs,
+            prepend_dll_search_path,
+        )
+        from . import libinfo
+
+        if sys.platform.startswith("win32"):
+            # Make sibling-package DLLs (tvm_ffi, z3) discoverable via PATH,
+            # then register all native dependency dirs with the secure DLL
+            # loader used by Python 3.8+ for absolute-path DLL loads.
+            runtime_dll_dirs = get_windows_runtime_dll_dirs()
+            prepend_dll_search_path(runtime_dll_dirs)
+            dll_dirs = dict.fromkeys([*libinfo.get_dll_directories(), *runtime_dll_dirs])
+            _dll_handles = [os.add_dll_directory(p) for p in dll_dirs]
+
+        import tvm
+        import tvm.base  # noqa: F401
+        from tvm import DataType  # noqa: F401
+
+        def _load_tile_lang_lib():
+            """Load Tile Lang lib"""
+            lib_path = libinfo.find_lib_path("tilelang")
+            return ctypes.CDLL(lib_path), lib_path
+
+        # only load once here
+        if env.SKIP_LOADING_TILELANG_SO == "0":
+            _LIB, _LIB_PATH = _load_tile_lang_lib()
+
+    from .jit import jit, JITKernel, compile, par_compile  # noqa: F401
+    from .profiler import Profiler  # noqa: F401
+    from .cache import clear_cache  # noqa: F401
+    from .utils import (
+        TensorSupplyType,  # noqa: F401
+        deprecated,  # noqa: F401
+        build_date,  # noqa: F401
+    )
+    from .layout import (
+        Layout,  # noqa: F401
+        Fragment,  # noqa: F401
+    )
+    from . import (
+        analysis,  # noqa: F401
+        transform,  # noqa: F401
+        language,  # noqa: F401
+        engine,  # noqa: F401
+        tools,  # noqa: F401
+    )
+    from .language import dtypes  # noqa: F401
+    from .autotuner import autotune  # noqa: F401
+    from .transform import PassConfigKey  # noqa: F401
+    from .engine import lower, register_cuda_postproc, register_hip_postproc, register_c_postproc  # noqa: F401
+    from .math import *  # noqa: F403
+    from . import ir  # noqa: F401
+    from . import tileop  # noqa: F401
+    from . import cpu as cpu  # noqa: F401
+    from . import cuda as cuda  # noqa: F401
+    from . import rocm as rocm  # noqa: F401
+    from . import metal as metal  # noqa: F401
+
+del _lazy_load_lib

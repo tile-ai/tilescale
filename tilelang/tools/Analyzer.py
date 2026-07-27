@@ -2,14 +2,13 @@ from __future__ import annotations
 import numpy as np
 from dataclasses import dataclass
 from tilelang import tvm
-from tvm.tir.stmt_functor import ir_transform
+from tvm.tirx.stmt_functor import ir_transform
 import logging
 
 # Configuration for different hardware architectures.
 # Each entry contains: (cores per SM, default clock (GHz), FLOPs per cycle, max SM count)
 ARCH_CONFIGS = {"80": (128, 1.41, 2, 108), "86": (128, 1.70, 2, 84), "89": (128, 2.52, 2, 128)}
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -45,7 +44,7 @@ class Analyzer:
             fn: A TVM IRModule or PrimFunc to analyze.
             device: The target device information.
         """
-        if isinstance(fn, tvm.tir.function.PrimFunc):
+        if isinstance(fn, tvm.tirx.function.PrimFunc):
             self.fn = tvm.IRModule({"main": fn})
         else:
             self.fn = fn
@@ -123,7 +122,7 @@ class Analyzer:
                 Args:
                     stmt: The current IR node being visited.
                 """
-                if isinstance(stmt, tvm.tir.AttrStmt):
+                if isinstance(stmt, tvm.tirx.AttrStmt):
                     # Handle thread extent attributes
                     if stmt.attr_key == "thread_extent":
                         iter_var = stmt.node
@@ -131,13 +130,13 @@ class Analyzer:
                         if thread_tag in self.block_counts:
                             extent = stmt.value.value if hasattr(stmt.value, "value") else stmt.value
                             self.block_counts[thread_tag] = extent
-                elif isinstance(stmt, tvm.tir.For):
+                elif isinstance(stmt, tvm.tirx.For):
                     # Push loop extent onto the stack
                     self.loop_stack.append(stmt.extent)
-                elif isinstance(stmt, tvm.tir.Evaluate):
+                elif isinstance(stmt, tvm.tirx.Evaluate):
                     # Handle Evaluate nodes containing calls
                     value = stmt.value
-                    if isinstance(value, tvm.tir.Call):
+                    if isinstance(value, tvm.tirx.Call):
                         if value.op.name == "tl.copy":
                             self._analyze_copy(value)
                         elif value.op.name == "tl.gemm":
@@ -150,7 +149,7 @@ class Analyzer:
                 Args:
                     stmt: The current IR node being visited.
                 """
-                if isinstance(stmt, tvm.tir.For) and self.loop_stack:
+                if isinstance(stmt, tvm.tirx.For) and self.loop_stack:
                     self.loop_stack.pop()
                 return None
 
@@ -159,7 +158,7 @@ class Analyzer:
             return f.with_body(new_body)
 
         # Apply the custom PrimFunc pass
-        tvm.tir.transform.prim_func_pass(_ftransform, opt_level=0)(self.fn)
+        tvm.tirx.transform.prim_func_pass(_ftransform, opt_level=0)(self.fn)
         return self
 
     def calculate(self) -> AnalysisResult:

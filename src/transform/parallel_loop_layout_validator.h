@@ -6,14 +6,17 @@
 #ifndef TVM_TL_TRANSFORM_PARALLEL_LOOP_LAYOUT_VALIDATOR_H_
 #define TVM_TL_TRANSFORM_PARALLEL_LOOP_LAYOUT_VALIDATOR_H_
 
-#include <tvm/tir/stmt_functor.h>
+#include "support/check.h"
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include "../layout/layout.h"
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 /*!
  * \brief Count the number of consecutive nested parallel loops starting from
@@ -33,6 +36,11 @@ inline int CountNestedParallelLoops(const ForNode *op) {
 
 /*!
  * \brief Validator that checks parallel loop layout annotations.
+ *
+ * Rationale: in TileLang's design, inner loops cannot control their outer
+ * loops, while the outermost loop can manage its inner nested region. Hence
+ * the layout annotation is placed on the outermost parallel loop so passes
+ * can reason about and transform the whole nest from the outside.
  *
  * This validator checks:
  * 1. All parallel loops must have layout annotations (either directly or via

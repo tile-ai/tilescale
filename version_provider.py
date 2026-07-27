@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import platform
 import subprocess
+import time
 from pathlib import Path
 from functools import lru_cache
 
@@ -55,7 +56,8 @@ def dynamic_metadata(field: str, settings: dict[str, object] | None = None) -> s
             # only on macosx_11_0_arm64, not necessary
             # backend = 'metal'
             pass
-        elif _read_cmake_bool(os.environ.get("USE_ROCM", "")):
+        elif _read_cmake_bool(os.environ.get("USE_ROCM", "")) and not _read_cmake_bool(os.environ.get("USE_CUDA", "")):
+            # ROCm-only build. When USE_CUDA is also on (fat wheel), fall through and label as the CUDA backend so the wheel keeps using cuda naming
             backend = "rocm"
         elif "USE_CUDA" in os.environ and not _read_cmake_bool(os.environ.get("USE_CUDA")):
             backend = "cpu"
@@ -70,6 +72,10 @@ def dynamic_metadata(field: str, settings: dict[str, object] | None = None) -> s
                 backend = "cuda"
         if backend:
             exts.append(backend)
+
+        # Add build date if TILELANG_BUILD_WHEEL_WITH_DATE is set
+        if _read_cmake_bool(os.environ.get("TILELANG_BUILD_WHEEL_WITH_DATE")):
+            exts.append(f"d{time.strftime('%Y%m%d')}")
 
         if _read_cmake_bool(os.environ.get("NO_GIT_VERSION")):
             pass

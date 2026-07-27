@@ -1,12 +1,9 @@
 """Wrapping Layouts."""
 
-from __future__ import annotations
-
 # pylint: disable=invalid-name, unsupported-binary-operation
-import tvm
 import tvm_ffi
 from tvm.ir import Range
-from tvm.tir import IterVar, Var, PrimExpr, IndexMap
+from tvm.tirx import IterVar, Var, PrimExpr, IndexMap
 from tilelang import _ffi_api
 from tilelang.layout import Layout
 
@@ -62,7 +59,7 @@ class Fragment(Layout):
 
         # Initialize placeholders for optional outputs
         forward_thread: IterVar = None
-        forward_index: tvm.ir.container.Array = None
+        forward_index: tvm_ffi.Array = None
         thread_replicate: IterVar = None
 
         # If a forward_fn is provided, use it to derive both thread mapping and indices
@@ -89,7 +86,7 @@ class Fragment(Layout):
         # Ensure forward_index is an array if it isn't None
         if forward_index is None:
             forward_index = []
-        elif not isinstance(forward_index, tvm.ir.container.Array):
+        elif not isinstance(forward_index, tvm_ffi.Array):
             forward_index = [forward_index]
 
         # Call TVM FFI constructor to set up internal data structures
@@ -117,7 +114,7 @@ class Fragment(Layout):
         """
         return _ffi_api.Fragment_thread_size(self)
 
-    def repeat(self, repeats, repeat_on_thread: bool = False, lower_dim_first: bool = True) -> Fragment:
+    def repeat(self, repeats, repeat_on_thread: bool = False, lower_dim_first: bool = True) -> "Fragment":
         """
         Returns a new Fragment that repeats the iteration space a given number of times.
 
@@ -137,7 +134,7 @@ class Fragment(Layout):
         """
         return _ffi_api.Fragment_repeat(self, repeats, repeat_on_thread, lower_dim_first)
 
-    def replicate(self, replicate: int) -> Fragment:
+    def replicate(self, replicate: int) -> "Fragment":
         """
         Replicate the Fragment across a new thread dimension.
 
@@ -153,7 +150,7 @@ class Fragment(Layout):
         """
         return _ffi_api.Fragment_replicate(self, replicate)
 
-    def condense_rep_var(self) -> Fragment:
+    def condense_rep_var(self) -> "Fragment":
         """
         Condense or fold the replicate variable into the existing iteration space.
         This operation may be used to reduce dimensionality if the replicate variable
@@ -200,7 +197,7 @@ class Fragment(Layout):
         return self._DebugOutput()
         # return f"Fragment<{self.get_input_shape()}->{self.get_output_shape()}, thread={self.thread}, index={self.index}>"
 
-    def is_equal(self, other: Fragment) -> bool:
+    def is_equal(self, other: "Fragment") -> bool:
         """
         Check if the current fragment is equal to another fragment.
         """

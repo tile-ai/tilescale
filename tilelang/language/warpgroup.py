@@ -1,8 +1,6 @@
 """The language interface for tl programs."""
 
-from __future__ import annotations
-
-from tvm.script.ir_builder.tir.frame import TIRFrame
+from tvm.tirx.script.builder.frame import TIRFrame
 from tvm.ffi import register_object
 from tilelang import _ffi_api
 from .kernel import get_thread_bindings, get_thread_extents
@@ -16,7 +14,7 @@ class WarpSpecializeFrame(TIRFrame):
     """
 
 
-def WarpSpecialize(*warp_group_idx):
+def WarpSpecialize(*warp_group_idx) -> WarpSpecializeFrame:
     """Tools to construct a warp group frame.
 
     Parameters

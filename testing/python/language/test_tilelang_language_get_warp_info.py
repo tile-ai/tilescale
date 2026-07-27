@@ -192,12 +192,12 @@ def test_get_warp_group_idx_custom():
     run_get_warp_group_idx(num_threads=512, warp_size=32, warps_per_group=5)
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@tilelang.testing.requires_cuda
 def test_shuffle_elect_default():
     run_shuffle_elect(num_threads=256, thread_extent=64)
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@tilelang.testing.requires_cuda
 def test_shuffle_elect_block_leader():
     run_shuffle_elect(num_threads=128, thread_extent=0)
 
