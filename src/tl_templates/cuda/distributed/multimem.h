@@ -2,8 +2,16 @@
 
 #include "../common.h"
 
-// multimem instructions require SM 90+ (Hopper) and CUDA 12.0+
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900 && __CUDACC_VER_MAJOR__ >= 12
+// Direct multimem instructions require SM90+ and PTX 8.1+ (CUDA 12.1+).
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900 &&                          \
+    ((__CUDACC_VER_MAJOR__ > 12) ||                                            \
+     (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 1))
+
+// PTX 8.2 added .acc::f32 for packed f16/bf16 load-reduce instructions.
+#if (__CUDACC_VER_MAJOR__ > 12) ||                                             \
+    (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 2)
+#define TL_MULTIMEM_HAS_ACC_F32
+#endif
 
 #ifndef TL_ALWAYS_FALSE_V_DEFINED
 #define TL_ALWAYS_FALSE_V_DEFINED
@@ -76,7 +84,8 @@ template <> struct RedV1<ReduceOp::ADD, float> {
 template <ReduceOp op, typename DType> struct LdReduceV4 {
   TL_DEVICE static void run(void *, const void *) {
     static_assert(always_false_v<DType>,
-                  "tl::multimem::LdReduceV4: unsupported dtype/op combination");
+                  "tl::multimem::LdReduceV4: unsupported dtype/op/toolkit "
+                  "combination");
   }
 };
 
@@ -92,6 +101,8 @@ template <> struct LdReduceV4<ReduceOp::ADD, float> {
     *reinterpret_cast<int4 *>(dst) = ret;
   }
 };
+
+#ifdef TL_MULTIMEM_HAS_ACC_F32
 
 template <> struct LdReduceV4<ReduceOp::ADD, half_t> {
   TL_DEVICE static void run(void *dst, const void *mcast_ptr) {
@@ -125,6 +136,8 @@ template <> struct LdReduceV4<ReduceOp::ADD, bfloat16_t> {
     }
   }
 };
+
+#endif // TL_MULTIMEM_HAS_ACC_F32
 
 // --- StV4: 128-bit store to multicast address ---
 
@@ -227,7 +240,8 @@ template <> struct RedV4<ReduceOp::ADD, bfloat16_t> {
 template <ReduceOp op, typename DType> struct LdReduceV2 {
   TL_DEVICE static void run(void *, const void *) {
     static_assert(always_false_v<DType>,
-                  "tl::multimem::LdReduceV2: unsupported dtype/op");
+                  "tl::multimem::LdReduceV2: unsupported dtype/op/toolkit "
+                  "combination");
   }
 };
 
@@ -242,6 +256,8 @@ template <> struct LdReduceV2<ReduceOp::ADD, float> {
     *reinterpret_cast<int2 *>(dst) = ret;
   }
 };
+
+#ifdef TL_MULTIMEM_HAS_ACC_F32
 
 template <> struct LdReduceV2<ReduceOp::ADD, half_t> {
   TL_DEVICE static void run(void *dst, const void *mcast_ptr) {
@@ -264,6 +280,8 @@ template <> struct LdReduceV2<ReduceOp::ADD, bfloat16_t> {
     *reinterpret_cast<uint32_t *>(dst) = ret;
   }
 };
+
+#endif // TL_MULTIMEM_HAS_ACC_F32
 
 template <typename DType> struct StV2 {
   TL_DEVICE static void run(void *, const void *) {
@@ -349,9 +367,12 @@ template <> struct RedV2<ReduceOp::ADD, bfloat16_t> {
 template <ReduceOp op, typename DType> struct LdReduceV8 {
   TL_DEVICE static void run(void *, const void *) {
     static_assert(always_false_v<DType>,
-                  "tl::multimem::LdReduceV8: unsupported dtype/op");
+                  "tl::multimem::LdReduceV8: unsupported dtype/op/toolkit "
+                  "combination");
   }
 };
+
+#ifdef TL_MULTIMEM_HAS_ACC_F32
 
 template <> struct LdReduceV8<ReduceOp::ADD, half_t> {
   TL_DEVICE static void run(void *dst, const void *mcast_ptr) {
@@ -385,6 +406,8 @@ template <> struct LdReduceV8<ReduceOp::ADD, bfloat16_t> {
     }
   }
 };
+
+#endif // TL_MULTIMEM_HAS_ACC_F32
 
 template <typename DType> struct StV8 {
   TL_DEVICE static void run(void *, const void *) {
@@ -664,7 +687,9 @@ TL_DEVICE void cp_reduce_async_bulk_add_bf16(void *mcast_global, void *smem,
 
 #endif // SM90+ and CUDA 13.1+
 
+#undef TL_MULTIMEM_HAS_ACC_F32
+
 } // namespace multimem
 } // namespace tl
 
-#endif // __CUDA_ARCH__ >= 900 && __CUDACC_VER_MAJOR__ >= 12
+#endif // SM90+ and CUDA 12.1+

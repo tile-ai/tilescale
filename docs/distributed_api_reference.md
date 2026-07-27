@@ -251,10 +251,12 @@ and `NONE`.
 The signal type is inferred from `addr`; there is no `dtype_tag` argument. The
 direct `multimem_ld_reduce` and `multimem_red` paths currently expose ADD;
 unsupported PTX dtype/operation combinations are rejected during lowering.
-Direct multimem operations and signals require SM90+ and CUDA Toolkit 12.0+.
-Packed `float16`/`bfloat16` regions additionally require an even last extent,
-pair-aligned multicast rows, a full local fragment region, and a fragment layout
-that preserves contiguous-pair thread ownership.
+Direct multimem operations and signals require SM90+ and CUDA Toolkit 12.1+
+(PTX 8.1+). Packed `float16`/`bfloat16` load-reduce additionally requires CUDA
+Toolkit 12.2+ because its `.acc::f32` form was introduced in PTX 8.2. Packed
+regions require an even last extent, pair-aligned multicast rows, a full local
+fragment region, and a fragment layout that preserves contiguous-pair thread
+ownership.
 
 Bulk `multimem_tma_store` additionally requires CUDA Toolkit 13.1+. Its source and
 destination regions must have matching rank, extents, and dtype. Both regions

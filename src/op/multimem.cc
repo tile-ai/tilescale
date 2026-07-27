@@ -2,9 +2,9 @@
  * \file tl/op/multimem.cc
  * \brief Unified multimem operator implementation.
  *
- * Reuses CopyNode's ParallelOp + InferLayout + VectorizeLoop pipeline,
- * then post-processes to replace mcast buffer accesses with multimem
- * instructions.
+ * Direct modes reuse CopyNode's ParallelOp + InferLayout + VectorizeLoop
+ * pipeline before replacing multicast accesses with multimem instructions.
+ * Bulk modes validate and lower one contiguous shared-to-multicast region.
  */
 
 #include "multimem.h"

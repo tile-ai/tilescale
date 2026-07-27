@@ -1,7 +1,8 @@
 """Multimem operations (NVSwitch SHARP multicast) using layout-aware lowering.
 
-These operations use T.copy's ParallelOp + InferLayout + VectorizeLoop pipeline
-to correctly handle fragment layouts, then post-process to emit multimem instructions.
+Direct operations use T.copy's ParallelOp + InferLayout + VectorizeLoop pipeline
+to handle fragment layouts before emitting multimem instructions. Bulk operations
+validate and lower one contiguous shared-to-multicast region directly.
 """
 
 from __future__ import annotations
@@ -58,7 +59,9 @@ def multimem_ld_reduce(src, dst, reduce_op: MultimemReduceOp = MultimemReduceOp.
     packed x2 instructions, so their local region must cover the full fragment,
     their last extent must be even, multicast rows must be pair-aligned, and the
     fragment layout must preserve the packed lowering's contiguous-pair thread
-    ownership.
+    ownership. Direct multimem requires SM90+ and CUDA Toolkit 12.1+. The packed
+    float16/bfloat16 load-reduce form requires CUDA Toolkit 12.2+ for PTX 8.2
+    ``.acc::f32`` support.
 
     Args:
         src: Multicast source (Buffer, BufferLoad with slice, or BufferRegion)
@@ -74,6 +77,7 @@ def multimem_st(src, dst):
     """Store to multicast address (broadcast to all ranks).
 
     Region, dtype, and packed x2 constraints match ``multimem_ld_reduce``.
+    The CUDA implementation requires SM90+ and CUDA Toolkit 12.1+.
 
     Args:
         src: Local source (Buffer, BufferLoad with slice, or BufferRegion)
@@ -86,6 +90,7 @@ def multimem_red(src, dst, reduce_op: MultimemReduceOp = MultimemReduceOp.ADD):
     """Reduce into multicast address (accumulate without read-back).
 
     Region, dtype, and packed x2 constraints match ``multimem_ld_reduce``.
+    The CUDA implementation requires SM90+ and CUDA Toolkit 12.1+.
 
     Args:
         src: Local source (Buffer, BufferLoad with slice, or BufferRegion)
