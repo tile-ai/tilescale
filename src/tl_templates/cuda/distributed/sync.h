@@ -50,27 +50,6 @@ TL_DEVICE uint32_t atomic_add_release_gpu_u32(const uint32_t *ptr,
   return ret;
 }
 
-// System-level atomic load with acquire semantics
-TL_DEVICE int atomic_load_acquire_sys_s32(const int *ptr) {
-  int ret;
-  asm volatile("atom.load.acquire.sys.global.s32 %0, [%1];\n"
-               : "=r"(ret)
-               : "l"(ptr));
-  return ret;
-}
-
-TL_DEVICE int ld_volatile_global(const int *ptr) {
-  int ret;
-  asm volatile("ld.volatile.global.s32 %0, [%1];\n" : "=r"(ret) : "l"(ptr));
-  return ret;
-}
-
-TL_DEVICE int ld_acquire(const int *ptr) {
-  int ret = 0;
-  asm volatile("ld.global.acquire.gpu.b32 %0, [%1];\n" : "=r"(ret) : "l"(ptr));
-  return ret;
-}
-
 template <typename T> struct AcquireLoadSys;
 
 template <> struct AcquireLoadSys<uint32_t> {
@@ -171,8 +150,54 @@ template <typename T> TL_DEVICE T ld_acquire_gpu(const T *ptr) {
   return AcquireLoadGpu<T>::run(ptr);
 }
 
+template <typename T> struct VolatileLoad;
+
+template <> struct VolatileLoad<uint32_t> {
+  TL_DEVICE static uint32_t run(const uint32_t *ptr) {
+    uint32_t ret;
+    asm volatile("ld.volatile.global.u32 %0, [%1];\n"
+                 : "=r"(ret)
+                 : "l"(ptr)
+                 : "memory");
+    return ret;
+  }
+};
+
+template <> struct VolatileLoad<int32_t> {
+  TL_DEVICE static int32_t run(const int32_t *ptr) {
+    int32_t ret;
+    asm volatile("ld.volatile.global.s32 %0, [%1];\n"
+                 : "=r"(ret)
+                 : "l"(ptr)
+                 : "memory");
+    return ret;
+  }
+};
+
+template <> struct VolatileLoad<uint64_t> {
+  TL_DEVICE static uint64_t run(const uint64_t *ptr) {
+    uint64_t ret;
+    asm volatile("ld.volatile.global.u64 %0, [%1];\n"
+                 : "=l"(ret)
+                 : "l"(ptr)
+                 : "memory");
+    return ret;
+  }
+};
+
+template <> struct VolatileLoad<int64_t> {
+  TL_DEVICE static int64_t run(const int64_t *ptr) {
+    int64_t ret;
+    asm volatile("ld.volatile.global.s64 %0, [%1];\n"
+                 : "=l"(ret)
+                 : "l"(ptr)
+                 : "memory");
+    return ret;
+  }
+};
+
 template <typename T> TL_DEVICE T ld_volatile(const T *ptr) {
-  return ld_volatile_global(ptr);
+  return VolatileLoad<T>::run(ptr);
 }
 
 template <WaitScope Scope, WaitSemantics Semantics, typename T>
@@ -295,7 +320,7 @@ TL_DEVICE void barrier_blocks(int offset, int rank, int num_ranks) {
 
   while (true) {
     int value =
-        tid < num_ranks ? ld_volatile_global(BARRIER_PTR(rank) + tid) : 0;
+        tid < num_ranks ? ld_volatile<int32_t>(BARRIER_PTR(rank) + tid) : 0;
     if (__all_sync(0xffffffff, value <= 0)) {
       break;
     }
@@ -306,81 +331,101 @@ TL_DEVICE void barrier_blocks(int offset, int rank, int num_ranks) {
 #undef FINISHED_SUM_TAG
 }
 
+template <typename ValueT, typename P, typename T>
+using WaitValueType = std::conditional_t<
+    std::is_void_v<ValueT>,
+    std::conditional_t<std::is_pointer_v<P>,
+                       std::remove_cv_t<std::remove_pointer_t<P>>,
+                       std::remove_cv_t<T>>,
+    std::remove_cv_t<ValueT>>;
+
 template <WaitScope Scope = WaitScope::kSys,
-          WaitSemantics Semantics = WaitSemantics::kAcquire, typename P,
-          typename T>
+          WaitSemantics Semantics = WaitSemantics::kAcquire,
+          typename ValueT = void, typename P, typename T>
 TL_DEVICE void wait_eq(P ptr, T val) {
   static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
                 "P must be a pointer or uint64_t");
-  T *flag_ptr = reinterpret_cast<T *>(ptr);
+  using FlagT = WaitValueType<ValueT, P, T>;
+  const FlagT *flag_ptr = reinterpret_cast<const FlagT *>(ptr);
+  const FlagT expected = static_cast<FlagT>(val);
 // Spin-loop
 #pragma unroll 1
-  while (wait_load<Scope, Semantics>(flag_ptr) != val)
+  while (wait_load<Scope, Semantics>(flag_ptr) != expected)
     ;
 }
 
 template <WaitScope Scope = WaitScope::kSys,
-          WaitSemantics Semantics = WaitSemantics::kAcquire, typename P,
-          typename T>
+          WaitSemantics Semantics = WaitSemantics::kAcquire,
+          typename ValueT = void, typename P, typename T>
 TL_DEVICE void wait_ne(P ptr, T val) {
   static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
                 "P must be a pointer or uint64_t");
-  T *flag_ptr = reinterpret_cast<T *>(ptr);
+  using FlagT = WaitValueType<ValueT, P, T>;
+  const FlagT *flag_ptr = reinterpret_cast<const FlagT *>(ptr);
+  const FlagT expected = static_cast<FlagT>(val);
 // Spin-loop
 #pragma unroll 1
-  while (wait_load<Scope, Semantics>(flag_ptr) == val)
+  while (wait_load<Scope, Semantics>(flag_ptr) == expected)
     ;
 }
 
 template <WaitScope Scope = WaitScope::kSys,
-          WaitSemantics Semantics = WaitSemantics::kAcquire, typename P,
-          typename T>
+          WaitSemantics Semantics = WaitSemantics::kAcquire,
+          typename ValueT = void, typename P, typename T>
 TL_DEVICE void wait_ge(P ptr, T val) {
   static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
                 "P must be a pointer or uint64_t");
-  T *flag_ptr = reinterpret_cast<T *>(ptr);
+  using FlagT = WaitValueType<ValueT, P, T>;
+  const FlagT *flag_ptr = reinterpret_cast<const FlagT *>(ptr);
+  const FlagT expected = static_cast<FlagT>(val);
 // Spin-loop
 #pragma unroll 1
-  while (wait_load<Scope, Semantics>(flag_ptr) < val)
+  while (wait_load<Scope, Semantics>(flag_ptr) < expected)
     ;
 }
 
 template <WaitScope Scope = WaitScope::kSys,
-          WaitSemantics Semantics = WaitSemantics::kAcquire, typename P,
-          typename T>
+          WaitSemantics Semantics = WaitSemantics::kAcquire,
+          typename ValueT = void, typename P, typename T>
 TL_DEVICE void wait_le(P ptr, T val) {
   static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
                 "P must be a pointer or uint64_t");
-  T *flag_ptr = reinterpret_cast<T *>(ptr);
+  using FlagT = WaitValueType<ValueT, P, T>;
+  const FlagT *flag_ptr = reinterpret_cast<const FlagT *>(ptr);
+  const FlagT expected = static_cast<FlagT>(val);
 // Spin-loop
 #pragma unroll 1
-  while (wait_load<Scope, Semantics>(flag_ptr) > val)
+  while (wait_load<Scope, Semantics>(flag_ptr) > expected)
     ;
 }
 
 template <WaitScope Scope = WaitScope::kSys,
-          WaitSemantics Semantics = WaitSemantics::kAcquire, typename P,
-          typename T>
+          WaitSemantics Semantics = WaitSemantics::kAcquire,
+          typename ValueT = void, typename P, typename T>
 TL_DEVICE void wait_gt(P ptr, T val) {
   static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
                 "P must be a pointer or uint64_t");
-  T *flag_ptr = reinterpret_cast<T *>(ptr);
+  using FlagT = WaitValueType<ValueT, P, T>;
+  const FlagT *flag_ptr = reinterpret_cast<const FlagT *>(ptr);
+  const FlagT expected = static_cast<FlagT>(val);
 // Spin-loop
 #pragma unroll 1
-  while (wait_load<Scope, Semantics>(flag_ptr) <= val)
+  while (wait_load<Scope, Semantics>(flag_ptr) <= expected)
     ;
 }
 
 template <WaitScope Scope = WaitScope::kSys,
-          WaitSemantics Semantics = WaitSemantics::kAcquire, typename P,
-          typename T>
+          WaitSemantics Semantics = WaitSemantics::kAcquire,
+          typename ValueT = void, typename P, typename T>
 TL_DEVICE void wait_lt(P ptr, T val) {
   static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
                 "P must be a pointer or uint64_t");
-  T *flag_ptr = reinterpret_cast<T *>(ptr);
+  using FlagT = WaitValueType<ValueT, P, T>;
+  const FlagT *flag_ptr = reinterpret_cast<const FlagT *>(ptr);
+  const FlagT expected = static_cast<FlagT>(val);
 // Spin-loop
 #pragma unroll 1
-  while (wait_load<Scope, Semantics>(flag_ptr) >= val)
+  while (wait_load<Scope, Semantics>(flag_ptr) >= expected)
     ;
 }
 

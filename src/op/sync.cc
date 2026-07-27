@@ -18,6 +18,29 @@ namespace tl {
 
 using namespace tirx;
 
+namespace {
+
+const char *WaitValueTypeName(DataType dtype) {
+  if (dtype == DataType::UInt(32)) {
+    return "uint32_t";
+  }
+  if (dtype == DataType::Int(32)) {
+    return "int32_t";
+  }
+  if (dtype == DataType::UInt(64)) {
+    return "uint64_t";
+  }
+  if (dtype == DataType::Int(64)) {
+    return "int64_t";
+  }
+  ICHECK(false) << "Wait operations only support int32, uint32, int64, and "
+                   "uint64 signals, but got "
+                << dtype;
+  return "";
+}
+
+} // namespace
+
 PrimExpr BarrierBlocksOpNode::get_offset(const BufferLoadNode *load) const {
   PrimExpr offset = 0;
   PrimExpr stride = 1;
@@ -131,12 +154,18 @@ Stmt WaitOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   const char *scope_str[] = {"tl::WaitScope::kSys", "tl::WaitScope::kGpu"};
   const char *semantics_str[] = {"tl::WaitSemantics::kAcquire",
                                  "tl::WaitSemantics::kVolatile"};
+  const auto *addr_call = addr.as<CallNode>();
+  ICHECK(addr_call && addr_call->op.same_as(builtin::address_of()))
+      << "Wait address must remain an address_of call";
+  const auto *load = addr_call->args[0].as<BufferLoadNode>();
+  ICHECK(load) << "Wait address_of must wrap a BufferLoad";
   ICHECK_GE(scope, 0);
   ICHECK_LT(scope, 2);
   ICHECK_GE(semantics, 0);
   ICHECK_LT(semantics, 2);
   ss << "tl::wait_" << relation_str[relation];
-  ss << "<" << scope_str[scope] << ", " << semantics_str[semantics] << ">";
+  ss << "<" << scope_str[scope] << ", " << semantics_str[semantics] << ", "
+     << WaitValueTypeName(load->dtype) << ">";
 
   new_args.push_back(StringImm(ss.str()));
   if (is_distributed()) {

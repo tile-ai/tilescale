@@ -44,6 +44,7 @@ def _wait(
     scope: WaitScope | str = WaitScope.SYS,
     semantics: WaitSemantics | str = WaitSemantics.ACQUIRE,
 ):
+    expected = tirx.Cast(value.dtype, expected)
     return tirx.call_intrin(
         "handle",
         tirx.op.Op.get("tl.tileop.wait"),
