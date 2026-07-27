@@ -150,6 +150,21 @@ def _multimem_vector_element_dtype_kernel():
     return main
 
 
+def _multimem_singleton_runtime_offset_kernel():
+    @T.prim_func
+    def main(
+        mcast_buf: T.Tensor((1,), T.float32),
+        out: T.Tensor((1,), T.float32),
+    ):
+        with T.Kernel(1, threads=1):
+            rank = T.get_rank()
+            tmp = T.alloc_fragment((1,), T.float32)
+            T.multimem_ld_reduce(mcast_buf[rank], tmp)
+            T.copy(tmp, out)
+
+    return main
+
+
 def _multimem_packed_tail_kernel():
     @T.prim_func
     def main(mcast_buf: T.Tensor((257,), T.float16), out: T.Tensor((257,), T.float16)):
@@ -235,6 +250,48 @@ def _multimem_packed_aligned_overlaunch_kernel():
     return main
 
 
+def _multimem_packed_incompatible_layout_kernel():
+    @T.prim_func
+    def main(
+        mcast_buf: T.Tensor((8,), T.bfloat16),
+        out: T.Tensor((8,), T.bfloat16),
+    ):
+        with T.Kernel(1, threads=4):
+            tmp = T.alloc_fragment((8,), T.bfloat16)
+            T.annotate_layout(
+                {
+                    tmp: T.Fragment(
+                        (8,),
+                        forward_fn=lambda i: (3 - i // 2, i % 2),
+                    )
+                }
+            )
+            T.multimem_ld_reduce(mcast_buf, tmp)
+            T.copy(tmp, out)
+
+    return main
+
+
+def _multimem_packed_extra_replicate_layout_kernel():
+    @T.prim_func
+    def main(mcast_buf: T.Tensor((8,), T.bfloat16)):
+        with T.Kernel(1, threads=4):
+            tmp = T.alloc_fragment((8,), T.bfloat16)
+            T.annotate_layout(
+                {
+                    tmp: T.Fragment(
+                        (8,),
+                        forward_thread_fn=lambda i, rep: (i // 2 + rep // 2) % 4,
+                        forward_index_fn=lambda i: i % 2,
+                        replicate=4,
+                    )
+                }
+            )
+            T.multimem_ld_reduce(mcast_buf, tmp)
+
+    return main
+
+
 def _compile_multimem_source(kernel) -> str:
     compiled = tilelang.compile(
         kernel,
@@ -307,6 +364,13 @@ def test_multimem_rejects_vector_element_dtype():
         _compile_multimem_source(_multimem_vector_element_dtype_kernel())
 
 
+def test_multimem_singleton_runtime_bounds_codegen():
+    source = _compile_multimem_source(_multimem_singleton_runtime_offset_kernel())
+    assert "tl::get_rank()" in source
+    assert "tl::multimem::LdReduceV1" in source
+    assert "} else {\n    tmp[0] = 0x0p+0f" in source
+
+
 def test_multimem_rejects_unsafe_packed_tail():
     with pytest.raises(RuntimeError, match="packed multicast.*provably in bounds"):
         _compile_multimem_source(_multimem_packed_tail_kernel())
@@ -345,6 +409,16 @@ def test_multimem_packed_aligned_overlaunch_codegen():
     assert "if (((int)blockIdx.x) == 0)" in source
     assert "tl::multimem::LdReduceV2" in source
     assert source.count("bfloat16_t(0x0p+0f") == 2
+
+
+def test_multimem_rejects_incompatible_packed_layout():
+    with pytest.raises(RuntimeError, match="packed x2.*canonical pair ownership"):
+        _compile_multimem_source(_multimem_packed_incompatible_layout_kernel())
+
+
+def test_multimem_rejects_extra_replicate_packed_layout():
+    with pytest.raises(RuntimeError, match="packed x2.*canonical pair ownership"):
+        _compile_multimem_source(_multimem_packed_extra_replicate_layout_kernel())
 
 
 def _multimem_tma_broadcast_kernel(shard_N: int, threads: int):

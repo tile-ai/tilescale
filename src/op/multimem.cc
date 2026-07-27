@@ -308,6 +308,93 @@ Optional<PrimExpr> ValidatePacked16BitRegions(const Buffer &local_buf,
   return mcast_in_bounds;
 }
 
+Fragment MakePacked16BitLayout(const Buffer &local_buf,
+                               const Array<Range> &local_range,
+                               const Range &thread_bounds,
+                               arith::Analyzer *analyzer) {
+  PrimExpr numel = ProductExtent(local_range, 0, local_range.size());
+  PrimExpr thread_extent = thread_bounds->extent;
+  PrimExpr pair_width = IntImm(DataType::Int(32), 2);
+  PrimExpr replicate_extent =
+      analyzer->Simplify(floordiv(numel + thread_extent * pair_width - 1,
+                                  thread_extent * pair_width) *
+                         pair_width);
+
+  Array<PrimExpr> logical_indices;
+  for (size_t i = 0; i < local_buf->shape.size(); ++i) {
+    logical_indices.push_back(InputPlaceholder(i));
+  }
+  PrimExpr logical =
+      FlattenIndices(logical_indices, local_buf->shape, analyzer);
+  PrimExpr pair_id = floordiv(logical, pair_width);
+  PrimExpr local_offset =
+      analyzer->Simplify(FloorMod(logical, pair_width) +
+                         pair_width * floordiv(pair_id, thread_extent));
+  PrimExpr thread = analyzer->Simplify(FloorMod(pair_id, thread_extent));
+
+  return Fragment(local_buf->shape, {local_offset}, thread, replicate_extent,
+                  std::nullopt)
+      ->BindThreadRange(thread_bounds);
+}
+
+void RequirePacked16BitLayout(const Layout &layout, const Fragment &expected,
+                              arith::Analyzer *analyzer) {
+  auto actual_opt = layout.as<Fragment>();
+  ICHECK(actual_opt.has_value())
+      << "multimem packed x2 lowering requires a fragment layout for its "
+         "local buffer";
+  Fragment actual = actual_opt.value();
+
+  auto require_equal = [&](const PrimExpr &actual_expr,
+                           const PrimExpr &expected_expr,
+                           const char *description) {
+    ICHECK(analyzer->CanProveEqual(actual_expr, expected_expr))
+        << "multimem packed x2 lowering requires the local fragment layout to "
+           "preserve canonical pair ownership; mismatched "
+        << description << ": got " << actual_expr << ", expected "
+        << expected_expr << "\nactual layout: " << actual->DebugOutput()
+        << "\nexpected layout: " << expected->DebugOutput();
+  };
+  auto require_array_equal = [&](const Array<PrimExpr> &actual_exprs,
+                                 const Array<PrimExpr> &expected_exprs,
+                                 const char *description) {
+    ICHECK_EQ(actual_exprs.size(), expected_exprs.size())
+        << "multimem packed x2 lowering requires the local fragment layout to "
+           "preserve canonical pair ownership; mismatched "
+        << description << " rank\nactual layout: " << actual->DebugOutput()
+        << "\nexpected layout: " << expected->DebugOutput();
+    for (size_t i = 0; i < actual_exprs.size(); ++i) {
+      require_equal(actual_exprs[i], expected_exprs[i], description);
+    }
+  };
+
+  require_array_equal(actual->InputShape(), expected->InputShape(),
+                      "logical shape");
+  require_array_equal(actual->OutputShape(), expected->OutputShape(),
+                      "physical shape");
+  require_equal(actual->ThreadExtent(), expected->ThreadExtent(),
+                "thread extent");
+  if (actual->ThreadRange().defined()) {
+    require_equal(actual->ThreadRange()->min, expected->ThreadRange()->min,
+                  "thread range minimum");
+    require_equal(actual->ThreadRange()->extent,
+                  expected->ThreadRange()->extent, "thread range extent");
+  }
+
+  Array<PrimExpr> logical_vars;
+  for (size_t i = 0; i < expected->InputDim(); ++i) {
+    Var var("multimem_layout_i" + std::to_string(i), DataType::Int(32));
+    analyzer->Bind(var, Range(0, expected->InputShape()[i]));
+    logical_vars.push_back(var);
+  }
+  require_array_equal(actual->Forward(logical_vars),
+                      expected->Forward(logical_vars), "physical slot mapping");
+  Var replicate("multimem_layout_rep", DataType::Int(32));
+  require_equal(actual->ForwardThread(logical_vars, replicate),
+                expected->ForwardThread(logical_vars, replicate),
+                "thread ownership mapping");
+}
+
 } // namespace
 
 // === MultimemOp Constructor ===
@@ -463,17 +550,19 @@ PrimExpr MultimemOpNode::MakePredicate(arith::Analyzer *analyzer,
   Array<PrimExpr> cond_list;
   size_t idx = 0;
   for (size_t i = 0; i < ranges.size(); i++) {
-    if (is_one(ranges[i]->extent))
-      continue;
-    PrimExpr cond = ranges[i]->min + ivs[idx]->var < extents[i];
+    PrimExpr index = ranges[i]->min;
+    if (!is_one(ranges[i]->extent)) {
+      index = index + ivs[idx]->var;
+      idx++;
+    }
+    PrimExpr cond = index < extents[i];
     if (!analyzer->CanProve(cond, arith::ProofStrength::kSymbolicBound)) {
       cond_list.push_back(cond);
     }
-    cond = ranges[i]->min + ivs[idx]->var >= 0;
+    cond = index >= 0;
     if (!analyzer->CanProve(cond, arith::ProofStrength::kSymbolicBound)) {
       cond_list.push_back(cond);
     }
-    idx++;
   }
   if (cond_list.empty())
     return {};
@@ -540,45 +629,20 @@ LayoutMap MultimemOpNode::InferLayout(const LayoutInferArgs &T,
     ICHECK(T.analyzer != nullptr);
     ValidatePacked16BitRegions(local_buf, local_range, mcast_buf, mcast_range,
                                T.analyzer);
+    Fragment expected = MakePacked16BitLayout(local_buf, local_range,
+                                              T.thread_bounds, T.analyzer);
+    if (T.layout_map.count(local_buf)) {
+      RequirePacked16BitLayout(T.layout_map[local_buf], expected, T.analyzer);
+      return {};
+    }
     if (mode == MultimemMode::kLdReduce) {
-      return {};
-    }
-    Buffer remapped_local = local_buf;
-    if (T.buffer_remap.count(remapped_local)) {
-      remapped_local = T.buffer_remap[remapped_local];
-    }
-    if (T.layout_map.count(remapped_local)) {
+      // Let downstream fragment consumers choose a layout, then validate the
+      // resolved layout again in LowerPacked16Bit.
       return {};
     }
 
-    PrimExpr numel = 1;
-    for (const auto &range : local_range) {
-      numel = numel * range->extent;
-    }
-    ICHECK(T.analyzer != nullptr);
-    PrimExpr thread_extent = T.thread_bounds->extent;
-    PrimExpr pair_width = IntImm(DataType::Int(32), 2);
-    PrimExpr replicate_extent =
-        T.analyzer->Simplify(floordiv(numel + thread_extent * pair_width - 1,
-                                      thread_extent * pair_width) *
-                             pair_width);
-    Array<PrimExpr> logical_indices;
-    for (size_t i = 0; i < remapped_local->shape.size(); ++i) {
-      logical_indices.push_back(InputPlaceholder(i));
-    }
-    PrimExpr logical =
-        FlattenIndices(logical_indices, remapped_local->shape, T.analyzer);
-    PrimExpr pair_id = floordiv(logical, pair_width);
-    PrimExpr local_offset =
-        T.analyzer->Simplify(FloorMod(logical, pair_width) +
-                             pair_width * floordiv(pair_id, thread_extent));
-    PrimExpr thread = T.analyzer->Simplify(FloorMod(pair_id, thread_extent));
-
-    Fragment fragment = Fragment(remapped_local->shape, {local_offset}, thread,
-                                 replicate_extent, std::nullopt)
-                            ->BindThreadRange(T.thread_bounds);
     LayoutMap result;
-    result.Set(remapped_local, fragment);
+    result.Set(local_buf, expected);
     return result;
   }
   arith::Analyzer analyzer;
@@ -674,6 +738,12 @@ Stmt MultimemOpNode::LowerPacked16Bit(const LowerArgs &T,
 
   Optional<PrimExpr> mcast_in_bounds = ValidatePacked16BitRegions(
       local_buf, local_range, mcast_buf, mcast_range, analyzer);
+  ICHECK(T.layout_map.count(local_buf))
+      << "multimem packed x2 lowering requires an inferred local fragment "
+         "layout";
+  Fragment expected_layout =
+      MakePacked16BitLayout(local_buf, local_range, T.thread_bounds, analyzer);
+  RequirePacked16BitLayout(T.layout_map[local_buf], expected_layout, analyzer);
   const size_t ndim = local_range.size();
   ICHECK_EQ(local_buf->shape.size(), ndim)
       << "multimem packed x2 lowering expects the local region rank to match "
