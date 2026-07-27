@@ -161,23 +161,47 @@ accessible IMEX channel.
 
 ### Public Git History
 
-The development ancestry contains a deleted proprietary CUDA header. Removing
-that file from the current tree does not remove it from Git history. Public
-publication must therefore push only the parentless snapshot branch
-`v0-release-0726-public`. Do not push `v0-release-0726`, its ancestry, or the
-repository's existing tags to the public remote.
+The development ancestry contains deleted non-redistributable sources. Removing
+them from the current tree does not remove them from Git history. Do not push
+`v0-release-0726`, its ancestry, development branches, or unreviewed tags to a
+public remote.
 
-Before pushing, verify that the public branch contains exactly one commit and
-that its commit has no parent:
+Two publication topologies are maintained:
+
+- The review and merge path uses
+  `release/v0.0.2-tilelang-550e25d`. Its commits were reconstructed directly on
+  the existing public `main` baseline; the private development commits are not
+  ancestors of the branch, and every reconstructed tree uses the public CUDA
+  Toolkit declarations.
+- A new repository or standalone source publication should use the parentless
+  `v0-release-0726-public` snapshot. It has the same final source tree without
+  inheriting any existing repository history.
+
+Before merging the review branch, verify its public base, absence of private
+ancestry, final-tree equivalence, and restricted-path history:
+
+```bash
+test "$(git merge-base 4704282 release/v0.0.2-tilelang-550e25d)" = 4704282a16fd0e7ff2c2c13f87772b42e4dc6163
+! git merge-base --is-ancestor v0-release-0726 release/v0.0.2-tilelang-550e25d
+git diff --exit-code release/v0.0.2-tilelang-550e25d v0-release-0726
+test -z "$(git log --format='%H' release/v0.0.2-tilelang-550e25d -- \
+  src/cuda/stubs/vendor/cuda.h examples/mega_moe/reference.py)"
+```
+
+For the standalone path, verify that the snapshot contains exactly one commit
+and that the commit has no parent:
 
 ```bash
 git rev-list --count v0-release-0726-public
 git show -s --format='%H %P' v0-release-0726-public
-git push <public-remote> v0-release-0726-public
 ```
 
 The first command must print `1`; the second must print only the snapshot
-commit hash with no parent hash.
+commit hash with no parent hash. A safe release branch does not sanitize other
+remote refs. Before declaring an existing repository publication-clean, audit
+all advertised branches, tags, and persistent pull-request refs. Use a clean
+repository or coordinate sensitive-object purging with the hosting provider if
+any unsafe ref has already reached the remote.
 
 ### License Confirmation
 
@@ -205,7 +229,9 @@ These values are intentionally left for the release manager to record at
 signing time:
 
 - [ ] Final private release commit
-- [ ] Parentless `v0-release-0726-public` snapshot commit
+- [ ] Sanitized release-PR head, public base, and final source-tree hash
+- [ ] Parentless `v0-release-0726-public` snapshot commit, if using the standalone path
+- [ ] Remote branch, tag, and pull-ref audit or clean-repository confirmation
 - [ ] Final wheel filenames and SHA-256 values
 - [ ] Final source-distribution filename and SHA-256 value
 - [ ] Archived validation-record location
