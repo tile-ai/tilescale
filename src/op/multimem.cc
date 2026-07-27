@@ -14,6 +14,7 @@
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/op_attr_types.h>
 
+#include <limits>
 #include <sstream>
 
 #include "../transform/common/loop_fusion_utils.h"
@@ -190,6 +191,11 @@ Optional<PrimExpr> GetDynamicRegionInBoundsPredicate(const Buffer &buffer,
                              arith::ProofStrength::kSymbolicBound)) {
         continue;
       }
+      ICHECK(!analyzer->CanProve(Not(conditions[j]),
+                                 arith::ProofStrength::kSymbolicBound))
+          << description << " region is statically out of bounds; got ["
+          << lower << ", " << upper << ") for extent " << buffer->shape[i]
+          << " at dimension " << i;
 
       // Dynamic distributed offsets and whole-tile partitions are checked at
       // runtime.  A statically reachable partial tile (for example, the last
@@ -841,8 +847,114 @@ Stmt MultimemOpNode::LowerPacked16Bit(const LowerArgs &T,
 
 // === LowerBulkCopy ===
 // CTA-collective bulk async store from shared to multicast global.
-// Reuses the 1D address computation pattern from CopyNode::LowerBulkCopy1D,
-// but emits multimem.cp.async.bulk or multimem.cp.reduce.async.bulk PTX.
+// Emits multimem.cp.async.bulk or multimem.cp.reduce.async.bulk PTX after
+// validating the instruction's range, contiguity, size, and alignment rules.
+namespace {
+
+std::vector<PrimExpr> GetBulkCopyPhysicalStrides(const Buffer &buffer) {
+  std::vector<PrimExpr> strides(buffer->shape.size());
+  if (!buffer->strides.empty()) {
+    ICHECK_EQ(buffer->strides.size(), buffer->shape.size())
+        << "multimem TMA buffers with explicit strides must provide one stride "
+           "per dimension";
+    for (size_t i = 0; i < buffer->strides.size(); ++i) {
+      strides[i] = buffer->strides[i];
+    }
+    return strides;
+  }
+
+  PrimExpr stride = 1;
+  for (int i = static_cast<int>(buffer->shape.size()) - 1; i >= 0; --i) {
+    strides[i] = stride;
+    stride = stride * buffer->shape[i];
+  }
+  return strides;
+}
+
+Optional<PrimExpr> ValidateBulkCopyRegion(const Buffer &buffer,
+                                          const Array<Range> &ranges,
+                                          arith::Analyzer *analyzer,
+                                          const char *description) {
+  ICHECK_EQ(ranges.size(), buffer->shape.size())
+      << description << " region rank must match buffer rank";
+  ICHECK(!ranges.empty()) << description
+                          << " region must have at least one dimension";
+  for (size_t i = 0; i < ranges.size(); ++i) {
+    ICHECK(analyzer->CanProve(ranges[i]->extent > 0,
+                              arith::ProofStrength::kSymbolicBound))
+        << description << " region extents must be provably positive, got "
+        << ranges[i]->extent << " at dimension " << i;
+  }
+
+  Optional<PrimExpr> in_bounds =
+      GetDynamicRegionInBoundsPredicate(buffer, ranges, analyzer, description);
+  std::vector<PrimExpr> strides = GetBulkCopyPhysicalStrides(buffer);
+  PrimExpr contiguous_stride = 1;
+  for (int i = static_cast<int>(ranges.size()) - 1; i >= 0; --i) {
+    PrimExpr extent = analyzer->Simplify(ranges[i]->extent);
+    if (!analyzer->CanProveEqual(extent, 1)) {
+      ICHECK(analyzer->CanProveEqual(strides[i], contiguous_stride))
+          << description
+          << " region must be provably physically contiguous; dimension " << i
+          << " has physical stride " << strides[i]
+          << " but a contiguous region requires stride " << contiguous_stride;
+    }
+    contiguous_stride = analyzer->Simplify(contiguous_stride * extent);
+  }
+
+  Array<PrimExpr> start_indices;
+  for (const Range &range : ranges) {
+    start_indices.push_back(analyzer->Simplify(range->min));
+  }
+  Array<PrimExpr> element_offsets = buffer->ElemOffset(start_indices);
+  ICHECK_EQ(element_offsets.size(), 1)
+      << description
+      << " region must map to one contiguous physical address range";
+  int element_bytes = buffer->dtype.bytes() * buffer->dtype.lanes();
+  PrimExpr byte_offset = analyzer->Simplify(element_offsets[0] * element_bytes);
+  ICHECK_GE(buffer->data_alignment, 16)
+      << description << " buffer base alignment must be at least 16 bytes";
+  ICHECK_EQ(buffer->data_alignment % 16, 0)
+      << description << " buffer base alignment must be a multiple of 16 bytes";
+  ICHECK(analyzer->CanProveEqual(FloorMod(byte_offset, 16), 0))
+      << description
+      << " start address must be provably 16-byte aligned, got byte offset "
+      << byte_offset;
+  return in_bounds;
+}
+
+std::string GetBulkCopyReduceFuncName(int reduce_op, DataType dtype) {
+  bool is_f32 = dtype.is_float() && dtype.bits() == 32 && dtype.lanes() == 1;
+  bool is_f16 = dtype.is_float16() && dtype.lanes() == 1;
+  bool is_bf16 = dtype.is_bfloat16() && dtype.lanes() == 1;
+  ICHECK(is_f32 || is_f16 || is_bf16)
+      << "multimem TMA reduction supports float32, float16, and bfloat16, got "
+      << dtype;
+
+  std::string dtype_suffix = is_f32 ? "f32" : (is_f16 ? "f16" : "bf16");
+  std::string op_name;
+  switch (reduce_op) {
+  case 0:
+    op_name = "add";
+    break;
+  case 1:
+    ICHECK(!is_f32)
+        << "multimem TMA reduction does not support MIN with float32";
+    op_name = "min";
+    break;
+  case 2:
+    ICHECK(!is_f32)
+        << "multimem TMA reduction does not support MAX with float32";
+    op_name = "max";
+    break;
+  default:
+    LOG(FATAL) << "Invalid multimem TMA reduce_op: " << reduce_op;
+  }
+  return "tl::multimem::cp_reduce_async_bulk_" + op_name + "_" + dtype_suffix;
+}
+
+} // namespace
+
 Stmt MultimemOpNode::LowerBulkCopy(const LowerArgs &T,
                                    arith::Analyzer *analyzer) const {
   bool is_reduce = (mode == MultimemMode::kTmaRedStore);
@@ -852,88 +964,91 @@ Stmt MultimemOpNode::LowerBulkCopy(const LowerArgs &T,
   auto &shared_range = src_range;
   auto &global_range = dst_range;
 
-  // Compute total elements
-  PrimExpr shared_elements = 1;
+  auto require_unmapped_layout = [&](const Buffer &buffer,
+                                     const char *description) {
+    ICHECK(!T.layout_map.count(buffer) && !T.buffer_remap.count(buffer))
+        << description
+        << " does not support layout-remapped buffers because the bulk "
+           "instruction copies a physically contiguous byte range";
+  };
+  require_unmapped_layout(shared_tensor, "multimem TMA shared source");
+  require_unmapped_layout(global_tensor, "multimem TMA multicast destination");
+
+  ICHECK_EQ(shared_tensor->dtype, global_tensor->dtype)
+      << "multimem TMA source and destination dtypes must match";
+  ICHECK_EQ(shared_tensor->dtype.bits() % 8, 0)
+      << "multimem TMA requires byte-addressable element dtypes, got "
+      << shared_tensor->dtype;
+  ICHECK_EQ(shared_range.size(), global_range.size())
+      << "multimem TMA source and destination region ranks must match";
+  for (size_t i = 0; i < shared_range.size(); ++i) {
+    ICHECK(analyzer->CanProveEqual(shared_range[i]->extent,
+                                   global_range[i]->extent))
+        << "multimem TMA source and destination extents must match at "
+           "dimension "
+        << i;
+  }
+  Optional<PrimExpr> shared_in_bounds = ValidateBulkCopyRegion(
+      shared_tensor, shared_range, analyzer, "multimem TMA shared");
+  Optional<PrimExpr> global_in_bounds = ValidateBulkCopyRegion(
+      global_tensor, global_range, analyzer, "multimem TMA multicast");
+
+  PrimExpr shared_elements = make_const(DataType::Int(64), 1);
   for (size_t i = 0; i < shared_range.size(); i++) {
-    shared_elements *= shared_range[i]->extent;
+    shared_elements *= Cast(DataType::Int(64), shared_range[i]->extent);
   }
   PrimExpr elements = analyzer->Simplify(shared_elements);
-  PrimExpr size_bytes = elements * shared_tensor->dtype.bytes();
+  int element_bytes =
+      shared_tensor->dtype.bytes() * shared_tensor->dtype.lanes();
+  PrimExpr size_bytes = analyzer->Simplify(elements * element_bytes);
+  ICHECK(
+      analyzer->CanProve(size_bytes > 0, arith::ProofStrength::kSymbolicBound))
+      << "multimem TMA transfer size must be provably positive, got "
+      << size_bytes;
+  ICHECK(analyzer->CanProveEqual(
+      FloorMod(size_bytes, make_const(size_bytes.dtype(), 16)), 0))
+      << "multimem TMA transfer size must be provably divisible by 16 bytes, "
+         "got "
+      << size_bytes;
+  arith::ConstIntBound size_bound = analyzer->const_int_bound(size_bytes);
+  ICHECK(size_bound->max_value != arith::ConstIntBound::kPosInf &&
+         size_bound->max_value <=
+             static_cast<int64_t>(std::numeric_limits<uint32_t>::max()))
+      << "multimem TMA transfer size must fit in a uint32 byte count, got "
+      << size_bytes;
 
-  // 16-byte alignment check (at compile time if constant)
-  if (auto *imm = size_bytes.as<IntImmNode>()) {
-    ICHECK(imm->value % 16 == 0)
-        << "multimem_tma_store: transfer size must be 16-byte aligned, got "
-        << imm->value;
+  Array<PrimExpr> shared_indices;
+  Array<PrimExpr> global_indices;
+  for (const Range &range : shared_range) {
+    shared_indices.push_back(analyzer->Simplify(range->min));
   }
+  for (const Range &range : global_range) {
+    global_indices.push_back(analyzer->Simplify(range->min));
+  }
+  PrimExpr smem_addr = MakeAddressOf(shared_tensor, shared_indices);
+  PrimExpr mcast_addr = MakeAddressOf(global_tensor, global_indices);
 
-  // Compute flat shared offset
-  std::vector<PrimExpr> shared_strides;
-  PrimExpr sh_stride = 1;
-  for (int i = static_cast<int>(shared_tensor->shape.size()) - 1; i >= 0; --i) {
-    shared_strides.insert(shared_strides.begin(), sh_stride);
-    sh_stride *= shared_tensor->shape[i];
-  }
-  PrimExpr shared_offset = 0;
-  for (size_t i = 0; i < shared_range.size(); i++) {
-    shared_offset += shared_range[i]->min * shared_strides[i];
-  }
-
-  // Compute flat global offset
-  std::vector<PrimExpr> global_strides;
-  PrimExpr gl_stride = 1;
-  for (int i = static_cast<int>(global_tensor->shape.size()) - 1; i >= 0; --i) {
-    global_strides.insert(global_strides.begin(), gl_stride);
-    gl_stride *= global_tensor->shape[i];
-  }
-  PrimExpr global_offset = 0;
-  for (size_t i = 0; i < global_range.size(); i++) {
-    global_offset += global_range[i]->min * global_strides[i];
-  }
-
-  // Build address_of(BufferLoad(buffer, {flat_offset}))
-  auto make_addr = [](const Buffer &buf, PrimExpr flat_idx) -> PrimExpr {
-    return Call(DataType::Handle(), builtin::address_of(),
-                {BufferLoad(buf, {flat_idx})});
-  };
-  PrimExpr smem_addr = make_addr(shared_tensor, shared_offset);
-  PrimExpr mcast_addr = make_addr(global_tensor, global_offset);
-
-  // Build function name based on mode and dtype
-  std::string func_name;
-  if (is_reduce) {
-    func_name = "tl::multimem::cp_reduce_async_bulk_";
-    switch (reduce_op) {
-    case 0:
-      func_name += "add_";
-      break;
-    case 1:
-      func_name += "min_";
-      break;
-    case 2:
-      func_name += "max_";
-      break;
-    default:
-      LOG(FATAL) << "Invalid reduce_op: " << reduce_op;
-    }
-    func_name += shared_tensor->dtype.is_float16()    ? "f16"
-                 : shared_tensor->dtype.is_bfloat16() ? "bf16"
-                                                      : "f32";
-  } else {
-    func_name = "tl::multimem::cp_async_bulk";
-  }
+  std::string func_name =
+      is_reduce ? GetBulkCopyReduceFuncName(reduce_op, shared_tensor->dtype)
+                : "tl::multimem::cp_async_bulk";
 
   Array<PrimExpr> extern_args;
   extern_args.push_back(StringImm(func_name));
   extern_args.push_back(mcast_addr);
   extern_args.push_back(smem_addr);
-  extern_args.push_back(size_bytes);
+  extern_args.push_back(Cast(DataType::UInt(32), size_bytes));
 
   Stmt bulk_copy =
       Evaluate(Call(DataType::Handle(), builtin::call_extern(), extern_args));
 
-  // Gate with tid == 0 (single thread per CTA emits the PTX)
-  bulk_copy = IfThenElse(EQ(T.thread_var, T.thread_bounds->min), bulk_copy);
+  PrimExpr issue_predicate = EQ(T.thread_var, T.thread_bounds->min);
+  if (shared_in_bounds.defined()) {
+    issue_predicate = And(issue_predicate, shared_in_bounds.value());
+  }
+  if (global_in_bounds.defined()) {
+    issue_predicate = And(issue_predicate, global_in_bounds.value());
+  }
+  bulk_copy = IfThenElse(analyzer->Simplify(issue_predicate), bulk_copy);
   return bulk_copy;
 }
 

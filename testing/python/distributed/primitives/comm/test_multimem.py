@@ -19,7 +19,7 @@ os.environ.setdefault("NCCL_DEBUG", "WARN")
 _N = 1001
 _BLOCK_N = 256
 _THREADS = 128
-_TMA_NUM_RANKS = 2
+_TMA_NUM_RANKS = 4
 _TMA_SHARD_N = 256
 _TMA_N = _TMA_NUM_RANKS * _TMA_SHARD_N
 
@@ -464,6 +464,28 @@ def _multimem_tma_add_kernel(N: int, threads: int):
     return main
 
 
+def _multimem_tma_reduce_kernel(
+    N: int,
+    threads: int,
+    dtype,
+    reduce_op: T.MultimemReduceOp,
+):
+    @T.prim_func
+    def main(src: T.Tensor((N,), dtype), mcast_buf: T.Tensor((N,), dtype)):
+        with T.Kernel(1, threads=threads):
+            tx = T.get_thread_binding()
+            shard = T.alloc_shared((N,), dtype)
+            T.copy(src, shard, disable_tma=True)
+            T.fence_proxy_async()
+            T.sync_threads()
+            if tx == 0:
+                T.multimem_tma_store(shard, mcast_buf, reduce_op=reduce_op)
+                T.tma_store_arrive()
+                T.tma_store_wait(0, False)
+
+    return main
+
+
 def _assert_multimem_tma_codegen(source: str, helper: str) -> None:
     ordered_calls = (
         "tl::fence_proxy_async();",
@@ -539,7 +561,7 @@ def test_multimem(local_rank: int, num_ranks: int):
 
 
 @pytest.mark.skipif(not _has_cuda_toolkit_13_1(), reason="Requires CUDA Toolkit 13.1+")
-@tilelang.testing.requires_cuda_compute_version_ge(10, 0)
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 @distributed_test(nprocs=_TMA_NUM_RANKS, require_multicast=True)
 def test_multimem_tma_store_plain_and_add(local_rank: int, num_ranks: int):
     """Exercise native multimem bulk broadcast and ADD on physical backings."""
@@ -618,6 +640,83 @@ def test_multimem_tma_store_plain_and_add(local_rank: int, num_ranks: int):
         add(src, mcast_buf)
         _synchronize_ranks(group)
         _assert_all_ranks_equal(local_backing, expected_add, group, "ADD after zero fill")
+    finally:
+        try:
+            if allocator is not None:
+                allocator.close()
+        finally:
+            dist.destroy_process_group()
+
+
+@pytest.mark.skipif(not _has_cuda_toolkit_13_1(), reason="Requires CUDA Toolkit 13.1+")
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@distributed_test(nprocs=_TMA_NUM_RANKS, require_multicast=True)
+def test_multimem_tma_reduce_dtype_matrix(local_rank: int, num_ranks: int):
+    """Run every exposed floating-point bulk reduction on physical backings."""
+    from tilelang.distributed.host import init_dist
+
+    rank, _, group = init_dist(local_rank, num_ranks)
+    allocator = None
+    try:
+        cases = (
+            (T.float16, torch.float16, T.MultimemReduceOp.ADD, "add_f16"),
+            (T.float16, torch.float16, T.MultimemReduceOp.MIN, "min_f16"),
+            (T.float16, torch.float16, T.MultimemReduceOp.MAX, "max_f16"),
+            (T.bfloat16, torch.bfloat16, T.MultimemReduceOp.ADD, "add_bf16"),
+            (T.bfloat16, torch.bfloat16, T.MultimemReduceOp.MIN, "min_bf16"),
+            (T.bfloat16, torch.bfloat16, T.MultimemReduceOp.MAX, "max_bf16"),
+        )
+        allocator = tilelang.get_allocator(
+            size=2**22,
+            device=f"cuda:{local_rank}",
+            is_distributed=True,
+            local_rank=local_rank,
+            num_local_ranks=num_ranks,
+            group=group,
+            use_vmm=True,
+            mcast_size=len(cases) * _TMA_N * 2 + 4096,
+        )
+        assert allocator._use_vmm
+        assert allocator._use_multicast
+
+        pass_configs = {
+            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+        }
+        index = torch.arange(_TMA_N, dtype=torch.float32, device=f"cuda:{local_rank}")
+        base = index.remainder(8)
+
+        for tl_dtype, torch_dtype, reduce_op, helper_suffix in cases:
+            kernel = tilelang.compile(
+                _multimem_tma_reduce_kernel(_TMA_N, _THREADS, tl_dtype, reduce_op),
+                pass_configs=pass_configs,
+                compile_once=True,
+                compile_group=group,
+            )
+            kernel.initialize(allocator=allocator)
+            assert f"tl::multimem::cp_reduce_async_bulk_{helper_suffix}" in kernel.get_kernel_source()
+
+            mcast_buf, local_backing = allocator._allocate_mcast_tensor((_TMA_N,), torch_dtype)
+            src = (base + float(rank * 2)).to(torch_dtype)
+            if reduce_op == T.MultimemReduceOp.ADD:
+                local_backing.zero_()
+                expected = base * num_ranks + float(num_ranks * (num_ranks - 1))
+            elif reduce_op == T.MultimemReduceOp.MIN:
+                local_backing.fill_(100)
+                expected = base
+            else:
+                local_backing.fill_(-100)
+                expected = base + float((num_ranks - 1) * 2)
+
+            _synchronize_ranks(group)
+            kernel(src, mcast_buf)
+            _synchronize_ranks(group)
+            _assert_all_ranks_equal(
+                local_backing,
+                expected.to(torch_dtype),
+                group,
+                helper_suffix,
+            )
     finally:
         try:
             if allocator is not None:

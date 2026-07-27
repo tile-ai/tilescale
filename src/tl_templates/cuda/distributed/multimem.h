@@ -502,11 +502,19 @@ template <> struct SignalAdd<int32_t> {
                  : "memory");
   }
 };
+template <> struct SignalAdd<uint64_t> {
+  TL_DEVICE static void run(void *mcast_ptr, uint64_t val) {
+    asm volatile("multimem.red.release.sys.global.add.u64 [%0], %1;"
+                 :
+                 : "l"(mcast_ptr), "l"(val)
+                 : "memory");
+  }
+};
 
-// === Bulk async TMA-to-multicast (SM100+ / PTX 9.1+ / CUDA 13.1+) ===
+// === Bulk async TMA-to-multicast (SM90+ / PTX 9.1+ / CUDA 13.1+) ===
 // Both: shared::cta → global(mcast), bulk_group completion
 
-#if __CUDA_ARCH__ >= 1000 &&                                                   \
+#if __CUDA_ARCH__ >= 900 &&                                                    \
     (__CUDACC_VER_MAJOR__ > 13 ||                                              \
      (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 1))
 
@@ -530,44 +538,66 @@ TL_DEVICE void cp_reduce_async_bulk_add_f32(void *mcast_global, void *smem,
       : "memory");
 }
 
-TL_DEVICE void cp_reduce_async_bulk_min_f32(void *mcast_global, void *smem,
-                                            uint32_t size) {
-  uint32_t smem_int = smem_ptr_to_uint(smem);
-  asm volatile(
-      "multimem.cp.reduce.async.bulk.global.shared::cta.bulk_group.min.f32 "
-      "[%0], [%1], %2;\n"
-      :
-      : "l"(mcast_global), "r"(smem_int), "r"(size)
-      : "memory");
-}
-
-TL_DEVICE void cp_reduce_async_bulk_max_f32(void *mcast_global, void *smem,
-                                            uint32_t size) {
-  uint32_t smem_int = smem_ptr_to_uint(smem);
-  asm volatile(
-      "multimem.cp.reduce.async.bulk.global.shared::cta.bulk_group.max.f32 "
-      "[%0], [%1], %2;\n"
-      :
-      : "l"(mcast_global), "r"(smem_int), "r"(size)
-      : "memory");
-}
-
 TL_DEVICE void cp_reduce_async_bulk_add_f16(void *mcast_global, void *smem,
                                             uint32_t size) {
   uint32_t smem_int = smem_ptr_to_uint(smem);
-  asm volatile(
-      "multimem.cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f16x2 "
-      "[%0], [%1], %2;\n"
-      :
-      : "l"(mcast_global), "r"(smem_int), "r"(size)
-      : "memory");
+  asm volatile("multimem.cp.reduce.async.bulk.global.shared::cta.bulk_group."
+               "add.noftz.f16 "
+               "[%0], [%1], %2;\n"
+               :
+               : "l"(mcast_global), "r"(smem_int), "r"(size)
+               : "memory");
 }
 
 TL_DEVICE void cp_reduce_async_bulk_add_bf16(void *mcast_global, void *smem,
                                              uint32_t size) {
   uint32_t smem_int = smem_ptr_to_uint(smem);
+  asm volatile("multimem.cp.reduce.async.bulk.global.shared::cta.bulk_group."
+               "add.noftz.bf16 "
+               "[%0], [%1], %2;\n"
+               :
+               : "l"(mcast_global), "r"(smem_int), "r"(size)
+               : "memory");
+}
+
+TL_DEVICE void cp_reduce_async_bulk_min_f16(void *mcast_global, void *smem,
+                                            uint32_t size) {
+  uint32_t smem_int = smem_ptr_to_uint(smem);
   asm volatile(
-      "multimem.cp.reduce.async.bulk.global.shared::cta.bulk_group.add.bf16x2 "
+      "multimem.cp.reduce.async.bulk.global.shared::cta.bulk_group.min.f16 "
+      "[%0], [%1], %2;\n"
+      :
+      : "l"(mcast_global), "r"(smem_int), "r"(size)
+      : "memory");
+}
+
+TL_DEVICE void cp_reduce_async_bulk_max_f16(void *mcast_global, void *smem,
+                                            uint32_t size) {
+  uint32_t smem_int = smem_ptr_to_uint(smem);
+  asm volatile(
+      "multimem.cp.reduce.async.bulk.global.shared::cta.bulk_group.max.f16 "
+      "[%0], [%1], %2;\n"
+      :
+      : "l"(mcast_global), "r"(smem_int), "r"(size)
+      : "memory");
+}
+
+TL_DEVICE void cp_reduce_async_bulk_min_bf16(void *mcast_global, void *smem,
+                                             uint32_t size) {
+  uint32_t smem_int = smem_ptr_to_uint(smem);
+  asm volatile(
+      "multimem.cp.reduce.async.bulk.global.shared::cta.bulk_group.min.bf16 "
+      "[%0], [%1], %2;\n"
+      :
+      : "l"(mcast_global), "r"(smem_int), "r"(size)
+      : "memory");
+}
+
+TL_DEVICE void cp_reduce_async_bulk_max_bf16(void *mcast_global, void *smem,
+                                             uint32_t size) {
+  uint32_t smem_int = smem_ptr_to_uint(smem);
+  asm volatile(
+      "multimem.cp.reduce.async.bulk.global.shared::cta.bulk_group.max.bf16 "
       "[%0], [%1], %2;\n"
       :
       : "l"(mcast_global), "r"(smem_int), "r"(size)
@@ -589,22 +619,36 @@ TL_DEVICE void cp_reduce_async_bulk_add_f32(void *mcast_global, void *smem,
   (void)size;
   asm("trap;");
 }
-TL_DEVICE void cp_reduce_async_bulk_min_f32(void *mcast_global, void *smem,
-                                            uint32_t size) {
-  (void)mcast_global;
-  (void)smem;
-  (void)size;
-  asm("trap;");
-}
-TL_DEVICE void cp_reduce_async_bulk_max_f32(void *mcast_global, void *smem,
-                                            uint32_t size) {
-  (void)mcast_global;
-  (void)smem;
-  (void)size;
-  asm("trap;");
-}
 TL_DEVICE void cp_reduce_async_bulk_add_f16(void *mcast_global, void *smem,
                                             uint32_t size) {
+  (void)mcast_global;
+  (void)smem;
+  (void)size;
+  asm("trap;");
+}
+TL_DEVICE void cp_reduce_async_bulk_min_f16(void *mcast_global, void *smem,
+                                            uint32_t size) {
+  (void)mcast_global;
+  (void)smem;
+  (void)size;
+  asm("trap;");
+}
+TL_DEVICE void cp_reduce_async_bulk_max_f16(void *mcast_global, void *smem,
+                                            uint32_t size) {
+  (void)mcast_global;
+  (void)smem;
+  (void)size;
+  asm("trap;");
+}
+TL_DEVICE void cp_reduce_async_bulk_min_bf16(void *mcast_global, void *smem,
+                                             uint32_t size) {
+  (void)mcast_global;
+  (void)smem;
+  (void)size;
+  asm("trap;");
+}
+TL_DEVICE void cp_reduce_async_bulk_max_bf16(void *mcast_global, void *smem,
+                                             uint32_t size) {
   (void)mcast_global;
   (void)smem;
   (void)size;
@@ -618,7 +662,7 @@ TL_DEVICE void cp_reduce_async_bulk_add_bf16(void *mcast_global, void *smem,
   asm("trap;");
 }
 
-#endif // SM100+ and CUDA 13.1+
+#endif // SM90+ and CUDA 13.1+
 
 } // namespace multimem
 } // namespace tl
