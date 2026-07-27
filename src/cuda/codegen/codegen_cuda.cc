@@ -2662,8 +2662,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     print_extern_call_stmt("tl::clc_try_cancel");
   } else if (op->op.same_as(tl::clc_try_cancel_multicast())) {
     need_cluster_h_ = true;
-  } else if (op->op.same_as(tl::clc_is_canceled())) {
     print_extern_call_stmt("tl::clc_try_cancel_multicast");
+  } else if (op->op.same_as(tl::clc_is_canceled())) {
     need_cluster_h_ = true;
     os << "tl::clc_is_canceled(" << this->PrintExpr(op->args[0]) << ")";
   } else if (op->op.same_as(tl::clc_get_first_ctaid_x())) {
