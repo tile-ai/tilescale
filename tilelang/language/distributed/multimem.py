@@ -52,19 +52,26 @@ def _multimem_impl(src, dst, mode: _MultimemMode, reduce_op: MultimemReduceOp = 
 def multimem_ld_reduce(src, dst, reduce_op: MultimemReduceOp = MultimemReduceOp.ADD):
     """Load-reduce from multicast address into local buffer.
 
-    Uses T.copy's layout inference to handle fragment layouts correctly.
-    Each thread issues 128-bit multimem instructions after vectorization.
+    The direct CUDA path uses scalar, 64-bit, or 128-bit multimem instructions
+    according to alignment and tail predicates. Source and destination regions
+    must have matching rank, extent, and scalar dtype. Float16 and bfloat16 use
+    packed x2 instructions, so their local region must cover the full fragment,
+    their last extent must be even, and multicast rows must be pair-aligned.
 
     Args:
         src: Multicast source (Buffer, BufferLoad with slice, or BufferRegion)
         dst: Local destination (Buffer, BufferLoad with slice, or BufferRegion)
-        reduce_op: Reduction operation: 0=ADD, 1=MIN, 2=MAX.
+        reduce_op: Reduction operation. The direct CUDA path currently supports
+            ADD; unsupported PTX type/operation combinations are rejected
+            during lowering.
     """
     return _multimem_impl(src, dst, mode=_MultimemMode.LD_REDUCE, reduce_op=reduce_op)
 
 
 def multimem_st(src, dst):
     """Store to multicast address (broadcast to all ranks).
+
+    Region, dtype, and packed x2 constraints match ``multimem_ld_reduce``.
 
     Args:
         src: Local source (Buffer, BufferLoad with slice, or BufferRegion)
@@ -76,10 +83,14 @@ def multimem_st(src, dst):
 def multimem_red(src, dst, reduce_op: MultimemReduceOp = MultimemReduceOp.ADD):
     """Reduce into multicast address (accumulate without read-back).
 
+    Region, dtype, and packed x2 constraints match ``multimem_ld_reduce``.
+
     Args:
         src: Local source (Buffer, BufferLoad with slice, or BufferRegion)
         dst: Multicast destination (Buffer, BufferLoad with slice, or BufferRegion)
-        reduce_op: Reduction operation: 0=ADD, 1=MIN, 2=MAX.
+        reduce_op: Reduction operation. The direct CUDA path currently supports
+            ADD; unsupported PTX type/operation combinations are rejected
+            during lowering.
     """
     return _multimem_impl(src, dst, mode=_MultimemMode.RED, reduce_op=reduce_op)
 

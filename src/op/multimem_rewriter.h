@@ -36,6 +36,45 @@ static inline std::string GetReduceOpStr(int reduce_op) {
   }
 }
 
+class PlainMulticastAccessFinder : public StmtExprVisitor {
+public:
+  explicit PlainMulticastAccessFinder(Buffer target)
+      : target_(std::move(target)) {}
+
+  bool Find(const Stmt &stmt) {
+    VisitStmt(stmt);
+    return found_;
+  }
+
+private:
+  Buffer target_;
+  bool found_{false};
+
+  void VisitStmt_(const BufferStoreNode *op) override {
+    if (op->buffer.same_as(target_)) {
+      found_ = true;
+      return;
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  void VisitExpr_(const BufferLoadNode *op) override {
+    if (op->buffer.same_as(target_)) {
+      found_ = true;
+      return;
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  void VisitExpr_(const CallNode *op) override {
+    // BufferLoad under address_of denotes an address; it is not a plain load.
+    if (op->op.same_as(builtin::address_of())) {
+      return;
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+};
+
 /*!
  * \brief Rewrites BufferLoad/BufferStore involving a multicast buffer
  *        into multimem call_extern instructions.
@@ -57,7 +96,14 @@ public:
   MultimemRewriter(Buffer mcast_buf, MultimemMode mode, int reduce_op)
       : mcast_buf_(std::move(mcast_buf)), mode_(mode), reduce_op_(reduce_op) {}
 
-  Stmt Rewrite(Stmt stmt) { return VisitStmt(std::move(stmt)); }
+  Stmt Rewrite(Stmt stmt) {
+    Stmt result = VisitStmt(std::move(stmt));
+    ICHECK(!PlainMulticastAccessFinder(mcast_buf_).Find(result))
+        << "multimem lowering left a plain multicast BufferLoad/BufferStore; "
+           "this access pattern cannot be represented safely:\n"
+        << result;
+    return result;
+  }
 
 protected:
   /*!
@@ -81,27 +127,46 @@ protected:
   }
 
   /*!
-   * \brief Handle scalar BufferStore with Ramp indices (fallback).
+   * \brief Handle scalar BufferStore and Ramp-indexed vector accesses.
    */
   Stmt VisitStmt_(const BufferStoreNode *op) override {
     if (mode_ == MultimemMode::kLdReduce) {
-      if (auto *load = op->value.as<BufferLoadNode>()) {
-        if (load->buffer.same_as(mcast_buf_)) {
-          int lanes = GetLanes(load->indices);
-          if (lanes > 1) {
-            return MakeMultimemCall(op->buffer, op->indices, load->buffer,
-                                    load->indices, lanes);
-          }
+      const BufferLoadNode *load = nullptr;
+      Optional<PrimExpr> source_predicate;
+      if (MatchLdReduceValue(op->value, &load, &source_predicate) &&
+          load->buffer.same_as(mcast_buf_)) {
+        int local_lanes = GetLanes(op->indices);
+        int mcast_lanes = GetLanes(load->indices);
+        ICHECK_EQ(local_lanes, mcast_lanes)
+            << "multimem load-reduce requires matching vector lanes";
+        if (!source_predicate.defined()) {
+          return MakeRampMultimemCalls(op->buffer, op->indices, load->buffer,
+                                       load->indices, local_lanes);
         }
+
+        Array<Stmt> scalar_calls;
+        for (int i = 0; i < local_lanes; ++i) {
+          Array<PrimExpr> local_indices = ExtractLaneIndices(op->indices, i);
+          Array<PrimExpr> mcast_indices = ExtractLaneIndices(load->indices, i);
+          PrimExpr lane_valid = ExtractLane(source_predicate.value(), i);
+          Stmt call = MakeMultimemCall(op->buffer, local_indices, load->buffer,
+                                       mcast_indices, 1);
+          Stmt zero = BufferStore(op->buffer, make_zero(op->buffer->dtype),
+                                  local_indices);
+          scalar_calls.push_back(IfThenElse(lane_valid, call, zero));
+        }
+        return scalar_calls.size() == 1 ? scalar_calls[0]
+                                        : SeqStmt(std::move(scalar_calls));
       }
     } else {
       if (op->buffer.same_as(mcast_buf_)) {
         if (auto *load = op->value.as<BufferLoadNode>()) {
-          int lanes = GetLanes(op->indices);
-          if (lanes > 1) {
-            return MakeMultimemCall(load->buffer, load->indices, op->buffer,
-                                    op->indices, lanes);
-          }
+          int local_lanes = GetLanes(load->indices);
+          int mcast_lanes = GetLanes(op->indices);
+          ICHECK_EQ(local_lanes, mcast_lanes)
+              << "multimem store/reduce requires matching vector lanes";
+          return MakeRampMultimemCalls(load->buffer, load->indices, op->buffer,
+                                       op->indices, local_lanes);
         }
       }
     }
@@ -109,33 +174,39 @@ protected:
   }
 
 private:
-  class BufferLoadFinder : public ExprVisitor {
-  public:
-    explicit BufferLoadFinder(Buffer target) : target_(std::move(target)) {}
-
-    const BufferLoadNode *Find(const PrimExpr &expr) {
-      VisitExpr(expr);
-      return result_;
-    }
-
-  private:
-    Buffer target_;
-    const BufferLoadNode *result_{nullptr};
-
-    void VisitExpr_(const BufferLoadNode *op) override {
-      if (result_ != nullptr)
-        return;
-      if (op->buffer.same_as(target_)) {
-        result_ = op;
-        return;
-      }
-      ExprVisitor::VisitExpr_(op);
-    }
-  };
-
   Buffer mcast_buf_;
   MultimemMode mode_;
   int reduce_op_;
+
+  bool IsZeroValue(const PrimExpr &value) const {
+    if (is_zero(value)) {
+      return true;
+    }
+    if (auto *float_imm = value.as<FloatImmNode>()) {
+      return float_imm->value == 0.0;
+    }
+    return false;
+  }
+
+  bool MatchLdReduceValue(const PrimExpr &value, const BufferLoadNode **load,
+                          Optional<PrimExpr> *predicate) const {
+    if (auto *direct_load = value.as<BufferLoadNode>()) {
+      *load = direct_load;
+      *predicate = std::nullopt;
+      return true;
+    }
+    if (auto *call = value.as<CallNode>()) {
+      if (call->op.same_as(builtin::if_then_else()) && call->args.size() == 3 &&
+          IsZeroValue(call->args[2])) {
+        if (auto *guarded_load = call->args[1].as<BufferLoadNode>()) {
+          *load = guarded_load;
+          *predicate = call->args[0];
+          return true;
+        }
+      }
+    }
+    return false;
+  }
 
   /*!
    * \brief Try to rewrite a kVectorized for-loop containing a mcast
@@ -143,29 +214,34 @@ private:
    * doesn't match.
    */
   Stmt TryRewriteVectorizedLoop(const ForNode *op, int lanes) {
-    // The body should be a single BufferStore (possibly wrapped in IfThenElse)
+    // The body should be a single BufferStore, possibly wrapped in one or more
+    // predicates without else branches.
     const BufferStoreNode *store = nullptr;
     Stmt body = op->body;
-
-    // Unwrap IfThenElse if present
-    if (auto *ite = body.as<IfThenElseNode>()) {
-      store = ite->then_case.as<BufferStoreNode>();
-    } else {
-      store = body.as<BufferStoreNode>();
+    Array<PrimExpr> predicates;
+    while (auto *ite = body.as<IfThenElseNode>()) {
+      if (ite->else_case.defined()) {
+        return Stmt();
+      }
+      predicates.push_back(ite->condition);
+      body = ite->then_case;
     }
+    store = body.as<BufferStoreNode>();
 
     if (!store)
       return Stmt();
 
-    PrimExpr store_value = store->value;
     const BufferLoadNode *load = nullptr;
+    Optional<PrimExpr> source_predicate;
     if (mode_ == MultimemMode::kLdReduce) {
-      load = BufferLoadFinder(mcast_buf_).Find(store_value);
+      if (!MatchLdReduceValue(store->value, &load, &source_predicate)) {
+        return Stmt();
+      }
     } else {
-      load = store_value.as<BufferLoadNode>();
+      load = store->value.as<BufferLoadNode>();
+      if (!load)
+        return Stmt();
     }
-    if (!load)
-      return Stmt();
 
     // Check if this involves the mcast buffer
     bool matches = false;
@@ -195,34 +271,149 @@ private:
     if (!matches)
       return Stmt();
 
-    // Substitute vec_var = 0 to get the base address
+    // Split widths larger than 128 bits into supported V4/V2/V1 calls.  This
+    // handles targets where the generic vectorizer selects V8 f32.
     Var vec_var = op->loop_var;
+    Array<Stmt> vector_calls;
+    int lane_offset = 0;
+    while (lane_offset < lanes) {
+      int chunk_lanes = NextSupportedWidth(lanes - lane_offset);
+      PrimExpr lane = op->min + IntImm(vec_var.dtype(), lane_offset);
+      vector_calls.push_back(MakeMultimemCall(
+          *local_buf_ptr, SubstituteIndices(*local_indices_ptr, vec_var, lane),
+          *mc_buf_ptr, SubstituteIndices(*mc_indices_ptr, vec_var, lane),
+          chunk_lanes));
+      lane_offset += chunk_lanes;
+    }
+    Stmt vector_path = vector_calls.size() == 1
+                           ? vector_calls[0]
+                           : SeqStmt(std::move(vector_calls));
+
+    if (predicates.empty() && !source_predicate.defined()) {
+      return vector_path;
+    }
+
+    // A wide call is legal only if every original predicate holds for every
+    // lane.  Otherwise retain the predicates and issue scalar multimem calls.
+    PrimExpr all_lanes_valid = make_const(DataType::Bool(), true);
+    Array<Stmt> scalar_calls;
+    for (int i = 0; i < lanes; ++i) {
+      PrimExpr lane = op->min + IntImm(vec_var.dtype(), i);
+      Map<Var, PrimExpr> vmap;
+      vmap.Set(vec_var, lane);
+      PrimExpr statement_valid = make_const(DataType::Bool(), true);
+      for (const auto &predicate : predicates) {
+        statement_valid =
+            And(statement_valid, ExtractLane(Substitute(predicate, vmap), i));
+      }
+      PrimExpr source_valid = make_const(DataType::Bool(), true);
+      if (source_predicate.defined()) {
+        source_valid =
+            ExtractLane(Substitute(source_predicate.value(), vmap), i);
+      }
+      all_lanes_valid =
+          And(all_lanes_valid, And(statement_valid, source_valid));
+
+      Array<PrimExpr> local_indices =
+          SubstituteIndices(*local_indices_ptr, vec_var, lane);
+      Stmt scalar_call = MakeMultimemCall(
+          *local_buf_ptr, local_indices, *mc_buf_ptr,
+          SubstituteIndices(*mc_indices_ptr, vec_var, lane), 1);
+      Stmt lane_action = scalar_call;
+      if (source_predicate.defined()) {
+        Stmt zero = BufferStore(
+            *local_buf_ptr, make_zero((*local_buf_ptr)->dtype), local_indices);
+        lane_action = IfThenElse(source_valid, scalar_call, zero);
+      }
+      if (!predicates.empty()) {
+        lane_action = IfThenElse(statement_valid, lane_action);
+      }
+      scalar_calls.push_back(lane_action);
+    }
+    Stmt scalar_path = scalar_calls.size() == 1
+                           ? scalar_calls[0]
+                           : SeqStmt(std::move(scalar_calls));
+    return IfThenElse(all_lanes_valid, vector_path, scalar_path);
+  }
+
+  static int NextSupportedWidth(int remaining) {
+    if (remaining >= 4)
+      return 4;
+    if (remaining >= 2)
+      return 2;
+    return 1;
+  }
+
+  Array<PrimExpr> SubstituteIndices(const Array<PrimExpr> &indices,
+                                    const Var &var,
+                                    const PrimExpr &value) const {
     Map<Var, PrimExpr> vmap;
-    vmap.Set(vec_var, IntImm(vec_var.dtype(), 0));
-
-    Array<PrimExpr> local_base_indices;
-    for (const auto &idx : *local_indices_ptr) {
-      local_base_indices.push_back(Substitute(idx, vmap));
+    vmap.Set(var, value);
+    Array<PrimExpr> result;
+    for (const auto &index : indices) {
+      result.push_back(Substitute(index, vmap));
     }
-    Array<PrimExpr> mc_base_indices;
-    for (const auto &idx : *mc_indices_ptr) {
-      mc_base_indices.push_back(Substitute(idx, vmap));
-    }
-
-    return MakeMultimemCall(*local_buf_ptr, local_base_indices, *mc_buf_ptr,
-                            mc_base_indices, lanes);
+    return result;
   }
 
   /*!
    * \brief Get the vector lanes from Ramp indices.
    */
   int GetLanes(const Array<PrimExpr> &indices) const {
-    if (indices.size() == 1) {
-      if (auto *ramp = indices[0].as<RampNode>()) {
-        return static_cast<int>(ramp->lanes.as<IntImmNode>()->value);
+    int lanes = 1;
+    for (const auto &index : indices) {
+      int index_lanes = index.dtype().lanes();
+      if (index_lanes > 1) {
+        ICHECK(lanes == 1 || lanes == index_lanes)
+            << "multimem indices have inconsistent vector lanes";
+        lanes = index_lanes;
       }
     }
-    return 1;
+    return lanes;
+  }
+
+  Array<PrimExpr> ExtractLaneIndices(const Array<PrimExpr> &indices,
+                                     int lane_offset) const {
+    Array<PrimExpr> result;
+    for (const auto &index : indices) {
+      if (auto *ramp = index.as<RampNode>()) {
+        result.push_back(ramp->base + ramp->stride * lane_offset);
+      } else if (auto *broadcast = index.as<BroadcastNode>()) {
+        result.push_back(broadcast->value);
+      } else if (index.dtype().lanes() > 1) {
+        result.push_back(Shuffle::ExtractElement(index, lane_offset));
+      } else {
+        result.push_back(index);
+      }
+    }
+    return result;
+  }
+
+  PrimExpr ExtractLane(const PrimExpr &value, int lane) const {
+    if (auto *broadcast = value.as<BroadcastNode>()) {
+      return broadcast->value;
+    }
+    if (value.dtype().lanes() > 1) {
+      return Shuffle::ExtractElement(value, lane);
+    }
+    return value;
+  }
+
+  Stmt MakeRampMultimemCalls(const Buffer &local_buf,
+                             const Array<PrimExpr> &local_indices,
+                             const Buffer &mc_buf,
+                             const Array<PrimExpr> &mc_indices,
+                             int lanes) const {
+    Array<Stmt> calls;
+    int lane_offset = 0;
+    while (lane_offset < lanes) {
+      int chunk_lanes = NextSupportedWidth(lanes - lane_offset);
+      calls.push_back(MakeMultimemCall(
+          local_buf, ExtractLaneIndices(local_indices, lane_offset), mc_buf,
+          ExtractLaneIndices(mc_indices, lane_offset), chunk_lanes));
+      lane_offset += chunk_lanes;
+    }
+    return calls.size() == 1 ? calls[0] : SeqStmt(std::move(calls));
   }
 
   /*!
@@ -281,11 +472,11 @@ private:
   }
 
   std::string DTypeToTag(DataType dtype) const {
-    if (dtype.is_float() && dtype.bits() == 32)
+    if (dtype.lanes() == 1 && dtype.is_float() && dtype.bits() == 32)
       return "float";
-    if (dtype.is_float16())
+    if (dtype.lanes() == 1 && dtype.is_float16())
       return "half_t";
-    if (dtype.is_bfloat16())
+    if (dtype.lanes() == 1 && dtype.is_bfloat16())
       return "bfloat16_t";
     LOG(FATAL) << "Unsupported dtype for multimem: " << dtype;
     return "";

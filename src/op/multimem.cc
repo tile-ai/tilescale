@@ -20,6 +20,7 @@
 #include "../transform/common/loop_parallel_transform_utils.h"
 #include "../transform/loop_partition.h"
 #include "../transform/loop_vectorize.h"
+#include "distributed.h"
 #include "multimem_rewriter.h"
 #include "operator.h"
 #include "utils.h"
@@ -32,11 +33,11 @@ using namespace tirx;
 namespace {
 
 std::string MultimemDTypeToTag(DataType dtype) {
-  if (dtype.is_float() && dtype.bits() == 32)
+  if (dtype.lanes() == 1 && dtype.is_float() && dtype.bits() == 32)
     return "float";
-  if (dtype.is_float16())
+  if (dtype.lanes() == 1 && dtype.is_float16())
     return "half_t";
-  if (dtype.is_bfloat16())
+  if (dtype.lanes() == 1 && dtype.is_bfloat16())
     return "bfloat16_t";
   LOG(FATAL) << "Unsupported dtype for multimem: " << dtype;
   return "";
@@ -119,6 +120,194 @@ Array<PrimExpr> UnflattenIndex(PrimExpr flat, const Array<PrimExpr> &shape,
   return indices;
 }
 
+void RequireRegionInBounds(const Buffer &buffer, const Array<Range> &ranges,
+                           arith::Analyzer *analyzer, const char *description) {
+  ICHECK_EQ(ranges.size(), buffer->shape.size())
+      << description << " region rank must match buffer rank";
+  for (size_t i = 0; i < ranges.size(); ++i) {
+    PrimExpr lower = analyzer->Simplify(ranges[i]->min);
+    PrimExpr upper = analyzer->Simplify(ranges[i]->min + ranges[i]->extent);
+    ICHECK(
+        analyzer->CanProve(lower >= 0, arith::ProofStrength::kSymbolicBound) &&
+        analyzer->CanProve(upper <= buffer->shape[i],
+                           arith::ProofStrength::kSymbolicBound))
+        << description << " region must be provably in bounds at dimension "
+        << i << ", got [" << lower << ", " << upper << ") for extent "
+        << buffer->shape[i];
+  }
+}
+
+class RuntimeDistributedValueFinder : public ExprVisitor {
+public:
+  bool Find(const PrimExpr &expr) {
+    found_ = false;
+    VisitExpr(expr);
+    return found_;
+  }
+
+private:
+  bool found_{false};
+
+  void VisitExpr_(const CallNode *op) override {
+    if (op->op.same_as(tl::get_rank()) || op->op.same_as(tl::get_num_ranks())) {
+      found_ = true;
+      return;
+    }
+    ExprVisitor::VisitExpr_(op);
+  }
+};
+
+bool HasRuntimeDependentValue(const PrimExpr &expr, arith::Analyzer *analyzer) {
+  if (RuntimeDistributedValueFinder().Find(expr)) {
+    return true;
+  }
+  bool has_unbound_var = false;
+  PostOrderVisit(expr, [&](const ObjectRef &node) {
+    if (const auto *var_node = node.as<VarNode>()) {
+      Var var = ffi::GetRef<Var>(var_node);
+      has_unbound_var =
+          has_unbound_var || !analyzer->const_int_bound.IsBound(var);
+    }
+  });
+  return has_unbound_var;
+}
+
+Optional<PrimExpr> GetDynamicRegionInBoundsPredicate(const Buffer &buffer,
+                                                     const Array<Range> &ranges,
+                                                     arith::Analyzer *analyzer,
+                                                     const char *description) {
+  ICHECK_EQ(ranges.size(), buffer->shape.size())
+      << description << " region rank must match buffer rank";
+
+  Array<PrimExpr> dynamic_conditions;
+  for (size_t i = 0; i < ranges.size(); ++i) {
+    PrimExpr lower = analyzer->Simplify(ranges[i]->min);
+    PrimExpr upper = analyzer->Simplify(ranges[i]->min + ranges[i]->extent);
+    PrimExpr conditions[] = {lower >= 0, upper <= buffer->shape[i]};
+    PrimExpr violations[] = {-lower, upper - buffer->shape[i]};
+    for (size_t j = 0; j < 2; ++j) {
+      if (analyzer->CanProve(conditions[j],
+                             arith::ProofStrength::kSymbolicBound)) {
+        continue;
+      }
+
+      // Dynamic distributed offsets and whole-tile partitions are checked at
+      // runtime.  A statically reachable partial tile (for example, the last
+      // CTA of a ceil-divided packed launch) must fail closed.
+      arith::ConstIntBound violation_bound =
+          analyzer->const_int_bound(violations[j]);
+      bool has_runtime_value =
+          HasRuntimeDependentValue(violations[j], analyzer);
+      PrimExpr region_extent = analyzer->Simplify(ranges[i]->extent);
+      bool is_aligned_partition =
+          analyzer->CanProve(region_extent > 0,
+                             arith::ProofStrength::kSymbolicBound) &&
+          analyzer->CanProveEqual(FloorMod(lower, region_extent), 0) &&
+          analyzer->CanProveEqual(FloorMod(buffer->shape[i], region_extent), 0);
+      ICHECK(has_runtime_value || is_aligned_partition ||
+             violation_bound->max_value <= 0)
+          << description
+          << " region must be provably in bounds when its static range is "
+             "known; got ["
+          << lower << ", " << upper << ") for extent " << buffer->shape[i]
+          << " at dimension " << i;
+      dynamic_conditions.push_back(conditions[j]);
+    }
+  }
+
+  if (dynamic_conditions.empty()) {
+    return std::nullopt;
+  }
+  PrimExpr predicate = dynamic_conditions[0];
+  for (size_t i = 1; i < dynamic_conditions.size(); ++i) {
+    predicate = And(predicate, dynamic_conditions[i]);
+  }
+  return analyzer->Simplify(predicate);
+}
+
+Optional<PrimExpr> ValidatePacked16BitRegions(const Buffer &local_buf,
+                                              const Array<Range> &local_range,
+                                              const Buffer &mcast_buf,
+                                              const Array<Range> &mcast_range,
+                                              arith::Analyzer *analyzer) {
+  ICHECK_EQ(local_range.size(), mcast_range.size())
+      << "multimem packed x2 lowering expects matching region rank";
+  ICHECK(!local_range.empty())
+      << "multimem packed x2 lowering expects a non-scalar region";
+
+  for (size_t i = 0; i < local_range.size(); ++i) {
+    ICHECK(
+        analyzer->CanProveEqual(local_range[i]->extent, mcast_range[i]->extent))
+        << "multimem packed x2 lowering expects matching region extents";
+    ICHECK(analyzer->CanProve(local_range[i]->extent > 0,
+                              arith::ProofStrength::kSymbolicBound))
+        << "multimem packed x2 lowering requires provably positive region "
+           "extents, got "
+        << local_range[i]->extent << " at dimension " << i;
+  }
+
+  RequireRegionInBounds(local_buf, local_range, analyzer,
+                        "multimem packed local");
+  Optional<PrimExpr> mcast_in_bounds = GetDynamicRegionInBoundsPredicate(
+      mcast_buf, mcast_range, analyzer, "multimem packed multicast");
+
+  const size_t last = local_range.size() - 1;
+  PrimExpr last_extent = analyzer->Simplify(local_range[last]->extent);
+
+  for (size_t i = 0; i < local_range.size(); ++i) {
+    ICHECK(analyzer->CanProveEqual(local_range[i]->min, 0))
+        << "multimem packed x2 lowering requires local regions to start at "
+           "zero because non-zero fragment slices need a different thread "
+           "ownership mapping; got min "
+        << local_range[i]->min << " at dimension " << i;
+    ICHECK(analyzer->CanProveEqual(local_range[i]->extent, local_buf->shape[i]))
+        << "multimem packed x2 lowering requires the local region to cover "
+           "the entire fragment buffer; got extent "
+        << local_range[i]->extent << " for buffer extent "
+        << local_buf->shape[i] << " at dimension " << i;
+  }
+
+  ICHECK(analyzer->CanProveEqual(FloorMod(last_extent, 2), 0))
+      << "multimem packed x2 lowering requires the last dimension extent to "
+         "be provably divisible by 2, got "
+      << last_extent;
+
+  Array<PrimExpr> start_indices;
+  for (const auto &range : mcast_range) {
+    start_indices.push_back(range->min);
+  }
+  Array<PrimExpr> start_offsets = mcast_buf->ElemOffset(start_indices);
+  ICHECK_EQ(start_offsets.size(), 1)
+      << "multimem packed x2 lowering requires a flat multicast address";
+  PrimExpr start_offset = analyzer->Simplify(start_offsets[0]);
+  ICHECK(analyzer->CanProveEqual(FloorMod(start_offset, 2), 0))
+      << "multimem packed x2 lowering requires a 4-byte-aligned multicast "
+         "start address, got element offset "
+      << start_offset;
+
+  for (size_t i = 0; i < mcast_range.size(); ++i) {
+    Array<PrimExpr> next_indices = start_indices;
+    next_indices.Set(i, next_indices[i] + 1);
+    Array<PrimExpr> next_offsets = mcast_buf->ElemOffset(next_indices);
+    ICHECK_EQ(next_offsets.size(), 1)
+        << "multimem packed x2 lowering requires a flat multicast address";
+    PrimExpr physical_stride =
+        analyzer->Simplify(next_offsets[0] - start_offset);
+    if (i == last) {
+      ICHECK(analyzer->CanProveEqual(physical_stride, 1))
+          << "multimem packed x2 lowering requires contiguous pairs in the "
+             "last dimension, got physical stride "
+          << physical_stride;
+    } else if (!analyzer->CanProveEqual(mcast_range[i]->extent, 1)) {
+      ICHECK(analyzer->CanProveEqual(FloorMod(physical_stride, 2), 0))
+          << "multimem packed x2 lowering requires an even physical stride "
+             "for each varying leading dimension, got stride "
+          << physical_stride << " at dimension " << i;
+    }
+  }
+  return mcast_in_bounds;
+}
+
 } // namespace
 
 // === MultimemOp Constructor ===
@@ -141,8 +330,36 @@ MultimemOp::MultimemOp(Array<PrimExpr> args,
   node->src_range = rgs[0];
   node->dst_range = rgs[1];
 
+  ICHECK_EQ(node->src_range.size(), node->dst_range.size())
+      << "multimem expects source and destination regions with matching rank";
+  ICHECK_EQ(node->src_range.size(), node->src->shape.size())
+      << "multimem source region rank must match source buffer rank";
+  ICHECK_EQ(node->dst_range.size(), node->dst->shape.size())
+      << "multimem destination region rank must match destination buffer rank";
+
   node->mode = static_cast<MultimemMode>(args[2].as<IntImm>().value()->value);
   node->reduce_op = args[3].as<IntImm>().value()->value;
+
+  ICHECK_EQ(node->src->dtype, node->dst->dtype)
+      << "multimem expects matching source and destination dtypes, got "
+      << node->src->dtype << " and " << node->dst->dtype;
+  if (node->mode != MultimemMode::kTmaStore &&
+      node->mode != MultimemMode::kTmaRedStore) {
+    bool supported_dtype =
+        node->src->dtype.lanes() == 1 &&
+        ((node->src->dtype.is_float() && node->src->dtype.bits() == 32) ||
+         node->src->dtype.is_float16() || node->src->dtype.is_bfloat16());
+    ICHECK(supported_dtype)
+        << "direct multimem operations require scalar float32, float16, or "
+           "bfloat16 elements, got "
+        << node->src->dtype;
+  }
+  if (node->mode == MultimemMode::kLdReduce ||
+      node->mode == MultimemMode::kRed) {
+    ICHECK_EQ(node->reduce_op, 0)
+        << "direct multimem load-reduce/reduce currently supports ADD only; "
+           "MIN/MAX are not valid for the implemented PTX type combinations";
+  }
 
   // Validate buffer scopes based on mode:
   //   ld_reduce: src=global(mcast), dst=local.fragment
@@ -314,10 +531,18 @@ LayoutMap MultimemOpNode::InferLayout(const LayoutInferArgs &T,
     return {};
   }
   if (IsPacked16BitMultimem()) {
+    Buffer local_buf = (mode == MultimemMode::kLdReduce) ? dst : src;
+    Buffer mcast_buf = (mode == MultimemMode::kLdReduce) ? src : dst;
+    const Array<Range> &local_range =
+        (mode == MultimemMode::kLdReduce) ? dst_range : src_range;
+    const Array<Range> &mcast_range =
+        (mode == MultimemMode::kLdReduce) ? src_range : dst_range;
+    ICHECK(T.analyzer != nullptr);
+    ValidatePacked16BitRegions(local_buf, local_range, mcast_buf, mcast_range,
+                               T.analyzer);
     if (mode == MultimemMode::kLdReduce) {
       return {};
     }
-    Buffer local_buf = (mode == MultimemMode::kLdReduce) ? dst : src;
     Buffer remapped_local = local_buf;
     if (T.buffer_remap.count(remapped_local)) {
       remapped_local = T.buffer_remap[remapped_local];
@@ -327,8 +552,6 @@ LayoutMap MultimemOpNode::InferLayout(const LayoutInferArgs &T,
     }
 
     PrimExpr numel = 1;
-    const Array<Range> &local_range =
-        (mode == MultimemMode::kLdReduce) ? dst_range : src_range;
     for (const auto &range : local_range) {
       numel = numel * range->extent;
     }
@@ -368,12 +591,26 @@ LayoutMap MultimemOpNode::InferLayout(const LayoutInferArgs &T,
 // MultimemRewriter
 Stmt MultimemOpNode::Lower(const LowerArgs &T,
                            arith::Analyzer *analyzer) const {
+  ICHECK_EQ(src_range.size(), dst_range.size());
+  for (size_t i = 0; i < src_range.size(); ++i) {
+    ICHECK(analyzer->CanProveEqual(src_range[i]->extent, dst_range[i]->extent))
+        << "multimem expects matching source and destination extents at "
+           "dimension "
+        << i << ", got " << src_range[i]->extent << " and "
+        << dst_range[i]->extent;
+  }
+
   if (mode == MultimemMode::kTmaStore || mode == MultimemMode::kTmaRedStore) {
     return LowerBulkCopy(T, analyzer);
   }
   if (IsPacked16BitMultimem()) {
     return LowerPacked16Bit(T, analyzer);
   }
+
+  Buffer local_buf = (mode == MultimemMode::kLdReduce) ? dst : src;
+  Array<Range> local_range =
+      (mode == MultimemMode::kLdReduce) ? dst_range : src_range;
+  RequireRegionInBounds(local_buf, local_range, analyzer, "multimem local");
 
   // Step 1-2: Create SIMT loop and fuse/transform
   auto transformed_loop = MakeTransformedSIMTLoop(analyzer);
@@ -435,10 +672,8 @@ Stmt MultimemOpNode::LowerPacked16Bit(const LowerArgs &T,
   Array<Range> mcast_range =
       (mode == MultimemMode::kLdReduce) ? src_range : dst_range;
 
-  ICHECK_EQ(local_range.size(), mcast_range.size())
-      << "multimem packed x2 lowering expects matching region rank";
-  ICHECK(!local_range.empty())
-      << "multimem packed x2 lowering expects a non-scalar region";
+  Optional<PrimExpr> mcast_in_bounds = ValidatePacked16BitRegions(
+      local_buf, local_range, mcast_buf, mcast_range, analyzer);
   const size_t ndim = local_range.size();
   ICHECK_EQ(local_buf->shape.size(), ndim)
       << "multimem packed x2 lowering expects the local region rank to match "
@@ -447,19 +682,8 @@ Stmt MultimemOpNode::LowerPacked16Bit(const LowerArgs &T,
       << "multimem packed x2 lowering expects the multicast region rank to "
          "match the buffer rank";
 
-  for (size_t i = 0; i < ndim; ++i) {
-    ICHECK(analyzer->CanProve(local_range[i]->extent == mcast_range[i]->extent,
-                              arith::ProofStrength::kSymbolicBound))
-        << "multimem packed x2 lowering expects matching region extents";
-  }
-
   const PrimExpr last_extent =
       analyzer->Simplify(local_range[ndim - 1]->extent);
-  if (auto *imm = last_extent.as<IntImmNode>()) {
-    ICHECK_EQ(imm->value % 2, 0)
-        << "multimem packed x2 lowering requires the last dimension extent to "
-           "be divisible by 2";
-  }
 
   Buffer remapped_local = local_buf;
   Buffer remapped_mcast = mcast_buf;
@@ -520,7 +744,29 @@ Stmt MultimemOpNode::LowerPacked16Bit(const LowerArgs &T,
   }
   Stmt body = Evaluate(Call(DataType::Handle(), builtin::call_extern(), args));
   body = IfThenElse(pair_id < total_pairs, body);
-  return For(loop_var, 0, trip_count, ForKind::kSerial, body);
+  Stmt packed_loop =
+      For(loop_var, 0, trip_count, ForKind::kSerial, std::move(body));
+  if (!mcast_in_bounds.defined()) {
+    return packed_loop;
+  }
+
+  if (mode != MultimemMode::kLdReduce) {
+    return IfThenElse(mcast_in_bounds.value(), packed_loop);
+  }
+
+  Array<PrimExpr> next_local_indices =
+      UnflattenIndex(local_offset + 1, remapped_local->shape, analyzer);
+  Array<Stmt> zero_stores{
+      BufferStore(remapped_local, make_zero(remapped_local->dtype),
+                  local_indices),
+      BufferStore(remapped_local, make_zero(remapped_local->dtype),
+                  next_local_indices),
+  };
+  Stmt zero_body =
+      IfThenElse(pair_id < total_pairs, SeqStmt(std::move(zero_stores)));
+  Stmt zero_loop =
+      For(loop_var, 0, trip_count, ForKind::kSerial, std::move(zero_body));
+  return IfThenElse(mcast_in_bounds.value(), packed_loop, zero_loop);
 }
 
 // === LowerBulkCopy ===
