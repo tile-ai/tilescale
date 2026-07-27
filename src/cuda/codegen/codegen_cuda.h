@@ -134,6 +134,10 @@ private:
   bool need_curand_kernel_h_{false};
   // whether need cluster.h
   bool need_cluster_h_{false};
+  // TileScale CUDA modules always carry distributed metadata support.
+  bool use_distributed_{true};
+  // whether need multimem.h
+  bool need_multimem_h_{false};
   // Op attribute map
   OpAttrMap<bool> op_need_warp_shuffle_ =
       Op::GetAttrMap<bool>("cuda.need_warp_shuffle");

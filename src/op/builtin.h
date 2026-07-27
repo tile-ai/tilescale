@@ -201,6 +201,12 @@ static constexpr const char *kDumpIRDir = "tl.dump_ir_path";
 DataType cuTensorMapType();
 
 /*!
+ * \brief TileLang intrinsic for creating a TMA descriptor whose global address
+ * is remapped to a peer rank using the distributed symmetric allocation table.
+ */
+TVM_DLL const Op &create_remote_tma_descriptor();
+
+/*!
  * \brief TileLang intrinsic for carrying pointer access metadata in frontend.
  *
  * Unlike `tir.builtin.tvm_access_ptr`, this op keeps a `BufferLoad` argument so
@@ -541,9 +547,9 @@ TVM_DLL const Op &fence_proxy_async();
 TVM_DLL const Op &tma_store_arrive();
 
 /*!
- * \brief Wait for TMA_STORE to finish
+ * \brief Wait for TMA_STORE progress.
  *
- * tma_store_wait()
+ * tma_store_wait(count, read)
  *
  */
 TVM_DLL const Op &tma_store_wait();
@@ -1080,6 +1086,14 @@ TVM_DLL const Op &tcgen05_after_thread_sync();
  */
 
 TVM_DLL const Op &increase_descriptor_offset();
+
+/*!
+ * \brief tilelang intrinsic for scoped uint32 atomic add with return value.
+ *
+ *  This op represents an inline PTX atom.add operation with explicit memory
+ * semantic and scope.
+ */
+TVM_DLL const Op &atom_add();
 
 /*!
  * \brief tilelang intrinsic for element-wise atomic addition.

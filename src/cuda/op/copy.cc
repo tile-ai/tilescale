@@ -13,6 +13,8 @@
 #include "cuda/op/copy.h"
 #include "layout/tcgen05_layout.h"
 #include "op/builtin.h"
+#include "op/distributed.h"
+#include "op/distributed_utils.h"
 #include "op/utils.h"
 #include "transform/common/loop_fusion_utils.h"
 #include "transform/loop_partition.h"
@@ -95,6 +97,19 @@ int64_t TMAElementsForBytes(int64_t bytes, DataType dtype) {
   ICHECK_EQ((bytes * 8) % dtype.bits(), 0)
       << bytes << " bytes cannot be represented as whole elements of " << dtype;
   return bytes * 8 / dtype.bits();
+}
+
+int64_t TMASwizzleBytes(int swizzle) {
+  if (swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B)) {
+    return 32;
+  }
+  if (swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B)) {
+    return 64;
+  }
+  if (swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B)) {
+    return 128;
+  }
+  return 0;
 }
 
 PrimExpr GetCopyMbarPhaseExpr(const Map<String, ObjectRef> &annotations,
@@ -207,19 +222,71 @@ bool GetNoImplicitAsyncCommitWait(const CopyNode &op) {
   return GetBoolAnnotation(op, attr::kAsyncCopyNoImplicitCommitWait);
 }
 
-PrimExpr GetLeaderScopeThreads(const CopyNode &op, const LowerArgs &T) {
-  if (auto val = op.annotations.Get("leader_scope_threads")) {
+PrimExpr GetRemotePEAnnotation(const CopyNode &op, const char *key) {
+  if (auto val = op.annotations.Get(key)) {
+    return Downcast<PrimExpr>(val.value());
+  }
+  return RemotePESentinel();
+}
+
+bool HasRemotePEAnnotation(const CopyNode &op) {
+  return IsRemotePE(GetRemotePEAnnotation(op, "src_pe")) ||
+         IsRemotePE(GetRemotePEAnnotation(op, "dst_pe"));
+}
+
+PrimExpr GetTmaRemotePE(const CopyNode &op, bool is_load) {
+  PrimExpr src_pe = GetRemotePEAnnotation(op, "src_pe");
+  PrimExpr dst_pe = GetRemotePEAnnotation(op, "dst_pe");
+
+  if (IsRemotePE(src_pe) && IsRemotePE(dst_pe)) {
+    LOG(FATAL) << "TMA remote copy cannot specify both src_pe and dst_pe.";
+  }
+
+  PrimExpr remote_pe = is_load ? src_pe : dst_pe;
+  PrimExpr wrong_side_pe = is_load ? dst_pe : src_pe;
+  if (IsRemotePE(wrong_side_pe)) {
+    LOG(FATAL) << "TMA remote copy can only remap the global side: "
+               << (is_load ? "src_pe" : "dst_pe")
+               << " is valid for this copy direction.";
+  }
+  return remote_pe;
+}
+
+PrimExpr GetTmaLeaderThreadExtent(const CopyNode &op, const LowerArgs &T) {
+  auto val = op.annotations.Get("leader_thread_extent");
+  if (!val) {
+    val = op.annotations.Get("leader_scope_threads");
+  }
+  if (val) {
     auto int_val = val->as<IntImmNode>();
-    ICHECK(int_val) << "T.tma_copy leader_scope_threads annotation must be an "
-                       "integer constant.";
+    ICHECK(int_val)
+        << "T.tma_copy leader_thread_extent annotation must be an integer "
+           "constant.";
     ICHECK_GT(int_val->value, 0)
-        << "T.tma_copy leader_scope_threads must be positive.";
+        << "T.tma_copy leader_thread_extent must be positive.";
     ICHECK_EQ(int_val->value % 32, 0)
-        << "T.tma_copy leader_scope_threads must be a multiple of warp size "
+        << "T.tma_copy leader_thread_extent must be a multiple of warp size "
            "(32).";
     return IntImm(DataType::Int(32), int_val->value);
   }
   return T.thread_bounds->extent;
+}
+
+bool CanProveExtentEqual(arith::Analyzer *analyzer, PrimExpr lhs,
+                         PrimExpr rhs) {
+  if (StructuralEqual()(lhs, rhs)) {
+    return true;
+  }
+  if (lhs.dtype() != rhs.dtype() && lhs.dtype().is_scalar() &&
+      rhs.dtype().is_scalar() &&
+      (lhs.dtype().is_int() || lhs.dtype().is_uint()) &&
+      (rhs.dtype().is_int() || rhs.dtype().is_uint())) {
+    DataType dtype =
+        lhs.dtype().bits() >= rhs.dtype().bits() ? lhs.dtype() : rhs.dtype();
+    lhs = Cast(dtype, lhs);
+    rhs = Cast(dtype, rhs);
+  }
+  return analyzer->CanProve(EQ(lhs, rhs));
 }
 
 bool IsContiguousRegion(const Buffer &buf, const Array<Range> &ranges,
@@ -253,6 +320,130 @@ bool IsContiguousRegion(const Buffer &buf, const Array<Range> &ranges,
     }
   }
   return true;
+}
+
+bool CanProveEqual(arith::Analyzer *analyzer, PrimExpr lhs, PrimExpr rhs) {
+  return StructuralEqual()(lhs, rhs) || analyzer->CanProve(EQ(lhs, rhs));
+}
+
+bool IsInBoundsRegion(const Buffer &buffer, const Array<Range> &ranges,
+                      arith::Analyzer *analyzer) {
+  ICHECK_EQ(buffer->shape.size(), ranges.size());
+  for (size_t i = 0; i < ranges.size(); ++i) {
+    PrimExpr start = ranges[i]->min;
+    PrimExpr end = analyzer->Simplify(start + ranges[i]->extent);
+    PrimExpr dim = buffer->shape[i];
+    if (!analyzer->CanProve(GE(start, make_zero(start.dtype()))) ||
+        !(CanProveEqual(analyzer, end, dim) ||
+          analyzer->CanProve(LE(end, dim)))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+class RemoteSIMTRewriter : public StmtExprMutator {
+public:
+  RemoteSIMTRewriter(const LowerArgs &T, Buffer src, Buffer dst,
+                     PrimExpr src_pe, PrimExpr dst_pe)
+      : T_(T), src_(src), dst_(dst), src_pe_(src_pe), dst_pe_(dst_pe) {}
+
+private:
+  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
+    BufferLoad load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
+    if (!IsRemotePE(src_pe_) || !load->buffer.same_as(src_)) {
+      return load;
+    }
+
+    PrimExpr addr = RemapRemoteAddress(
+        MakeRemappedAddress(T_, src_, load->indices), src_pe_);
+    return Call(load.dtype(), builtin::call_extern(),
+                {StringImm("tl::remote_load"), addr, make_zero(load.dtype())});
+  }
+
+  Stmt VisitStmt_(const BufferStoreNode *op) final {
+    BufferStore store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
+    if (!IsRemotePE(dst_pe_) || !store->buffer.same_as(dst_)) {
+      return store;
+    }
+
+    PrimExpr addr = RemapRemoteAddress(
+        MakeRemappedAddress(T_, dst_, store->indices), dst_pe_);
+    Array<PrimExpr> args{StringImm("tl::remote_store"), addr, store->value};
+    return Evaluate(Call(DataType::Handle(), builtin::call_extern(), args));
+  }
+
+  const LowerArgs &T_;
+  Buffer src_;
+  Buffer dst_;
+  PrimExpr src_pe_;
+  PrimExpr dst_pe_;
+};
+
+Stmt LowerRemoteSIMTElementwise(const CopyNode &op, const LowerArgs &T,
+                                arith::Analyzer *analyzer, PrimExpr src_pe,
+                                PrimExpr dst_pe) {
+  auto simt_loop = op.MakeSIMTLoop(analyzer);
+  auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
+  auto par_op = ParallelOp(fused_loop);
+
+  std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
+                                    InferLevel::kFree};
+  for (auto level : levels) {
+    par_op->InferLayout({T.target, T.thread_bounds, T.layout_map, analyzer,
+                         false, T.buffer_remap, T.bind_var_to_expr},
+                        level);
+  }
+  auto loop_layout = par_op->GetLoopLayout();
+  Stmt lowered_loop = LowerParallelLoop(
+      par_op->GetRoot(), loop_layout, T.thread_var, analyzer, T.layout_map,
+      par_op->GetPredicate(T.thread_var), /*parallel_loop=*/true,
+      /*should_vectorize=*/true, par_op->LoopLayoutRequiresPaddingGuard());
+  return RemoteSIMTRewriter(T, op.src, op.dst, src_pe, dst_pe)(lowered_loop);
+}
+
+Stmt LowerRemoteSIMTCopy(const CopyNode &op, const LowerArgs &T,
+                         arith::Analyzer *analyzer, PrimExpr src_pe,
+                         PrimExpr dst_pe) {
+  ICHECK(!(IsRemotePE(src_pe) && IsRemotePE(dst_pe)))
+      << "SIMT remote copy cannot specify both src_pe and dst_pe.";
+  ICHECK(op.src->dtype == op.dst->dtype)
+      << "SIMT remote copy fallback requires matching dtypes, got "
+      << op.src->dtype << " and " << op.dst->dtype;
+  ICHECK(IsContiguousRegion(op.src, op.src_range, analyzer) &&
+         IsContiguousRegion(op.dst, op.dst_range, analyzer))
+      << "SIMT remote copy fallback requires contiguous source and destination "
+      << "regions.";
+
+  if (!IsInBoundsRegion(op.src, op.src_range, analyzer) ||
+      !IsInBoundsRegion(op.dst, op.dst_range, analyzer)) {
+    return LowerRemoteSIMTElementwise(op, T, analyzer, src_pe, dst_pe);
+  }
+
+  Array<PrimExpr> src_indices;
+  Array<PrimExpr> dst_indices;
+  PrimExpr total_elements = 1;
+  for (auto r : op.src_range) {
+    src_indices.push_back(r->min);
+    total_elements *= r->extent;
+  }
+  for (auto r : op.dst_range) {
+    dst_indices.push_back(r->min);
+  }
+
+  PrimExpr src_addr = MakeRemappedAddress(T, op.src, src_indices);
+  PrimExpr dst_addr = MakeRemappedAddress(T, op.dst, dst_indices);
+  if (IsRemotePE(src_pe)) {
+    src_addr = RemapRemoteAddress(src_addr, src_pe);
+  }
+  if (IsRemotePE(dst_pe)) {
+    dst_addr = RemapRemoteAddress(dst_addr, dst_pe);
+  }
+
+  std::stringstream ss;
+  ss << "tl::cp_block<" << analyzer->Simplify(total_elements) << ">";
+  Array<PrimExpr> args{StringImm(ss.str()), dst_addr, src_addr};
+  return Evaluate(Call(DataType::Handle(), builtin::call_extern(), args));
 }
 
 std::pair<Array<Stmt>, PrimExpr>
@@ -347,6 +538,101 @@ MakeTMARows(const Buffer &src, const Array<Range> &src_ranges,
 } // namespace
 
 namespace cuda {
+
+constexpr int kMaxRemoteTMADescriptors = 8;
+
+Call MakeTmaDescriptorCall(const TMADesc &desc, PrimExpr remote_pe) {
+  Array<PrimExpr> args = desc.EncodeCallArgs();
+  if (IsRemotePE(remote_pe)) {
+    Array<PrimExpr> remote_args;
+    remote_args.reserve(args.size() + 1);
+    remote_args.push_back(remote_pe);
+    remote_args.insert(remote_args.end(), args.begin(), args.end());
+    return Call(DataType::Handle(), create_remote_tma_descriptor(),
+                remote_args);
+  }
+  return Call(DataType::Handle(), create_tma_descriptor(), args);
+}
+
+Stmt MakeTmaCopyStmt(const TMADesc &desc, const Buffer &shared_tensor,
+                     PrimExpr shared_offset, PrimExpr total_elements,
+                     Array<PrimExpr> global_coords, int inner_box_dim,
+                     int instruction_dim, bool is_load, const Op &tma_op,
+                     int barrier_base_id, PrimExpr mbar_handle,
+                     int eviction_policy, const Map<String, ObjectRef> &ann,
+                     Optional<PrimExpr> remote_pe) {
+  Call create_descriptor = MakeTmaDescriptorCall(
+      desc, remote_pe.defined() ? remote_pe.value() : RemotePESentinel());
+
+  if (inner_box_dim != instruction_dim) {
+    Var loop_var("i");
+    int loop_extent = inner_box_dim / instruction_dim;
+
+    Array<PrimExpr> args;
+    args.reserve(desc.rank + 4);
+    args.push_back(create_descriptor);
+    if (is_load) {
+      args.push_back(barrier_base_id >= 0 ? mbar_handle : PrimExpr(0));
+    }
+    PrimExpr shared_addr = shared_tensor.access_ptr(
+        is_load ? 2 : 1, DataType::Handle(), 1,
+        shared_offset + total_elements * loop_var, total_elements);
+    args.push_back(shared_addr);
+    Array<PrimExpr> loop_global_coords = global_coords;
+    loop_global_coords.Set(0, global_coords[0] + instruction_dim * loop_var);
+    for (auto coord : loop_global_coords) {
+      args.push_back(coord);
+    }
+    if (!is_load) {
+      args.push_back(0);
+    }
+    args.push_back(eviction_policy);
+    return For(loop_var, 0, loop_extent, ForKind::kUnrolled,
+               Evaluate(Call(DataType::Handle(), tma_op, args, ann)));
+  }
+
+  Array<PrimExpr> args;
+  args.reserve(desc.rank + 4);
+  args.push_back(create_descriptor);
+  if (is_load) {
+    args.push_back(barrier_base_id >= 0 ? mbar_handle : PrimExpr(0));
+  }
+  PrimExpr shared_addr = shared_tensor.access_ptr(
+      is_load ? 2 : 1, DataType::Handle(), 1, shared_offset, total_elements);
+  args.push_back(shared_addr);
+  for (auto coord : global_coords) {
+    args.push_back(coord);
+  }
+  if (!is_load) {
+    args.push_back(0);
+  }
+  args.push_back(eviction_policy);
+  return Evaluate(Call(DataType::Handle(), tma_op, args, ann));
+}
+
+Stmt MakeRemoteTmaCopyStmt(const TMADesc &desc, const Buffer &shared_tensor,
+                           PrimExpr shared_offset, PrimExpr total_elements,
+                           Array<PrimExpr> global_coords, int inner_box_dim,
+                           int instruction_dim, bool is_load, const Op &tma_op,
+                           int barrier_base_id, PrimExpr mbar_handle,
+                           int eviction_policy,
+                           const Map<String, ObjectRef> &ann,
+                           PrimExpr remote_pe) {
+  Stmt else_case = MakeTmaCopyStmt(
+      desc, shared_tensor, shared_offset, total_elements, global_coords,
+      inner_box_dim, instruction_dim, is_load, tma_op, barrier_base_id,
+      mbar_handle, eviction_policy, ann,
+      make_const(remote_pe.dtype(), kMaxRemoteTMADescriptors - 1));
+  for (int pe = kMaxRemoteTMADescriptors - 2; pe >= 0; --pe) {
+    Stmt then_case = MakeTmaCopyStmt(
+        desc, shared_tensor, shared_offset, total_elements, global_coords,
+        inner_box_dim, instruction_dim, is_load, tma_op, barrier_base_id,
+        mbar_handle, eviction_policy, ann, make_const(remote_pe.dtype(), pe));
+    else_case = IfThenElse(EQ(remote_pe, make_const(remote_pe.dtype(), pe)),
+                           then_case, else_case);
+  }
+  return else_case;
+}
 
 struct TMAIm2ColDesc {
   size_t rank;
@@ -667,9 +953,14 @@ CopyInst Copy::SelectInst(const CopyNode &op, Target target,
   ctx.layout_map = &layout_map;
   ctx.analyzer = analyzer;
   ctx.buffer_oob = buffer_oob;
-  ctx.emit_diagnostics = true;
+  ctx.emit_diagnostics = !HasRemotePEAnnotation(op);
   auto result = SelectCopyInstForLowering(op, ctx);
-  ICHECK(result.supported) << result.reason;
+  if (!result.supported) {
+    if (HasRemotePEAnnotation(op) && !GetIsTmaCopy(op)) {
+      return CopyInst::kNormal;
+    }
+    LOG(FATAL) << result.reason;
+  }
   return result.inst;
 }
 
@@ -677,6 +968,15 @@ Stmt Copy::Lower(const CopyNode &op, const LowerArgs &T,
                  arith::Analyzer *analyzer) {
   auto copy_inst =
       SelectInst(op, T.target, T.layout_map, analyzer, /*buffer_oob=*/false);
+  PrimExpr src_pe = GetRemotePEAnnotation(op, "src_pe");
+  PrimExpr dst_pe = GetRemotePEAnnotation(op, "dst_pe");
+  bool has_remote_pe = IsRemotePE(src_pe) || IsRemotePE(dst_pe);
+  bool is_tma_copy =
+      copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkStore ||
+      copy_inst == CopyInst::kBulkLoad1D || copy_inst == CopyInst::kBulkStore1D;
+  ICHECK(!has_remote_pe || !GetIsTmaCopy(op) || is_tma_copy)
+      << "T.tma_copy with src_pe or dst_pe requires TMA lowering; got "
+      << CopyInstToString(copy_inst);
   if (op.dst_block.defined()) {
     ICHECK(TargetHasBulkCopy(T.target))
         << "T.copy with dst_block requires cluster-copy support (CUDA SM90+). "
@@ -711,6 +1011,9 @@ Stmt Copy::Lower(const CopyNode &op, const LowerArgs &T,
     ICHECK(cp_async_copy.defined()) << "Failed to lower cp.async copy";
     return cp_async_copy;
   } else if (copy_inst == CopyInst::kNormal) {
+    if (has_remote_pe) {
+      return LowerRemoteSIMTCopy(op, T, analyzer, src_pe, dst_pe);
+    }
     return LowerNormal(op, T, analyzer);
   } else {
     LOG(FATAL) << "Unsupported copy inst " << static_cast<int>(copy_inst);
@@ -1432,6 +1735,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
 
   desc.data_type =
       TensorMapDataTypeForTMA(global_tensor->dtype, shared_tensor->dtype);
+  PrimExpr remote_pe = GetTmaRemotePE(op, is_load);
   desc.global_addr = global_tensor->data;
   desc.global_shape = ReverseArray(global_tensor->shape);
   Array<PrimExpr> global_coords =
@@ -1478,7 +1782,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     auto s_range = shared_range[s_range_idx];
     s_range_idx++;
 
-    ICHECK(StructuralEqual()(g_range->extent, s_range->extent))
+    ICHECK(CanProveExtentEqual(analyzer, g_range->extent, s_range->extent))
         << global_tensor->name << "[" << i << "] is illegal, "
         << global_tensor->name << "[" << i << "] = " << g_range->extent << ", "
         << shared_tensor->name << "[" << s_range_idx
@@ -1539,6 +1843,65 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     }
   }
 
+  int64_t swizzle_bytes = TMASwizzleBytes(desc.swizzle);
+  if (desc.rank == 2 && swizzle_bytes > 0) {
+    auto tile_cols = as_const_int(desc.smem_box[0]);
+    auto tile_rows = as_const_int(desc.smem_box[1]);
+    int64_t swizzle_elements =
+        TMAElementsForBytes(swizzle_bytes, global_tensor->dtype);
+    PrimExpr swizzle_elements_expr =
+        IntImm(DataType::Int(64), swizzle_elements);
+    PrimExpr swizzle_elements_coord =
+        IntImm(global_coords[0].dtype(), swizzle_elements);
+    PrimExpr zero_coord = make_zero(global_coords[0].dtype());
+    PrimExpr row_stride_bytes = desc.global_stride[1];
+    PrimExpr contiguous_row_stride =
+        TMABytesFromElements(desc.global_shape[0], global_tensor->dtype);
+    bool can_use_5d_swizzle =
+        tile_cols != nullptr && tile_rows != nullptr &&
+        *tile_cols % swizzle_elements == 0 && *tile_rows <= 256 &&
+        (*tile_cols / swizzle_elements) <= 256 &&
+        CanProveEqual(analyzer, row_stride_bytes, contiguous_row_stride) &&
+        analyzer->CanProve(
+            EQ(FloorMod(global_coords[0], swizzle_elements_coord), zero_coord));
+
+    if (can_use_5d_swizzle) {
+      PrimExpr cols = desc.global_shape[0];
+      PrimExpr rows = desc.global_shape[1];
+      PrimExpr matrix_elems =
+          cast(DataType::Int(64), rows) * cast(DataType::Int(64), cols);
+      PrimExpr matrix_bytes =
+          TMABytesFromElements(matrix_elems, global_tensor->dtype);
+      PrimExpr col_groups = analyzer->Simplify(
+          FloorDiv(cast(DataType::Int(64), cols) + swizzle_elements_expr -
+                       IntImm(DataType::Int(64), 1),
+                   swizzle_elements_expr));
+      PrimExpr col_coord = analyzer->Simplify(FloorDiv(
+          cast(DataType::Int(64), global_coords[0]), swizzle_elements_expr));
+      PrimExpr zero_i64 = IntImm(DataType::Int(64), 0);
+      PrimExpr one_i64 = IntImm(DataType::Int(64), 1);
+
+      desc.rank = 5;
+      desc.global_shape = {swizzle_elements_expr, rows, col_groups, one_i64,
+                           one_i64};
+      desc.global_stride = {TMABytesFromElements(IntImm(DataType::Int(64), 1),
+                                                 global_tensor->dtype),
+                            row_stride_bytes,
+                            IntImm(DataType::Int(64), swizzle_bytes),
+                            matrix_bytes, matrix_bytes};
+      desc.smem_box = {
+          swizzle_elements_expr,
+          IntImm(DataType::Int(64), *tile_rows),
+          IntImm(DataType::Int(64), *tile_cols / swizzle_elements),
+          one_i64,
+          one_i64,
+      };
+      desc.smem_stride = Array<PrimExpr>(desc.rank, PrimExpr(1));
+      global_coords = {zero_i64, global_coords[1], col_coord, zero_i64,
+                       zero_i64};
+    }
+  }
+
   auto inner_box_dim = as_const_int(desc.smem_box[0]);
   if (inner_box_dim == nullptr) {
     DLOG(WARNING) << "inner_box_dim " << desc.smem_box[0]
@@ -1585,9 +1948,6 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     }
   }
 
-  Call create_descriptor =
-      Call(DataType::Handle(), create_tma_descriptor(), desc.EncodeCallArgs());
-
   int64_t cluster_mask = GetClusterMask(op);
   bool use_multicast = is_load && (cluster_mask > 0);
 
@@ -1612,11 +1972,6 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     }
   }
 
-  Array<PrimExpr> args;
-  args.reserve(desc.rank + 4);
-  args.push_back(create_descriptor);
-  if (is_load)
-    args.push_back(barrier_base_id >= 0 ? mbar_handle : PrimExpr(0));
   auto tma_op = is_load ? tma_load() : tma_store();
 
   Stmt tma_copy;
@@ -1624,93 +1979,115 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   for (auto e : desc.smem_box)
     total_elements *= e;
 
-  auto build_multicast_args = [&](const Array<PrimExpr> &regular_args) {
-    Array<PrimExpr> mc_args;
-    mc_args.reserve(regular_args.size() + 1);
-    mc_args.push_back(regular_args[0]); // descriptor
-    mc_args.push_back(regular_args[1]); // mbarrier
-    mc_args.push_back(regular_args[2]); // shared memory pointer
-    mc_args.push_back(IntImm(DataType::Int(32), cluster_mask));
-    for (size_t i = 3; i < regular_args.size(); ++i) {
-      mc_args.push_back(regular_args[i]);
-    }
-    return mc_args;
-  };
-
-  if ((*inner_box_dim) != instruction_dim) {
-    Var loop_var("i");
-    int loop_extent = (*inner_box_dim) / instruction_dim;
-
-    PrimExpr shared_addr = shared_tensor.access_ptr(
-        is_load ? 2 : 1, DataType::Handle(), 1,
-        shared_offset + total_elements * loop_var, total_elements);
-    args.push_back(shared_addr);
-    global_coords.Set(0, global_coords[0] + instruction_dim * loop_var);
-    for (auto coord : global_coords)
-      args.push_back(coord);
-    int need_reduce = 0;
-    if (!is_load)
-      args.push_back(need_reduce);
-    args.push_back(GetEvictionPolicy(op));
-    Map<String, ObjectRef> ann_loop;
-    if (is_cluster_barrier && TargetIsSm100(T.target) && is_load) {
-      ann_loop.Set("use_2cta", IntImm(DataType::Int(32), 1));
-    }
-    tma_copy = For(loop_var, 0, loop_extent, ForKind::kUnrolled,
-                   Evaluate(Call(DataType::Handle(), tma_op, args, ann_loop)));
-
-    if (use_multicast) {
-      Array<PrimExpr> mc_args = build_multicast_args(args);
-      Stmt multicast_copy = For(
-          loop_var, 0, loop_extent, ForKind::kUnrolled,
-          Evaluate(Call(DataType::Handle(), tma_load_multicast(), mc_args)));
-
-      int min_cta_rank = MinRankInClusterMask(cluster_mask);
-      PrimExpr block_rank =
-          Call(DataType::Int(32), block_rank_in_cluster(), {});
-      PrimExpr mask_imm = IntImm(DataType::Int(32), cluster_mask);
-      PrimExpr not_in_mask = EQ(bitwise_and(right_shift(mask_imm, block_rank),
-                                            IntImm(DataType::Int(32), 1)),
-                                IntImm(DataType::Int(32), 0));
-      Stmt regular_or_noop = IfThenElse(not_in_mask, tma_copy, std::nullopt);
-      tma_copy =
-          IfThenElse(EQ(block_rank, IntImm(DataType::Int(32), min_cta_rank)),
-                     multicast_copy, regular_or_noop);
-    }
+  Map<String, ObjectRef> tma_ann;
+  if (TargetIsSm100(T.target) && is_load &&
+      (annotations.find("use_2cta") != annotations.end() ||
+       is_cluster_barrier)) {
+    tma_ann.Set("use_2cta", IntImm(DataType::Int(32), 1));
+  }
+  if (is_cluster_barrier && TargetIsSm100(T.target) && is_load) {
+    tma_ann.Set("use_2cta", IntImm(DataType::Int(32), 1));
+  }
+  if (IsRemotePE(remote_pe)) {
+    ICHECK(!use_multicast)
+        << "Remote descriptor TMA copy does not support cluster multicast.";
+    tma_copy = MakeRemoteTmaCopyStmt(
+        desc, shared_tensor, shared_offset, total_elements, global_coords,
+        *inner_box_dim, instruction_dim, is_load, tma_op, barrier_base_id,
+        mbar_handle, GetEvictionPolicy(op), tma_ann, remote_pe);
   } else {
-    PrimExpr shared_addr = shared_tensor.access_ptr(
-        is_load ? 2 : 1, DataType::Handle(), 1, shared_offset, total_elements);
-    args.push_back(shared_addr);
-    for (auto coord : global_coords)
-      args.push_back(coord);
-    int need_reduce = 0;
-    if (!is_load)
-      args.push_back(need_reduce);
-    args.push_back(GetEvictionPolicy(op));
-    Map<String, ObjectRef> ann;
-    if (TargetIsSm100(T.target) && is_load &&
-        (annotations.find("use_2cta") != annotations.end() ||
-         is_cluster_barrier)) {
-      ann.Set("use_2cta", IntImm(DataType::Int(32), 1));
+    Call create_descriptor = Call(DataType::Handle(), create_tma_descriptor(),
+                                  desc.EncodeCallArgs());
+    Array<PrimExpr> args;
+    args.reserve(desc.rank + 4);
+    args.push_back(create_descriptor);
+    if (is_load) {
+      args.push_back(barrier_base_id >= 0 ? mbar_handle : PrimExpr(0));
     }
-    tma_copy = Evaluate(Call(DataType::Handle(), tma_op, args, ann));
 
-    if (use_multicast) {
-      Array<PrimExpr> mc_args = build_multicast_args(args);
-      Stmt multicast_copy =
-          Evaluate(Call(DataType::Handle(), tma_load_multicast(), mc_args));
+    auto build_multicast_args = [&](const Array<PrimExpr> &regular_args) {
+      Array<PrimExpr> mc_args;
+      mc_args.reserve(regular_args.size() + 1);
+      mc_args.push_back(regular_args[0]); // descriptor
+      mc_args.push_back(regular_args[1]); // mbarrier
+      mc_args.push_back(regular_args[2]); // shared memory pointer
+      mc_args.push_back(IntImm(DataType::Int(32), cluster_mask));
+      for (size_t i = 3; i < regular_args.size(); ++i) {
+        mc_args.push_back(regular_args[i]);
+      }
+      return mc_args;
+    };
 
-      int min_cta_rank = MinRankInClusterMask(cluster_mask);
-      PrimExpr block_rank =
-          Call(DataType::Int(32), block_rank_in_cluster(), {});
-      PrimExpr mask_imm = IntImm(DataType::Int(32), cluster_mask);
-      PrimExpr not_in_mask = EQ(bitwise_and(right_shift(mask_imm, block_rank),
-                                            IntImm(DataType::Int(32), 1)),
-                                IntImm(DataType::Int(32), 0));
-      Stmt regular_or_noop = IfThenElse(not_in_mask, tma_copy, std::nullopt);
-      tma_copy =
-          IfThenElse(EQ(block_rank, IntImm(DataType::Int(32), min_cta_rank)),
-                     multicast_copy, regular_or_noop);
+    if ((*inner_box_dim) != instruction_dim) {
+      Var loop_var("i");
+      int loop_extent = (*inner_box_dim) / instruction_dim;
+
+      PrimExpr shared_addr = shared_tensor.access_ptr(
+          is_load ? 2 : 1, DataType::Handle(), 1,
+          shared_offset + total_elements * loop_var, total_elements);
+      args.push_back(shared_addr);
+      global_coords.Set(0, global_coords[0] + instruction_dim * loop_var);
+      for (auto coord : global_coords) {
+        args.push_back(coord);
+      }
+      int need_reduce = 0;
+      if (!is_load) {
+        args.push_back(need_reduce);
+      }
+      args.push_back(GetEvictionPolicy(op));
+      tma_copy = For(loop_var, 0, loop_extent, ForKind::kUnrolled,
+                     Evaluate(Call(DataType::Handle(), tma_op, args, tma_ann)));
+
+      if (use_multicast) {
+        Array<PrimExpr> mc_args = build_multicast_args(args);
+        Stmt multicast_copy = For(
+            loop_var, 0, loop_extent, ForKind::kUnrolled,
+            Evaluate(Call(DataType::Handle(), tma_load_multicast(), mc_args)));
+
+        int min_cta_rank = MinRankInClusterMask(cluster_mask);
+        PrimExpr block_rank =
+            Call(DataType::Int(32), block_rank_in_cluster(), {});
+        PrimExpr mask_imm = IntImm(DataType::Int(32), cluster_mask);
+        PrimExpr not_in_mask = EQ(bitwise_and(right_shift(mask_imm, block_rank),
+                                              IntImm(DataType::Int(32), 1)),
+                                  IntImm(DataType::Int(32), 0));
+        Stmt regular_or_noop = IfThenElse(not_in_mask, tma_copy, std::nullopt);
+        tma_copy =
+            IfThenElse(EQ(block_rank, IntImm(DataType::Int(32), min_cta_rank)),
+                       multicast_copy, regular_or_noop);
+      }
+    } else {
+      PrimExpr shared_addr =
+          shared_tensor.access_ptr(is_load ? 2 : 1, DataType::Handle(), 1,
+                                   shared_offset, total_elements);
+      args.push_back(shared_addr);
+      for (auto coord : global_coords) {
+        args.push_back(coord);
+      }
+      int need_reduce = 0;
+      if (!is_load) {
+        args.push_back(need_reduce);
+      }
+      args.push_back(GetEvictionPolicy(op));
+      tma_copy = Evaluate(Call(DataType::Handle(), tma_op, args, tma_ann));
+
+      if (use_multicast) {
+        Array<PrimExpr> mc_args = build_multicast_args(args);
+        Stmt multicast_copy =
+            Evaluate(Call(DataType::Handle(), tma_load_multicast(), mc_args));
+
+        int min_cta_rank = MinRankInClusterMask(cluster_mask);
+        PrimExpr block_rank =
+            Call(DataType::Int(32), block_rank_in_cluster(), {});
+        PrimExpr mask_imm = IntImm(DataType::Int(32), cluster_mask);
+        PrimExpr not_in_mask = EQ(bitwise_and(right_shift(mask_imm, block_rank),
+                                              IntImm(DataType::Int(32), 1)),
+                                  IntImm(DataType::Int(32), 0));
+        Stmt regular_or_noop = IfThenElse(not_in_mask, tma_copy, std::nullopt);
+        tma_copy =
+            IfThenElse(EQ(block_rank, IntImm(DataType::Int(32), min_cta_rank)),
+                       multicast_copy, regular_or_noop);
+      }
     }
   }
 
@@ -1775,7 +2152,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     }
 
     Stmt producer =
-        IfThenElse(MakeTmaLeaderCondition(GetLeaderScopeThreads(op, T)),
+        IfThenElse(MakeTmaLeaderCondition(GetTmaLeaderThreadExtent(op, T)),
                    SeqStmt(producer_seq));
 
     if (GetIsTmaCopy(op)) {
@@ -1789,7 +2166,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     return SeqStmt({producer, wait_stmt});
   }
 
-  tma_copy = IfThenElse(MakeTmaLeaderCondition(GetLeaderScopeThreads(op, T)),
+  tma_copy = IfThenElse(MakeTmaLeaderCondition(GetTmaLeaderThreadExtent(op, T)),
                         tma_copy);
 
   return tma_copy;
@@ -2016,6 +2393,7 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
       is_load ? 2 : 1, DataType::Handle(), 1, shared_offset, elements);
   PrimExpr global_addr = global_tensor.access_ptr(
       is_load ? 1 : 2, DataType::Handle(), 1, global_offset, elements);
+  global_addr = RemapRemoteAddress(global_addr, GetTmaRemotePE(op, is_load));
 
   int barrier_base_id = -1;
   PrimExpr mbar_handle;
@@ -2082,7 +2460,7 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
     }
 
     Stmt producer =
-        IfThenElse(MakeTmaLeaderCondition(GetLeaderScopeThreads(op, T)),
+        IfThenElse(MakeTmaLeaderCondition(GetTmaLeaderThreadExtent(op, T)),
                    SeqStmt(producer_seq));
 
     if (GetIsTmaCopy(op)) {
@@ -2096,7 +2474,7 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
     return SeqStmt({producer, wait_stmt});
   }
 
-  tma_copy = IfThenElse(MakeTmaLeaderCondition(GetLeaderScopeThreads(op, T)),
+  tma_copy = IfThenElse(MakeTmaLeaderCondition(GetTmaLeaderThreadExtent(op, T)),
                         tma_copy);
   return tma_copy;
 }

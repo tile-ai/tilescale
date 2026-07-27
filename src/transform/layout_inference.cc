@@ -807,6 +807,30 @@ private:
         thread_var_ = iv;
       }
     }
+    if (op->attr_key == attr::kWarpSpecializationScope) {
+      if (const auto *if_node = op->body.as<IfThenElseNode>()) {
+        if (if_node->else_case.defined()) {
+          Array<IntImm> partitions = Downcast<Array<IntImm>>(op->node);
+          ICHECK_EQ(partitions.size(), 2U);
+          PrimExpr producer_extent = partitions[0];
+          PrimExpr consumer_extent = partitions[1];
+          PrimExpr old_override_min = thread_bounds_override_min_;
+          PrimExpr old_override_extent = thread_bounds_override_extent_;
+
+          thread_bounds_override_min_ = consumer_extent;
+          thread_bounds_override_extent_ = producer_extent;
+          IRVisitorWithAnalyzer::VisitStmt(if_node->then_case);
+
+          thread_bounds_override_min_ = IntImm(thread_var_->var.dtype(), 0);
+          thread_bounds_override_extent_ = consumer_extent;
+          IRVisitorWithAnalyzer::VisitStmt(if_node->else_case.value());
+
+          thread_bounds_override_min_ = old_override_min;
+          thread_bounds_override_extent_ = old_override_extent;
+          return;
+        }
+      }
+    }
     IRVisitorWithAnalyzer::VisitStmt_(op);
   }
 
@@ -835,6 +859,11 @@ private:
   }
 
   Range CurrentThreadBounds() const {
+    if (thread_bounds_override_min_.defined() &&
+        thread_bounds_override_extent_.defined()) {
+      return Range::FromMinExtent(thread_bounds_override_min_,
+                                  thread_bounds_override_extent_);
+    }
     return ComputeThreadBounds(thread_var_, analyzer_);
   }
 
@@ -946,6 +975,30 @@ private:
             thread_var_ = iv;
           }
         }
+        if (op->attr_key == attr::kWarpSpecializationScope) {
+          if (const auto *if_node = op->body.as<IfThenElseNode>()) {
+            if (if_node->else_case.defined()) {
+              Array<IntImm> partitions = Downcast<Array<IntImm>>(op->node);
+              ICHECK_EQ(partitions.size(), 2U);
+              PrimExpr producer_extent = partitions[0];
+              PrimExpr consumer_extent = partitions[1];
+              PrimExpr old_override_min = thread_bounds_override_min_;
+              PrimExpr old_override_extent = thread_bounds_override_extent_;
+
+              thread_bounds_override_min_ = consumer_extent;
+              thread_bounds_override_extent_ = producer_extent;
+              IRVisitorWithAnalyzer::VisitStmt(if_node->then_case);
+
+              thread_bounds_override_min_ = IntImm(thread_var_->var.dtype(), 0);
+              thread_bounds_override_extent_ = consumer_extent;
+              IRVisitorWithAnalyzer::VisitStmt(if_node->else_case.value());
+
+              thread_bounds_override_min_ = old_override_min;
+              thread_bounds_override_extent_ = old_override_extent;
+              return;
+            }
+          }
+        }
         IRVisitorWithAnalyzer::VisitStmt_(op);
       }
 
@@ -972,6 +1025,11 @@ private:
       }
 
       Range CurrentThreadBounds() const {
+        if (thread_bounds_override_min_.defined() &&
+            thread_bounds_override_extent_.defined()) {
+          return Range::FromMinExtent(thread_bounds_override_min_,
+                                      thread_bounds_override_extent_);
+        }
         return ComputeThreadBounds(thread_var_, analyzer_);
       }
 
@@ -979,6 +1037,8 @@ private:
       std::unordered_map<Buffer, Range, ObjectPtrHash, ObjectPtrEqual>
           &floating_buffers_;
       IterVar thread_var_;
+      PrimExpr thread_bounds_override_min_;
+      PrimExpr thread_bounds_override_extent_;
     };
 
     FloatingBufferCollector collector(nodes_in_tileops,
@@ -1016,6 +1076,8 @@ private:
   // we need to define a thread_var for the serial loop.
   IterVar thread_var_ = IterVar(Range::FromMinExtent(0, 1), Var("v_thread"),
                                 IterVarType::kDataPar);
+  PrimExpr thread_bounds_override_min_;
+  PrimExpr thread_bounds_override_extent_;
   std::vector<IterVar> thread_var_vec_;
   std::vector<Range> thread_bounds_vec_;
   std::vector<std::unique_ptr<arith::Analyzer>> analyzer_vec_;

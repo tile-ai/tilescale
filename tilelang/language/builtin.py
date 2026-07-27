@@ -8,6 +8,15 @@ from tilelang import tvm as tvm
 from tilelang.language import ptx_arrive_barrier, evaluate
 from tilelang.language.eager.builder import macro
 from tilelang.language.kernel import get_thread_bindings, get_block_extents
+from tilelang.language.distributed.comm import atom_add, ld, st  # noqa: F401
+from tilelang.language.distributed.sync import (  # noqa: F401
+    arrive_barrier_gpu,
+    barrier_blocks,
+    init_barrier_gpu,
+    sync_barrier_gpu,
+    sync_blocks,
+    wait_barrier_gpu,
+)
 from tilelang.utils.target import check_hip_availability
 from tvm import DataType, tirx
 from tvm.runtime import convert
@@ -309,6 +318,17 @@ def create_tma_descriptor(*args):
     return tirx.call_intrin("handle", tirx.op.Op.get("tl.create_tma_descriptor"), *args)
 
 
+def create_remote_tma_descriptor(*args):
+    """Create a peer-remapped Tensor Memory Access descriptor.
+
+    This internal API has the same descriptor payload as
+    ``create_tma_descriptor`` with an extra leading ``dst_pe`` argument. The
+    host/runtime side remaps the descriptor base pointer through the distributed
+    symmetric allocation table before encoding the CUtensorMap.
+    """
+    return tirx.call_intrin("handle", tirx.op.Op.get("tl.create_remote_tma_descriptor"), *args)
+
+
 def tma_load(*args):
     """Perform a Tensor Memory Access (TMA) load operation.
 
@@ -362,14 +382,16 @@ def tma_store_wait(count: int = 0, read: bool = True):
     """Wait for completion of TMA store operations.
 
     Waits until the number of outstanding TMA store groups is at most ``count``.
-    Maps to ``cp.async.bulk.wait_group.read <count>`` by default, or
-    ``cp.async.bulk.wait_group <count>`` when ``read`` is false.
+    When ``read`` is true, maps to ``cp.async.bulk.wait_group.read <count>``
+    and only waits until the async store has finished reading shared memory.
+    When ``read`` is false, maps to ``cp.async.bulk.wait_group <count>`` and
+    waits until the async store itself completes.
 
     Args:
         count (int): The maximum number of outstanding store groups allowed
             to remain in flight. Defaults to 0 (wait for all stores to complete).
-        read (bool): Whether to use the PTX ``.read`` modifier, which only
-            waits for the source reads to complete. Defaults to True.
+        read (bool): Whether to wait for shared-memory read completion instead
+            of full store completion. Defaults to True.
 
     Returns:
         tirx.Call: A handle to the store wait operation
@@ -1162,6 +1184,21 @@ def sync_global():
 def sync_grid():
     """Synchronize all threads in a grid."""
     return tirx.call_intrin("handle", tirx.op.Op.get("tl.sync_grid"))
+
+
+def fence_cta():
+    """Issue a memory fence at CTA (block) scope."""
+    return tirx.call_intrin("handle", tirx.op.Op.get("tl.fence_cta"))
+
+
+def fence_gpu():
+    """Issue a memory fence at GPU (device) scope."""
+    return tirx.call_intrin("handle", tirx.op.Op.get("tl.fence_gpu"))
+
+
+def fence_sys():
+    """Issue a memory fence at system scope (visible across GPUs in a node)."""
+    return tirx.call_intrin("handle", tirx.op.Op.get("tl.fence_sys"))
 
 
 def initialize_wgmma_descriptor(
