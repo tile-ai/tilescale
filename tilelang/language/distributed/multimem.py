@@ -16,7 +16,8 @@ class MultimemReduceOp(Enum):
     ADD = 0
     MIN = 1
     MAX = 2
-    NONE = -1  # plain store (no reduction), for multimem_tma_store
+    # Kept for API compatibility; multimem_tma_store treats it like None.
+    NONE = -1
 
 
 class _MultimemMode(Enum):
@@ -35,7 +36,7 @@ def _multimem_impl(src, dst, mode: _MultimemMode, reduce_op: MultimemReduceOp = 
     Args:
         src: Source (Buffer, BufferLoad with slice, or BufferRegion)
         dst: Destination (Buffer, BufferLoad with slice, or BufferRegion)
-        mode: 0=kLdReduce, 1=kSt, 2=kRed
+        mode: 0=kLdReduce, 1=kSt, 2=kRed, 3=kTmaStore, 4=kTmaRedStore
         reduce_op: 0=ADD, 1=MIN, 2=MAX
     """
     src_region = to_buffer_region(src, access_type="r")
@@ -59,9 +60,11 @@ def multimem_ld_reduce(src, dst, reduce_op: MultimemReduceOp = MultimemReduceOp.
     packed x2 instructions, so their local region must cover the full fragment,
     their last extent must be even, multicast rows must be pair-aligned, and the
     fragment layout must preserve the packed lowering's contiguous-pair thread
-    ownership. Direct multimem requires SM90+ and CUDA Toolkit 12.1+. The packed
-    float16/bfloat16 load-reduce form requires CUDA Toolkit 12.2+ for PTX 8.2
-    ``.acc::f32`` support.
+    ownership. A dynamically selected packed region must be a tile-aligned,
+    all-or-none partition; partially overlapping tiles are rejected. Direct
+    multimem requires SM90+ and CUDA Toolkit 12.1+. The packed float16/bfloat16
+    load-reduce form requires CUDA Toolkit 12.2+ for PTX 8.2 ``.acc::f32``
+    support.
 
     Args:
         src: Multicast source (Buffer, BufferLoad with slice, or BufferRegion)
@@ -116,7 +119,8 @@ def multimem_tma_store(src, dst, reduce_op: MultimemReduceOp | None = None):
     start at a provably 16-byte-aligned address. The positive transfer size must
     be divisible by 16 bytes and fit in an unsigned 32-bit byte count. Layout-
     remapped buffers are rejected because their physical contiguity cannot be
-    inferred from the logical region.
+    inferred from the logical region. Dynamically selected regions must form
+    tile-aligned, all-or-none partitions; partial overlaps are rejected.
 
     Plain stores support matching byte-addressable scalar or vector dtypes. Bulk
     reductions support ADD for float32, float16, and bfloat16, plus MIN/MAX for
@@ -126,13 +130,15 @@ def multimem_tma_store(src, dst, reduce_op: MultimemReduceOp | None = None):
     Args:
         src: Shared memory source (Buffer, BufferLoad or BufferRegion, shared scope)
         dst: Multicast global destination (Buffer, BufferLoad or BufferRegion, global scope)
-        reduce_op: None for plain store (broadcast), MultimemReduceOp.ADD/MIN/MAX for reduce-accumulate
+        reduce_op: None or MultimemReduceOp.NONE for plain store (broadcast),
+            MultimemReduceOp.ADD/MIN/MAX for reduce-accumulate
 
     NOTE: The current CUDA implementation requires SM90+ and CUDA toolkit 13.1+.
-    Older toolkits can use an ordinary TMA store to the multicast virtual
-    address where that path has been validated.
+    Explicit use on an unsupported target fails during device compilation.
+    Older toolkits can use an ordinary TMA store to the multicast virtual address
+    where that path has been validated.
     """
-    if reduce_op is None:
+    if reduce_op is None or reduce_op is MultimemReduceOp.NONE:
         return _multimem_impl(src, dst, mode=_MultimemMode.TMA_STORE)
     return _multimem_impl(src, dst, mode=_MultimemMode.TMA_RED_STORE, reduce_op=reduce_op)
 

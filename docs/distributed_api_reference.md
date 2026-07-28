@@ -237,7 +237,8 @@ using peer-visible storage and the appropriate system-scope ordering.
 
 Multimem operations require a valid multicast allocation and compatible
 NVSwitch/multicast hardware. `MultimemReduceOp` provides `ADD`, `MIN`, `MAX`,
-and `NONE`.
+and `NONE`; `NONE` is retained for compatibility and is equivalent to `None`
+for a plain `multimem_tma_store`.
 
 | API | Purpose |
 |-----|---------|
@@ -256,7 +257,8 @@ Direct multimem operations and signals require SM90+ and CUDA Toolkit 12.1+
 Toolkit 12.2+ because its `.acc::f32` form was introduced in PTX 8.2. Packed
 regions require an even last extent, pair-aligned multicast rows, a full local
 fragment region, and a fragment layout that preserves contiguous-pair thread
-ownership.
+ownership. Dynamic packed regions must be tile-aligned, all-or-none partitions;
+a region that can partially overlap the buffer is rejected during lowering.
 
 Bulk `multimem_tma_store` additionally requires CUDA Toolkit 13.1+. Its source and
 destination regions must have matching rank, extents, and dtype. Both regions
@@ -265,7 +267,10 @@ provably 16-byte-aligned address. The positive transfer size must be divisible
 by 16 bytes and fit in an unsigned 32-bit byte count. Layout-remapped buffers
 are rejected. Plain bulk stores accept matching byte-addressable scalar or
 vector dtypes. Bulk reductions accept ADD for `float32`, `float16`, and
-`bfloat16`, and MIN/MAX for `float16` and `bfloat16`.
+`bfloat16`, and MIN/MAX for `float16` and `bfloat16`. Dynamic bulk regions obey
+the same tile-aligned, all-or-none rule. Explicit Bulk use on an unsupported
+architecture or pre-13.1 toolkit fails during device compilation instead of
+emitting a runtime trap.
 
 Shared-memory producer synchronization and async bulk-group completion are
 managed by the caller. Every producer thread must make its shared-memory writes
