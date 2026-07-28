@@ -183,14 +183,12 @@ TL_LD_IMPL(WEAK, SYS, true, false, "", ".global", ".nc", "")
 TL_LD_IMPL(WEAK, GPU, true, true, "", ".global", ".nc", ".L1::no_allocate")
 TL_LD_IMPL(WEAK, SYS, true, true, "", ".global", ".nc", ".L1::no_allocate")
 
-// WEAK
-TL_LD_IMPL(WEAK, CTA, false, false, ".weak", ".cta", "", "")
-TL_LD_IMPL(WEAK, GPU, false, false, ".weak", ".gpu.global", "", "")
-TL_LD_IMPL(WEAK, SYS, false, false, ".weak", ".sys.global", "", "")
-TL_LD_IMPL(WEAK, GPU, false, true, ".weak", ".gpu.global", "",
-           ".L1::no_allocate")
-TL_LD_IMPL(WEAK, SYS, false, true, ".weak", ".sys.global", "",
-           ".L1::no_allocate")
+// WEAK (always .global)
+TL_LD_IMPL(WEAK, CTA, false, false, ".weak", ".global", "", "")
+TL_LD_IMPL(WEAK, GPU, false, false, ".weak", ".global", "", "")
+TL_LD_IMPL(WEAK, SYS, false, false, ".weak", ".global", "", "")
+TL_LD_IMPL(WEAK, GPU, false, true, ".weak", ".global", "", ".L1::no_allocate")
+TL_LD_IMPL(WEAK, SYS, false, true, ".weak", ".global", "", ".L1::no_allocate")
 
 // VOLATILE (always .global, no na)
 TL_LD_IMPL(VOLATILE, CTA, false, false, ".volatile", ".global", "", "")
