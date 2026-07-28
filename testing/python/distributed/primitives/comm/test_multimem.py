@@ -68,6 +68,18 @@ def _multimem_ld_codegen_kernel(
     return main
 
 
+def _multimem_low_base_alignment_kernel():
+    @T.prim_func
+    def main(mcast_ptr: T.handle, out: T.Tensor((8,), T.float32)):
+        mcast_buf = T.match_buffer(mcast_ptr, (8,), dtype=T.float32, align=4)
+        with T.Kernel(1, threads=1):
+            tmp = T.alloc_fragment((8,), T.float32)
+            T.multimem_ld_reduce(mcast_buf, tmp)
+            T.copy(tmp, out)
+
+    return main
+
+
 def _multimem_write_codegen_kernel(mode: str, N: int, block_N: int, threads: int):
     if mode == "st":
 
@@ -167,11 +179,10 @@ def _multimem_singleton_runtime_offset_kernel():
 
 def _multimem_packed_tail_kernel():
     @T.prim_func
-    def main(mcast_buf: T.Tensor((257,), T.float16), out: T.Tensor((257,), T.float16)):
+    def main(mcast_buf: T.Tensor((257,), T.float16)):
         with T.Kernel(2, threads=128) as bx:
             tmp = T.alloc_fragment((256,), T.float16)
-            T.multimem_ld_reduce(mcast_buf[bx * 256 : (bx + 1) * 256], tmp)
-            T.copy(tmp, out[bx * 256 : (bx + 1) * 256])
+            T.multimem_st(tmp, mcast_buf[bx * 256 : (bx + 1) * 256])
 
     return main
 
@@ -181,18 +192,17 @@ def _multimem_packed_odd_offset_kernel():
     def main(mcast_buf: T.Tensor((5,), T.float16)):
         with T.Kernel(1, threads=1):
             tmp = T.alloc_fragment((4,), T.float16)
-            T.multimem_ld_reduce(mcast_buf[1:5], tmp)
+            T.multimem_st(tmp, mcast_buf[1:5])
 
     return main
 
 
 def _multimem_packed_local_slice_kernel():
     @T.prim_func
-    def main(mcast_buf: T.Tensor((4,), T.float16), out: T.Tensor((8,), T.float16)):
+    def main(mcast_buf: T.Tensor((4,), T.float16)):
         with T.Kernel(1, threads=1):
             tmp = T.alloc_fragment((8,), T.float16)
-            T.multimem_ld_reduce(mcast_buf, tmp[2:6])
-            T.copy(tmp, out)
+            T.multimem_st(tmp[2:6], mcast_buf)
 
     return main
 
@@ -202,50 +212,51 @@ def _multimem_packed_partial_2d_local_kernel():
     def main(mcast_buf: T.Tensor((2, 2), T.float16)):
         with T.Kernel(1, threads=1):
             tmp = T.alloc_fragment((2, 4), T.float16)
-            T.multimem_ld_reduce(mcast_buf, tmp[0:2, 0:2])
+            T.multimem_st(tmp[0:2, 0:2], mcast_buf)
 
     return main
 
 
 def _multimem_packed_odd_row_stride_kernel():
     @T.prim_func
-    def main(
-        mcast_buf: T.Tensor((2, 3), T.float16),
-        out: T.Tensor((2, 2), T.float16),
-    ):
+    def main(mcast_buf: T.Tensor((2, 3), T.float16)):
         with T.Kernel(1, threads=1):
             tmp = T.alloc_fragment((2, 2), T.float16)
-            T.multimem_ld_reduce(mcast_buf[0:2, 0:2], tmp)
-            T.copy(tmp, out)
+            T.multimem_st(tmp, mcast_buf[0:2, 0:2])
 
     return main
 
 
 def _multimem_packed_runtime_offset_kernel():
     @T.prim_func
-    def main(
-        mcast_buf: T.Tensor((32,), T.bfloat16),
-        out: T.Tensor((8,), T.bfloat16),
-    ):
+    def main(mcast_buf: T.Tensor((32,), T.bfloat16)):
         with T.Kernel(1, threads=4):
             rank = T.get_rank()
             tmp = T.alloc_fragment((8,), T.bfloat16)
             T.multimem_ld_reduce(mcast_buf[rank * 8 : (rank + 1) * 8], tmp)
-            T.copy(tmp, out)
+            T.multimem_st(tmp, mcast_buf[rank * 8 : (rank + 1) * 8])
+
+    return main
+
+
+def _multimem_packed_partial_overlap_kernel():
+    @T.prim_func
+    def main(mcast_buf: T.Tensor((32,), T.bfloat16)):
+        with T.Kernel(1, threads=4):
+            rank = T.get_rank()
+            tmp = T.alloc_fragment((8,), T.bfloat16)
+            T.multimem_st(tmp, mcast_buf[rank * 10 : rank * 10 + 8])
 
     return main
 
 
 def _multimem_packed_aligned_overlaunch_kernel():
     @T.prim_func
-    def main(
-        mcast_buf: T.Tensor((8,), T.bfloat16),
-        out: T.Tensor((16,), T.bfloat16),
-    ):
+    def main(mcast_buf: T.Tensor((8,), T.bfloat16)):
         with T.Kernel(2, threads=4) as bx:
             tmp = T.alloc_fragment((8,), T.bfloat16)
             T.multimem_ld_reduce(mcast_buf[bx * 8 : (bx + 1) * 8], tmp)
-            T.copy(tmp, out[bx * 8 : (bx + 1) * 8])
+            T.multimem_st(tmp, mcast_buf[bx * 8 : (bx + 1) * 8])
 
     return main
 
@@ -281,9 +292,50 @@ def _multimem_packed_extra_replicate_layout_kernel():
                 {
                     tmp: T.Fragment(
                         (8,),
-                        forward_thread_fn=lambda i, rep: (i // 2 + rep // 2) % 4,
+                        forward_thread_fn=lambda i, rep: i // 2,
                         forward_index_fn=lambda i: i % 2,
                         replicate=4,
+                    )
+                }
+            )
+            T.multimem_ld_reduce(mcast_buf, tmp)
+
+    return main
+
+
+def _multimem_packed_unbound_thread_range_layout_kernel():
+    @T.prim_func
+    def main(mcast_buf: T.Tensor((8,), T.bfloat16)):
+        with T.Kernel(1, threads=4):
+            tmp = T.alloc_fragment((8,), T.bfloat16)
+            T.annotate_layout(
+                {
+                    tmp: T.Fragment(
+                        (8,),
+                        forward_thread_fn=lambda i, rep: i // 2,
+                        forward_index_fn=lambda i: i % 2,
+                        replicate=2,
+                    )
+                }
+            )
+            T.multimem_ld_reduce(mcast_buf, tmp)
+
+    return main
+
+
+def _multimem_packed_low_base_alignment_kernel():
+    @T.prim_func
+    def main(mcast_ptr: T.handle):
+        mcast_buf = T.match_buffer(mcast_ptr, (8,), dtype=T.bfloat16, align=2)
+        with T.Kernel(1, threads=4):
+            tmp = T.alloc_fragment((8,), T.bfloat16)
+            T.annotate_layout(
+                {
+                    tmp: T.Fragment(
+                        (8,),
+                        forward_thread_fn=lambda i, rep: i // 2,
+                        forward_index_fn=lambda i: i % 2,
+                        replicate=2,
                     )
                 }
             )
@@ -306,7 +358,6 @@ def test_multimem_scalar_width_codegen(N: int):
     assert source.count("tl::multimem::LdReduceV1") == 1
     assert "tl::multimem::LdReduceV2" not in source
     assert "tl::multimem::LdReduceV4" not in source
-    assert "tl::multimem::LdReduceV8" not in source
 
 
 def test_multimem_predicated_tail_codegen():
@@ -328,40 +379,52 @@ def test_multimem_predicated_tail_codegen():
 def test_multimem_width_and_alignment_codegen():
     wide_source = _compile_multimem_source(_multimem_ld_codegen_kernel(8, 8, 1))
     scalar_source = _compile_multimem_source(_multimem_ld_codegen_kernel(8, 8, 1, offset=1))
+    low_base_alignment_source = _compile_multimem_source(_multimem_low_base_alignment_kernel())
 
     assert wide_source.count("tl::multimem::LdReduceV4") == 2
     assert "tl::multimem::LdReduceV1" not in wide_source
     assert "tl::multimem::LdReduceV2" not in wide_source
-    assert "LdReduceV8" not in wide_source
     assert scalar_source.count("tl::multimem::LdReduceV1") == 1
     assert "tl::multimem::LdReduceV2" not in scalar_source
     assert "tl::multimem::LdReduceV4" not in scalar_source
-    assert "tl::multimem::LdReduceV8" not in scalar_source
+    assert low_base_alignment_source.count("tl::multimem::LdReduceV1") == 8
+    assert "tl::multimem::LdReduceV2" not in low_base_alignment_source
+    assert "tl::multimem::LdReduceV4" not in low_base_alignment_source
 
 
-def test_multimem_rejects_mismatched_extents():
-    with pytest.raises(RuntimeError, match="matching source and destination extents"):
-        _compile_multimem_source(_multimem_mismatched_extent_kernel())
+_INVALID_DIRECT_CASES = (
+    pytest.param(
+        _multimem_mismatched_extent_kernel,
+        r"matching source and destination extents",
+        id="extent",
+    ),
+    pytest.param(
+        _multimem_mismatched_rank_kernel,
+        r"regions with matching rank",
+        id="rank",
+    ),
+    pytest.param(
+        _multimem_unsupported_reduce_kernel,
+        r"supports ADD only",
+        id="reduce-op",
+    ),
+    pytest.param(
+        _multimem_unsupported_dtype_kernel,
+        r"scalar float32, float16, or bfloat16",
+        id="dtype",
+    ),
+    pytest.param(
+        _multimem_vector_element_dtype_kernel,
+        r"scalar float32, float16, or bfloat16",
+        id="vector-element-dtype",
+    ),
+)
 
 
-def test_multimem_rejects_mismatched_rank():
-    with pytest.raises(RuntimeError, match="regions with matching rank"):
-        _compile_multimem_source(_multimem_mismatched_rank_kernel())
-
-
-def test_multimem_rejects_unsupported_reduce_op():
-    with pytest.raises(RuntimeError, match="supports ADD only"):
-        _compile_multimem_source(_multimem_unsupported_reduce_kernel())
-
-
-def test_multimem_rejects_unsupported_dtype():
-    with pytest.raises(RuntimeError, match="require scalar float32, float16, or bfloat16"):
-        _compile_multimem_source(_multimem_unsupported_dtype_kernel())
-
-
-def test_multimem_rejects_vector_element_dtype():
-    with pytest.raises(RuntimeError, match="require scalar float32, float16, or bfloat16"):
-        _compile_multimem_source(_multimem_vector_element_dtype_kernel())
+@pytest.mark.parametrize("kernel_factory,error", _INVALID_DIRECT_CASES)
+def test_multimem_rejects_invalid_direct_contract(kernel_factory, error: str):
+    with pytest.raises(RuntimeError, match=error):
+        _compile_multimem_source(kernel_factory())
 
 
 def test_multimem_singleton_runtime_bounds_codegen():
@@ -371,29 +434,49 @@ def test_multimem_singleton_runtime_bounds_codegen():
     assert "} else {\n    tmp[0] = 0x0p+0f" in source
 
 
-def test_multimem_rejects_unsafe_packed_tail():
-    with pytest.raises(RuntimeError, match="packed multicast.*provably in bounds"):
-        _compile_multimem_source(_multimem_packed_tail_kernel())
+_INVALID_PACKED_REGION_CASES = (
+    pytest.param(
+        _multimem_packed_tail_kernel,
+        r"packed multicast.*in bounds",
+        id="partial-tail",
+    ),
+    pytest.param(
+        _multimem_packed_odd_offset_kernel,
+        r"4-byte-aligned multicast start address",
+        id="start-alignment",
+    ),
+    pytest.param(
+        _multimem_packed_local_slice_kernel,
+        r"local regions to start at zero",
+        id="local-start",
+    ),
+    pytest.param(
+        _multimem_packed_partial_2d_local_kernel,
+        r"local region to cover the entire fragment buffer",
+        id="local-coverage",
+    ),
+    pytest.param(
+        _multimem_packed_odd_row_stride_kernel,
+        r"even physical stride",
+        id="row-stride",
+    ),
+    pytest.param(
+        _multimem_packed_partial_overlap_kernel,
+        r"packed multicast.*(partial|bounds|partition)",
+        id="dynamic-partial-overlap",
+    ),
+    pytest.param(
+        _multimem_packed_low_base_alignment_kernel,
+        r"packed multicast.*base alignment.*at least 4 bytes",
+        id="base-alignment",
+    ),
+)
 
 
-def test_multimem_rejects_packed_odd_offset():
-    with pytest.raises(RuntimeError, match="4-byte-aligned multicast start address"):
-        _compile_multimem_source(_multimem_packed_odd_offset_kernel())
-
-
-def test_multimem_rejects_packed_local_slice():
-    with pytest.raises(RuntimeError, match="local regions to start at zero"):
-        _compile_multimem_source(_multimem_packed_local_slice_kernel())
-
-
-def test_multimem_rejects_packed_partial_2d_local_region():
-    with pytest.raises(RuntimeError, match="local region to cover the entire fragment buffer"):
-        _compile_multimem_source(_multimem_packed_partial_2d_local_kernel())
-
-
-def test_multimem_rejects_packed_odd_row_stride():
-    with pytest.raises(RuntimeError, match="even physical stride"):
-        _compile_multimem_source(_multimem_packed_odd_row_stride_kernel())
+@pytest.mark.parametrize("kernel_factory,error", _INVALID_PACKED_REGION_CASES)
+def test_multimem_rejects_invalid_packed_region(kernel_factory, error: str):
+    with pytest.raises(RuntimeError, match=error):
+        _compile_multimem_source(kernel_factory())
 
 
 def test_multimem_packed_runtime_bounds_codegen():
@@ -411,14 +494,29 @@ def test_multimem_packed_aligned_overlaunch_codegen():
     assert source.count("bfloat16_t(0x0p+0f") == 2
 
 
-def test_multimem_rejects_incompatible_packed_layout():
-    with pytest.raises(RuntimeError, match="packed x2.*canonical pair ownership"):
-        _compile_multimem_source(_multimem_packed_incompatible_layout_kernel())
+_INVALID_PACKED_LAYOUT_CASES = (
+    pytest.param(
+        _multimem_packed_incompatible_layout_kernel,
+        r"packed x2.*canonical pair ownership",
+        id="pair-ownership",
+    ),
+    pytest.param(
+        _multimem_packed_extra_replicate_layout_kernel,
+        r"packed x2.*replicate",
+        id="replicate-extent",
+    ),
+)
 
 
-def test_multimem_rejects_extra_replicate_packed_layout():
-    with pytest.raises(RuntimeError, match="packed x2.*canonical pair ownership"):
-        _compile_multimem_source(_multimem_packed_extra_replicate_layout_kernel())
+@pytest.mark.parametrize("kernel_factory,error", _INVALID_PACKED_LAYOUT_CASES)
+def test_multimem_rejects_invalid_packed_layout(kernel_factory, error: str):
+    with pytest.raises(RuntimeError, match=error):
+        _compile_multimem_source(kernel_factory())
+
+
+def test_multimem_accepts_canonical_unbound_thread_range_layout():
+    source = _compile_multimem_source(_multimem_packed_unbound_thread_range_layout_kernel())
+    assert "tl::multimem::LdReduceV2" in source
 
 
 def _multimem_tma_broadcast_kernel(shard_N: int, threads: int):

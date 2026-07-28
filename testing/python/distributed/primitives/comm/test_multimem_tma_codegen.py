@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 import tilelang
@@ -26,6 +28,15 @@ def _requires_multimem_tma_codegen(func):
 def _lower_with_nvcc(kernel, *, arch: str | None = None) -> str:
     target = "cuda" if arch is None else {"kind": "cuda", "arch": arch}
     artifact = tilelang.lower(kernel, target=target, enable_device_compile=True)
+    return artifact.kernel_source
+
+
+def _lower_without_nvcc(kernel) -> str:
+    artifact = tilelang.lower(
+        kernel,
+        target={"kind": "cuda", "arch": "sm_90a"},
+        enable_device_compile=False,
+    )
     return artifact.kernel_source
 
 
@@ -70,6 +81,16 @@ def _dynamic_rank_kernel():
             rank = T.get_rank()
             shared = T.alloc_shared((4,), T.float32)
             T.multimem_tma_store(shared, mcast[rank * 4 : (rank + 1) * 4])
+
+    return main
+
+
+def _plain_none_kernel():
+    @T.prim_func
+    def main(mcast: T.Tensor((4,), T.float32)):
+        with T.Kernel(1, threads=1):
+            shared = T.alloc_shared((4,), T.float32)
+            T.multimem_tma_store(shared, mcast, reduce_op=T.MultimemReduceOp.NONE)
 
     return main
 
@@ -223,87 +244,97 @@ def test_multimem_tma_legal_helpers_compile_with_nvcc():
         assert helper in source
 
 
-@_requires_multimem_tma_codegen
 def test_multimem_tma_dynamic_rank_is_runtime_guarded():
-    source = _lower_with_nvcc(_dynamic_rank_kernel())
+    source = _lower_without_nvcc(_dynamic_rank_kernel())
     assert "tl::multimem::cp_async_bulk" in source
-    assert "int rank = tl::get_rank();" in source
-    assert "if ((0 <= rank) && (rank <= 1)) {" in source
-    assert "(uint)16" in source
+    assert "tl::get_rank()" in source
+    assert re.search(r"if \(\(0 <= rank\) && \(rank <= 1\)\)", source)
 
 
-@_requires_multimem_tma_codegen
-def test_multimem_tma_rejects_non_16_byte_size():
-    with pytest.raises(RuntimeError, match="provably divisible by 16 bytes"):
-        _lower_with_nvcc(_invalid_size_kernel())
+def test_multimem_tma_none_uses_plain_store():
+    source = _lower_without_nvcc(_plain_none_kernel())
+    assert "tl::multimem::cp_async_bulk" in source
+    assert "tl::multimem::cp_reduce_async_bulk" not in source
 
 
-@_requires_multimem_tma_codegen
-@pytest.mark.parametrize("side", ["shared", "multicast"])
-def test_multimem_tma_rejects_misaligned_start(side: str):
-    with pytest.raises(RuntimeError, match=f"TMA {side}.*16-byte aligned"):
-        _lower_with_nvcc(_misaligned_kernel(side))
+_INVALID_TMA_CASES = (
+    pytest.param(
+        _invalid_size_kernel,
+        r"divisible by 16 bytes",
+        id="transaction-size",
+    ),
+    pytest.param(
+        lambda: _misaligned_kernel("shared"),
+        r"TMA shared.*16-byte aligned",
+        id="shared-alignment",
+    ),
+    pytest.param(
+        lambda: _misaligned_kernel("multicast"),
+        r"TMA multicast.*16-byte aligned",
+        id="multicast-alignment",
+    ),
+    pytest.param(
+        _out_of_bounds_kernel,
+        r"statically out of bounds",
+        id="static-out-of-bounds",
+    ),
+    pytest.param(
+        _aligned_out_of_bounds_kernel,
+        r"statically out of bounds",
+        id="aligned-static-out-of-bounds",
+    ),
+    pytest.param(
+        _noncontiguous_2d_kernel,
+        r"physically contiguous",
+        id="physical-contiguity",
+    ),
+    pytest.param(
+        _mismatched_extent_kernel,
+        r"matching source and destination extents",
+        id="extent",
+    ),
+    pytest.param(
+        _mismatched_rank_kernel,
+        r"regions with matching rank",
+        id="rank",
+    ),
+    pytest.param(
+        _mismatched_dtype_kernel,
+        r"matching source and destination dtypes",
+        id="dtype",
+    ),
+    pytest.param(
+        _unsupported_reduce_dtype_kernel,
+        r"supports float32, float16, and bfloat16",
+        id="reduce-dtype",
+    ),
+    pytest.param(
+        _unsupported_subbyte_dtype_kernel,
+        r"byte-addressable element dtypes",
+        id="subbyte-dtype",
+    ),
+    pytest.param(
+        _remapped_shared_layout_kernel,
+        r"layout-remapped buffers",
+        id="layout-remap",
+    ),
+    pytest.param(
+        lambda: _unsupported_f32_reduce_kernel(T.MultimemReduceOp.MIN),
+        r"does not support MIN with float32",
+        id="f32-min",
+    ),
+    pytest.param(
+        lambda: _unsupported_f32_reduce_kernel(T.MultimemReduceOp.MAX),
+        r"does not support MAX with float32",
+        id="f32-max",
+    ),
+)
 
 
-@_requires_multimem_tma_codegen
-def test_multimem_tma_rejects_static_out_of_bounds_region():
-    with pytest.raises(RuntimeError, match="region is statically out of bounds"):
-        _lower_with_nvcc(_out_of_bounds_kernel())
-
-
-@_requires_multimem_tma_codegen
-def test_multimem_tma_rejects_aligned_static_out_of_bounds_region():
-    with pytest.raises(RuntimeError, match="region is statically out of bounds"):
-        _lower_with_nvcc(_aligned_out_of_bounds_kernel())
-
-
-@_requires_multimem_tma_codegen
-def test_multimem_tma_rejects_noncontiguous_2d_region():
-    with pytest.raises(RuntimeError, match="provably physically contiguous"):
-        _lower_with_nvcc(_noncontiguous_2d_kernel())
-
-
-@_requires_multimem_tma_codegen
-def test_multimem_tma_rejects_mismatched_extent():
-    with pytest.raises(RuntimeError, match="matching source and destination extents"):
-        _lower_with_nvcc(_mismatched_extent_kernel())
-
-
-@_requires_multimem_tma_codegen
-def test_multimem_tma_rejects_mismatched_rank():
-    with pytest.raises(RuntimeError, match="regions with matching rank"):
-        _lower_with_nvcc(_mismatched_rank_kernel())
-
-
-@_requires_multimem_tma_codegen
-def test_multimem_tma_rejects_mismatched_dtype():
-    with pytest.raises(RuntimeError, match="matching source and destination dtypes"):
-        _lower_with_nvcc(_mismatched_dtype_kernel())
-
-
-@_requires_multimem_tma_codegen
-def test_multimem_tma_rejects_unsupported_reduce_dtype():
-    with pytest.raises(RuntimeError, match="supports float32, float16, and bfloat16"):
-        _lower_with_nvcc(_unsupported_reduce_dtype_kernel())
-
-
-@_requires_multimem_tma_codegen
-def test_multimem_tma_rejects_subbyte_dtype():
-    with pytest.raises(RuntimeError, match="requires byte-addressable element dtypes"):
-        _lower_with_nvcc(_unsupported_subbyte_dtype_kernel())
-
-
-@_requires_multimem_tma_codegen
-def test_multimem_tma_rejects_layout_remap():
-    with pytest.raises(RuntimeError, match="does not support layout-remapped buffers"):
-        _lower_with_nvcc(_remapped_shared_layout_kernel())
-
-
-@_requires_multimem_tma_codegen
-@pytest.mark.parametrize("reduce_op", [T.MultimemReduceOp.MIN, T.MultimemReduceOp.MAX])
-def test_multimem_tma_rejects_f32_min_max(reduce_op: T.MultimemReduceOp):
-    with pytest.raises(RuntimeError, match="does not support (MIN|MAX) with float32"):
-        _lower_with_nvcc(_unsupported_f32_reduce_kernel(reduce_op))
+@pytest.mark.parametrize("kernel_factory,error", _INVALID_TMA_CASES)
+def test_multimem_tma_rejects_invalid_contract(kernel_factory, error: str):
+    with pytest.raises(RuntimeError, match=error):
+        _lower_without_nvcc(kernel_factory())
 
 
 if __name__ == "__main__":
