@@ -14,6 +14,8 @@
 #include <tvm/target/target.h>
 #include <tvm/tirx/stmt_functor.h>
 
+#include <string>
+
 #include "operator.h"
 #include "parallel.h"
 
@@ -30,6 +32,16 @@ enum class MultimemMode : int {
   kTmaRedStore =
       4, // multimem.cp.reduce.async.bulk: shared → mcast_global (reduce)
 };
+
+namespace multimem_detail {
+
+std::string DTypeToTag(DataType dtype);
+std::string ReduceOpToTag(int reduce_op);
+std::string FuncName(MultimemMode mode, int reduce_op, int lanes,
+                     DataType dtype);
+PrimExpr MakeAddress(const Buffer &buffer, const Array<PrimExpr> &indices);
+
+} // namespace multimem_detail
 
 /*!
  * \brief Unified multimem operator for NVSwitch SHARP multicast operations.
@@ -84,8 +96,9 @@ private:
   For MakeTransformedSIMTLoop(arith::Analyzer *analyzer) const;
   Array<IterVar> MakeIterVars() const;
   Array<PrimExpr> MakeIndices(const Array<IterVar> &ivs, int src_dst) const;
-  PrimExpr MakePredicate(arith::Analyzer *analyzer, const Array<IterVar> &ivs,
-                         Array<PrimExpr> extents, int src_dst) const;
+  PrimExpr MakePredicate(arith::Analyzer *analyzer,
+                         const Array<PrimExpr> &indices,
+                         const Array<PrimExpr> &extents) const;
   bool IsPacked16BitMultimem() const;
   Stmt LowerPacked16Bit(const LowerArgs &T, arith::Analyzer *analyzer) const;
   Stmt LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const;

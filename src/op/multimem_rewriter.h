@@ -7,13 +7,12 @@
 #ifndef TVM_TL_OP_MULTIMEM_REWRITER_H_
 #define TVM_TL_OP_MULTIMEM_REWRITER_H_
 
+#include <tvm/arith/analyzer.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr_functor.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
-
-#include <sstream>
 
 #include "multimem.h"
 
@@ -21,20 +20,6 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
-
-static inline std::string GetReduceOpStr(int reduce_op) {
-  switch (reduce_op) {
-  case 0:
-    return "tl::multimem::ReduceOp::ADD";
-  case 1:
-    return "tl::multimem::ReduceOp::MIN";
-  case 2:
-    return "tl::multimem::ReduceOp::MAX";
-  default:
-    LOG(FATAL) << "Invalid reduce_op: " << reduce_op;
-    return "";
-  }
-}
 
 class PlainMulticastAccessFinder : public StmtExprVisitor {
 public:
@@ -114,9 +99,8 @@ protected:
   Stmt VisitStmt_(const ForNode *op) override {
     if (op->kind == ForKind::kVectorized) {
       auto extent_ptr = op->extent.as<IntImmNode>();
-      if (extent_ptr) {
+      if (extent_ptr && extent_ptr->value > 0) {
         int lanes = static_cast<int>(extent_ptr->value);
-        // Try to match the loop body as a single BufferStore from mcast buffer
         auto result = TryRewriteVectorizedLoop(op, lanes);
         if (result.defined()) {
           return result;
@@ -130,53 +114,30 @@ protected:
    * \brief Handle scalar BufferStore and Ramp-indexed vector accesses.
    */
   Stmt VisitStmt_(const BufferStoreNode *op) override {
-    if (mode_ == MultimemMode::kLdReduce) {
-      const BufferLoadNode *load = nullptr;
-      Optional<PrimExpr> source_predicate;
-      if (MatchLdReduceValue(op->value, &load, &source_predicate) &&
-          load->buffer.same_as(mcast_buf_)) {
-        int local_lanes = GetLanes(op->indices);
-        int mcast_lanes = GetLanes(load->indices);
-        ICHECK_EQ(local_lanes, mcast_lanes)
-            << "multimem load-reduce requires matching vector lanes";
-        if (!source_predicate.defined()) {
-          return MakeRampMultimemCalls(op->buffer, op->indices, load->buffer,
-                                       load->indices, local_lanes);
-        }
-
-        Array<Stmt> scalar_calls;
-        for (int i = 0; i < local_lanes; ++i) {
-          Array<PrimExpr> local_indices = ExtractLaneIndices(op->indices, i);
-          Array<PrimExpr> mcast_indices = ExtractLaneIndices(load->indices, i);
-          PrimExpr lane_valid = ExtractLane(source_predicate.value(), i);
-          Stmt call = MakeMultimemCall(op->buffer, local_indices, load->buffer,
-                                       mcast_indices, 1);
-          Stmt zero = BufferStore(op->buffer, make_zero(op->buffer->dtype),
-                                  local_indices);
-          scalar_calls.push_back(IfThenElse(lane_valid, call, zero));
-        }
-        return scalar_calls.size() == 1 ? scalar_calls[0]
-                                        : SeqStmt(std::move(scalar_calls));
-      }
-    } else {
-      if (op->buffer.same_as(mcast_buf_)) {
-        if (auto *load = op->value.as<BufferLoadNode>()) {
-          int local_lanes = GetLanes(load->indices);
-          int mcast_lanes = GetLanes(op->indices);
-          ICHECK_EQ(local_lanes, mcast_lanes)
-              << "multimem store/reduce requires matching vector lanes";
-          return MakeRampMultimemCalls(load->buffer, load->indices, op->buffer,
-                                       op->indices, local_lanes);
-        }
-      }
+    MatchedAccess access;
+    if (MatchBufferStore(op, &access) && NormalizeRampAccess(&access)) {
+      return EmitMatchedAccess(access);
     }
     return StmtExprMutator::VisitStmt_(op);
   }
 
 private:
+  struct MatchedAccess {
+    Buffer local_buf;
+    Array<PrimExpr> local_indices;
+    Buffer mcast_buf;
+    Array<PrimExpr> mcast_indices;
+    int lanes{1};
+    Optional<Var> loop_var;
+    PrimExpr loop_min;
+    Array<PrimExpr> statement_predicates;
+    Optional<PrimExpr> source_predicate;
+  };
+
   Buffer mcast_buf_;
   MultimemMode mode_;
   int reduce_op_;
+  arith::Analyzer analyzer_;
 
   bool IsZeroValue(const PrimExpr &value) const {
     if (is_zero(value)) {
@@ -208,6 +169,52 @@ private:
     return false;
   }
 
+  // Normalize the three direct modes to local/multicast buffers.  The value is
+  // deliberately restricted to the exact forms emitted by MakeSIMTLoop.
+  bool MatchBufferStore(const BufferStoreNode *store,
+                        MatchedAccess *access) const {
+    const BufferLoadNode *load = nullptr;
+    Optional<PrimExpr> source_predicate;
+    if (mode_ == MultimemMode::kLdReduce) {
+      if (!MatchLdReduceValue(store->value, &load, &source_predicate) ||
+          !load->buffer.same_as(mcast_buf_)) {
+        return false;
+      }
+      access->local_buf = store->buffer;
+      access->local_indices = store->indices;
+      access->mcast_buf = load->buffer;
+      access->mcast_indices = load->indices;
+      access->source_predicate = source_predicate;
+      return true;
+    }
+
+    load = store->value.as<BufferLoadNode>();
+    if (!load || !store->buffer.same_as(mcast_buf_)) {
+      return false;
+    }
+    access->local_buf = load->buffer;
+    access->local_indices = load->indices;
+    access->mcast_buf = store->buffer;
+    access->mcast_indices = store->indices;
+    return true;
+  }
+
+  bool NormalizeRampAccess(MatchedAccess *access) const {
+    int local_lanes = 1;
+    int mcast_lanes = 1;
+    if (!TryGetLanes(access->local_indices, &local_lanes) ||
+        !TryGetLanes(access->mcast_indices, &mcast_lanes) ||
+        local_lanes != mcast_lanes) {
+      return false;
+    }
+    if (access->source_predicate.defined() &&
+        !HasCompatibleLanes(access->source_predicate.value(), local_lanes)) {
+      return false;
+    }
+    access->lanes = local_lanes;
+    return true;
+  }
+
   /*!
    * \brief Try to rewrite a kVectorized for-loop containing a mcast
    * BufferStore. Returns the replacement Stmt, or undefined if the pattern
@@ -216,7 +223,6 @@ private:
   Stmt TryRewriteVectorizedLoop(const ForNode *op, int lanes) {
     // The body should be a single BufferStore, possibly wrapped in one or more
     // predicates without else branches.
-    const BufferStoreNode *store = nullptr;
     Stmt body = op->body;
     Array<PrimExpr> predicates;
     while (auto *ite = body.as<IfThenElseNode>()) {
@@ -226,106 +232,76 @@ private:
       predicates.push_back(ite->condition);
       body = ite->then_case;
     }
-    store = body.as<BufferStoreNode>();
-
+    const BufferStoreNode *store = body.as<BufferStoreNode>();
     if (!store)
       return Stmt();
 
-    const BufferLoadNode *load = nullptr;
-    Optional<PrimExpr> source_predicate;
-    if (mode_ == MultimemMode::kLdReduce) {
-      if (!MatchLdReduceValue(store->value, &load, &source_predicate)) {
-        return Stmt();
-      }
-    } else {
-      load = store->value.as<BufferLoadNode>();
-      if (!load)
-        return Stmt();
-    }
-
-    // Check if this involves the mcast buffer
-    bool matches = false;
-    const Buffer *local_buf_ptr = nullptr;
-    const Array<PrimExpr> *local_indices_ptr = nullptr;
-    const Buffer *mc_buf_ptr = nullptr;
-    const Array<PrimExpr> *mc_indices_ptr = nullptr;
-
-    if (mode_ == MultimemMode::kLdReduce) {
-      if (load->buffer.same_as(mcast_buf_)) {
-        matches = true;
-        local_buf_ptr = &store->buffer;
-        local_indices_ptr = &store->indices;
-        mc_buf_ptr = &load->buffer;
-        mc_indices_ptr = &load->indices;
-      }
-    } else {
-      if (store->buffer.same_as(mcast_buf_)) {
-        matches = true;
-        local_buf_ptr = &load->buffer;
-        local_indices_ptr = &load->indices;
-        mc_buf_ptr = &store->buffer;
-        mc_indices_ptr = &store->indices;
-      }
-    }
-
-    if (!matches)
+    MatchedAccess access;
+    if (!MatchBufferStore(store, &access))
       return Stmt();
 
-    // Split widths larger than 128 bits into supported V4/V2/V1 calls.  This
-    // handles targets where the generic vectorizer selects V8 f32.
-    Var vec_var = op->loop_var;
-    Array<Stmt> vector_calls;
-    int lane_offset = 0;
-    while (lane_offset < lanes) {
-      int chunk_lanes = NextSupportedWidth(lanes - lane_offset);
-      PrimExpr lane = op->min + IntImm(vec_var.dtype(), lane_offset);
-      vector_calls.push_back(MakeMultimemCall(
-          *local_buf_ptr, SubstituteIndices(*local_indices_ptr, vec_var, lane),
-          *mc_buf_ptr, SubstituteIndices(*mc_indices_ptr, vec_var, lane),
-          chunk_lanes));
-      lane_offset += chunk_lanes;
+    int local_lanes = 1;
+    int mcast_lanes = 1;
+    if (!TryGetLanes(access.local_indices, &local_lanes) ||
+        !TryGetLanes(access.mcast_indices, &mcast_lanes) || local_lanes != 1 ||
+        mcast_lanes != 1 ||
+        (access.source_predicate.defined() &&
+         !HasCompatibleLanes(access.source_predicate.value(), 1))) {
+      return Stmt();
     }
-    Stmt vector_path = vector_calls.size() == 1
-                           ? vector_calls[0]
-                           : SeqStmt(std::move(vector_calls));
+    for (const auto &predicate : predicates) {
+      if (!HasCompatibleLanes(predicate, 1)) {
+        return Stmt();
+      }
+    }
 
-    if (predicates.empty() && !source_predicate.defined()) {
+    access.lanes = lanes;
+    access.loop_var = op->loop_var;
+    access.loop_min = op->min;
+    access.statement_predicates = std::move(predicates);
+    return EmitMatchedAccess(access);
+  }
+
+  // Both vectorized-loop and Ramp forms reach this emitter.  Wide calls are
+  // used only for physically adjacent lanes; all other shapes become V1.
+  Stmt EmitMatchedAccess(const MatchedAccess &access) {
+    Stmt vector_path = EmitChunks(access);
+    if (access.statement_predicates.empty() &&
+        !access.source_predicate.defined()) {
       return vector_path;
     }
 
-    // A wide call is legal only if every original predicate holds for every
-    // lane.  Otherwise retain the predicates and issue scalar multimem calls.
+    // A wide call is legal only when every original predicate holds.  The
+    // scalar path preserves statement guards and load zero-fill lane by lane.
     PrimExpr all_lanes_valid = make_const(DataType::Bool(), true);
     Array<Stmt> scalar_calls;
-    for (int i = 0; i < lanes; ++i) {
-      PrimExpr lane = op->min + IntImm(vec_var.dtype(), i);
-      Map<Var, PrimExpr> vmap;
-      vmap.Set(vec_var, lane);
+    for (int i = 0; i < access.lanes; ++i) {
       PrimExpr statement_valid = make_const(DataType::Bool(), true);
-      for (const auto &predicate : predicates) {
+      for (const auto &predicate : access.statement_predicates) {
         statement_valid =
-            And(statement_valid, ExtractLane(Substitute(predicate, vmap), i));
+            And(statement_valid, MaterializeLane(predicate, access, i));
       }
       PrimExpr source_valid = make_const(DataType::Bool(), true);
-      if (source_predicate.defined()) {
+      if (access.source_predicate.defined()) {
         source_valid =
-            ExtractLane(Substitute(source_predicate.value(), vmap), i);
+            MaterializeLane(access.source_predicate.value(), access, i);
       }
       all_lanes_valid =
           And(all_lanes_valid, And(statement_valid, source_valid));
 
       Array<PrimExpr> local_indices =
-          SubstituteIndices(*local_indices_ptr, vec_var, lane);
+          MaterializeIndices(access.local_indices, access, i);
       Stmt scalar_call = MakeMultimemCall(
-          *local_buf_ptr, local_indices, *mc_buf_ptr,
-          SubstituteIndices(*mc_indices_ptr, vec_var, lane), 1);
+          access.local_buf, local_indices, access.mcast_buf,
+          MaterializeIndices(access.mcast_indices, access, i), 1);
       Stmt lane_action = scalar_call;
-      if (source_predicate.defined()) {
-        Stmt zero = BufferStore(
-            *local_buf_ptr, make_zero((*local_buf_ptr)->dtype), local_indices);
+      if (access.source_predicate.defined()) {
+        Stmt zero =
+            BufferStore(access.local_buf, make_zero(access.local_buf->dtype),
+                        local_indices);
         lane_action = IfThenElse(source_valid, scalar_call, zero);
       }
-      if (!predicates.empty()) {
+      if (!access.statement_predicates.empty()) {
         lane_action = IfThenElse(statement_valid, lane_action);
       }
       scalar_calls.push_back(lane_action);
@@ -336,57 +312,88 @@ private:
     return IfThenElse(all_lanes_valid, vector_path, scalar_path);
   }
 
-  static int NextSupportedWidth(int remaining) {
-    if (remaining >= 4)
-      return 4;
-    if (remaining >= 2)
-      return 2;
+  Stmt EmitChunks(const MatchedAccess &access) {
+    Array<Stmt> calls;
+    for (int lane = 0; lane < access.lanes;) {
+      int width = SelectChunkWidth(access, lane);
+      calls.push_back(MakeMultimemCall(
+          access.local_buf,
+          MaterializeIndices(access.local_indices, access, lane),
+          access.mcast_buf,
+          MaterializeIndices(access.mcast_indices, access, lane), width));
+      lane += width;
+    }
+    return calls.size() == 1 ? calls[0] : SeqStmt(std::move(calls));
+  }
+
+  int SelectChunkWidth(const MatchedAccess &access, int lane) {
+    for (int width : {4, 2}) {
+      if (lane + width <= access.lanes &&
+          IsUnitContiguous(access, lane, width) &&
+          IsNaturallyAligned(access.local_buf, access.local_indices, access,
+                             lane, width) &&
+          IsNaturallyAligned(access.mcast_buf, access.mcast_indices, access,
+                             lane, width)) {
+        return width;
+      }
+    }
     return 1;
   }
 
-  Array<PrimExpr> SubstituteIndices(const Array<PrimExpr> &indices,
-                                    const Var &var,
-                                    const PrimExpr &value) const {
-    Map<Var, PrimExpr> vmap;
-    vmap.Set(var, value);
-    Array<PrimExpr> result;
-    for (const auto &index : indices) {
-      result.push_back(Substitute(index, vmap));
-    }
-    return result;
-  }
-
-  /*!
-   * \brief Get the vector lanes from Ramp indices.
-   */
-  int GetLanes(const Array<PrimExpr> &indices) const {
-    int lanes = 1;
+  bool TryGetLanes(const Array<PrimExpr> &indices, int *lanes) const {
+    *lanes = 1;
     for (const auto &index : indices) {
       int index_lanes = index.dtype().lanes();
       if (index_lanes > 1) {
-        ICHECK(lanes == 1 || lanes == index_lanes)
-            << "multimem indices have inconsistent vector lanes";
-        lanes = index_lanes;
+        if (*lanes != 1 && *lanes != index_lanes) {
+          return false;
+        }
+        *lanes = index_lanes;
       }
     }
-    return lanes;
+    return true;
   }
 
-  Array<PrimExpr> ExtractLaneIndices(const Array<PrimExpr> &indices,
-                                     int lane_offset) const {
+  bool HasCompatibleLanes(const PrimExpr &value, int lanes) const {
+    return value.dtype().lanes() == 1 || value.dtype().lanes() == lanes;
+  }
+
+  Array<PrimExpr> MaterializeIndices(const Array<PrimExpr> &indices,
+                                     const MatchedAccess &access,
+                                     int lane) const {
+    if (access.loop_var.defined()) {
+      Map<Var, PrimExpr> vmap;
+      const Var &var = access.loop_var.value();
+      vmap.Set(var, access.loop_min + IntImm(var.dtype(), lane));
+      return indices.Map(
+          [&vmap](const PrimExpr &index) { return Substitute(index, vmap); });
+    }
+
     Array<PrimExpr> result;
     for (const auto &index : indices) {
       if (auto *ramp = index.as<RampNode>()) {
-        result.push_back(ramp->base + ramp->stride * lane_offset);
+        result.push_back(ramp->base + ramp->stride * lane);
       } else if (auto *broadcast = index.as<BroadcastNode>()) {
         result.push_back(broadcast->value);
       } else if (index.dtype().lanes() > 1) {
-        result.push_back(Shuffle::ExtractElement(index, lane_offset));
+        result.push_back(Shuffle::ExtractElement(index, lane));
       } else {
         result.push_back(index);
       }
     }
     return result;
+  }
+
+  PrimExpr MaterializeLane(const PrimExpr &value, const MatchedAccess &access,
+                           int lane) const {
+    PrimExpr lane_value = value;
+    if (access.loop_var.defined()) {
+      const Var &var = access.loop_var.value();
+      Map<Var, PrimExpr> vmap;
+      vmap.Set(var, access.loop_min + IntImm(var.dtype(), lane));
+      lane_value = Substitute(lane_value, vmap);
+    }
+    return ExtractLane(lane_value, lane);
   }
 
   PrimExpr ExtractLane(const PrimExpr &value, int lane) const {
@@ -399,21 +406,48 @@ private:
     return value;
   }
 
-  Stmt MakeRampMultimemCalls(const Buffer &local_buf,
-                             const Array<PrimExpr> &local_indices,
-                             const Buffer &mc_buf,
-                             const Array<PrimExpr> &mc_indices,
-                             int lanes) const {
-    Array<Stmt> calls;
-    int lane_offset = 0;
-    while (lane_offset < lanes) {
-      int chunk_lanes = NextSupportedWidth(lanes - lane_offset);
-      calls.push_back(MakeMultimemCall(
-          local_buf, ExtractLaneIndices(local_indices, lane_offset), mc_buf,
-          ExtractLaneIndices(mc_indices, lane_offset), chunk_lanes));
-      lane_offset += chunk_lanes;
+  bool IsUnitContiguous(const MatchedAccess &access, int lane, int width) {
+    for (int i = lane; i + 1 < lane + width; ++i) {
+      if (!HasUnitPhysicalStride(access.local_buf, access.local_indices, access,
+                                 i) ||
+          !HasUnitPhysicalStride(access.mcast_buf, access.mcast_indices, access,
+                                 i)) {
+        return false;
+      }
     }
-    return calls.size() == 1 ? calls[0] : SeqStmt(std::move(calls));
+    return true;
+  }
+
+  bool HasUnitPhysicalStride(const Buffer &buffer,
+                             const Array<PrimExpr> &indices,
+                             const MatchedAccess &access, int lane) {
+    Array<PrimExpr> current =
+        buffer->ElemOffset(MaterializeIndices(indices, access, lane));
+    Array<PrimExpr> next =
+        buffer->ElemOffset(MaterializeIndices(indices, access, lane + 1));
+    if (current.size() != 1 || next.size() != 1) {
+      return false;
+    }
+    PrimExpr stride = analyzer_.Simplify(next[0] - current[0]);
+    return analyzer_.CanProveEqual(stride, make_const(stride.dtype(), 1));
+  }
+
+  bool IsNaturallyAligned(const Buffer &buffer, const Array<PrimExpr> &indices,
+                          const MatchedAccess &access, int lane, int width) {
+    int element_bytes = buffer->dtype.bytes() * buffer->dtype.lanes();
+    int required_alignment = width * element_bytes;
+    if (buffer->data_alignment < required_alignment ||
+        buffer->data_alignment % required_alignment != 0) {
+      return false;
+    }
+    Array<PrimExpr> offsets =
+        buffer->ElemOffset(MaterializeIndices(indices, access, lane));
+    if (offsets.size() != 1) {
+      return false;
+    }
+    PrimExpr offset = analyzer_.Simplify(offsets[0]);
+    return analyzer_.CanProveEqual(
+        FloorMod(offset, make_const(offset.dtype(), width)), 0);
   }
 
   /*!
@@ -423,80 +457,22 @@ private:
                         const Array<PrimExpr> &local_indices,
                         const Buffer &mc_buf, const Array<PrimExpr> &mc_indices,
                         int lanes) const {
-    std::string func_name = MakeFuncName(lanes, local_buf->dtype);
+    std::string func_name =
+        multimem_detail::FuncName(mode_, reduce_op_, lanes, local_buf->dtype);
 
     Array<PrimExpr> args;
     args.push_back(StringImm(func_name));
 
     if (mode_ == MultimemMode::kLdReduce) {
-      args.push_back(MakeAddressOf(local_buf, local_indices));
-      args.push_back(MakeAddressOf(mc_buf, mc_indices));
+      args.push_back(multimem_detail::MakeAddress(local_buf, local_indices));
+      args.push_back(multimem_detail::MakeAddress(mc_buf, mc_indices));
     } else {
-      args.push_back(MakeAddressOf(mc_buf, mc_indices));
-      args.push_back(MakeAddressOf(local_buf, local_indices));
+      args.push_back(multimem_detail::MakeAddress(mc_buf, mc_indices));
+      args.push_back(multimem_detail::MakeAddress(local_buf, local_indices));
     }
 
     auto call = Call(DataType::Handle(), builtin::call_extern(), args);
     return Evaluate(call);
-  }
-
-  /*!
-   * \brief Construct the template function name.
-   */
-  std::string MakeFuncName(int lanes, DataType dtype) const {
-    std::string dtype_tag = DTypeToTag(dtype);
-    std::string reduce_op_str;
-    if (mode_ != MultimemMode::kSt) {
-      reduce_op_str = GetReduceOpStr(reduce_op_);
-    }
-
-    std::stringstream ss;
-    switch (mode_) {
-    case MultimemMode::kLdReduce:
-      ss << "tl::multimem::LdReduceV" << lanes;
-      break;
-    case MultimemMode::kSt:
-      ss << "tl::multimem::StV" << lanes;
-      break;
-    case MultimemMode::kRed:
-      ss << "tl::multimem::RedV" << lanes;
-      break;
-    }
-    ss << "<";
-    if (mode_ != MultimemMode::kSt) {
-      ss << reduce_op_str << ", ";
-    }
-    ss << dtype_tag;
-    ss << ">::run";
-    return ss.str();
-  }
-
-  std::string DTypeToTag(DataType dtype) const {
-    if (dtype.lanes() == 1 && dtype.is_float() && dtype.bits() == 32)
-      return "float";
-    if (dtype.lanes() == 1 && dtype.is_float16())
-      return "half_t";
-    if (dtype.lanes() == 1 && dtype.is_bfloat16())
-      return "bfloat16_t";
-    LOG(FATAL) << "Unsupported dtype for multimem: " << dtype;
-    return "";
-  }
-
-  /*!
-   * \brief Create address_of expression. Handles Ramp by extracting base.
-   */
-  PrimExpr MakeAddressOf(const Buffer &buffer,
-                         const Array<PrimExpr> &indices) const {
-    Array<PrimExpr> scalar_indices;
-    for (const auto &idx : indices) {
-      if (auto *ramp = idx.as<RampNode>()) {
-        scalar_indices.push_back(ramp->base);
-      } else {
-        scalar_indices.push_back(idx);
-      }
-    }
-    return Call(DataType::Handle(), builtin::address_of(),
-                {BufferLoad(buffer, scalar_indices)});
   }
 };
 
