@@ -102,7 +102,8 @@ separately from passes.
 | Two-GPU distributed suite, automatic VMM selection after IMEX configuration | 103 passed | `/tmp/tilescale-vmm-auto-full-final2.xml`, `e9a4adb00d353d4b7e27c56149cb9007f8303a51a667b42454858bf9daca0e6e` |
 | Eight-GPU VMM/multicast executable examples after IMEX configuration | 4 passed on all 8 ranks | `/tmp/tilescale-release-8gpu-final.xml`, `57802a4abb76322442dab347b30fb48fb3c2307e00bd2f2a75b8ebe518a0fe34` |
 | Two-GPU VMM, multicast, and multimem primitives, forced VMM | 58 passed, 1 mutually exclusive IPC fallback test deselected | `/tmp/tilescale-vmm-explicit-final3.xml`, `18305ec0c51f7111c083d753b7a431a13238b78797d5dccf4b8468fe42225149` |
-| Final four-GPU distributed suite on B200 with IMEX configured | 143 passed | `/tmp/tilescale-pr61-distributed-no-cluster-edit-4gpu.xml`, `f3cd1599515d4bf77368fe798831569f22e99d6139bf28a7f47c42e09077080f` |
+| Final four-GPU distributed suite on B200 with IMEX configured | 152 passed | `/tmp/tilescale-distributed-cleanup-4gpu.xml`, `bf59dea19dabe82474a96ede8315c3372032bcf8f7f076a4f965d7502936b4d0` |
+| Focused multimem direct, packed, VMM bulk, and reduction matrix on four B200 GPUs | 26 passed | `/tmp/tilescale-multimem-cleanup-4gpu.xml`, `468835c668e834d4d2d0478d9622ea4209e55c125ff98045dc6a56bbc748bb5f` |
 | Native multimem TMA broadcast and ADD on B200 (SM100), forced VMM | 1 passed with exact checks of both physical backings | `/tmp/tilescale-vmm-multimem-tma-final.xml`, `b68fb4556df7c7c6fc91a5e95bf0d8786d6a43faa835fce4dad3f376ac3c78a0` |
 | Rank-1 descriptor TMA store and neighboring TMA-copy regressions | 12 passed | `/tmp/tilescale-release-tma-copy-final.xml`, `87d4e871afdb76316976f9f03eca36a55ff503088498113d403efc09cd134bc1` |
 
