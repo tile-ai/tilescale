@@ -13,23 +13,7 @@ namespace tl {
 template <class> inline constexpr bool always_false_v = false;
 #endif
 
-// Type trait to detect bfloat16 types
-template <typename T> struct is_bfloat16 : std::false_type {};
-
-#ifdef __CUDA_BF16_TYPES_EXIST__
-template <> struct is_bfloat16<__nv_bfloat16> : std::true_type {};
-#endif
-
 } // namespace tl
-
-// Detect cutlass bfloat16_t
-namespace cutlass {
-struct bfloat16_t;
-}
-template <> struct tl::is_bfloat16<cutlass::bfloat16_t> : std::true_type {};
-
-template <typename T>
-inline constexpr bool is_bfloat16_v = tl::is_bfloat16<T>::value;
 
 // Fallback template for unsupported configurations
 template <Semantic semantic, Scope scope, bool na> struct StImpl {
@@ -49,18 +33,14 @@ template <Semantic semantic, Scope scope, bool nc, bool na> struct LdImpl {
   template <> struct StImpl<Semantic::SEM, Scope::SCOPE, NA> {                 \
     template <typename T> TL_DEVICE static void execute(T *ptr, T value) {     \
       if constexpr (sizeof(T) == 2) {                                          \
-        if constexpr (is_bfloat16_v<T>) {                                      \
-          uint16_t value_bits = *reinterpret_cast<uint16_t *>(&value);         \
-          asm volatile("st" SEM_LIT SCOPE_LIT NA_LIT                           \
-                       ".b16 [%0], %1;" ::"l"(ptr),                            \
-                       "h"(value_bits)                                         \
-                       : "memory");                                            \
-        } else {                                                               \
-          asm volatile("st" SEM_LIT SCOPE_LIT NA_LIT                           \
-                       ".b16 [%0], %1;" ::"l"(ptr),                            \
-                       "h"(value)                                              \
-                       : "memory");                                            \
-        }                                                                      \
+        /* .b16 moves raw bits, and no 16-bit float type (half_t, bfloat16_t,  \
+         * __nv_bfloat16) is usable as an "h" asm operand, so always go        \
+         * through uint16_t rather than special-casing one of them. */         \
+        uint16_t value_bits = *reinterpret_cast<uint16_t *>(&value);           \
+        asm volatile("st" SEM_LIT SCOPE_LIT NA_LIT                             \
+                     ".b16 [%0], %1;" ::"l"(ptr),                              \
+                     "h"(value_bits)                                           \
+                     : "memory");                                              \
       } else if constexpr (sizeof(T) == 4) {                                   \
         if constexpr (std::is_floating_point_v<T>) {                           \
           asm volatile("st" SEM_LIT SCOPE_LIT NA_LIT                           \
@@ -100,19 +80,15 @@ template <Semantic semantic, Scope scope, bool nc, bool na> struct LdImpl {
     template <typename T>                                                      \
     TL_DEVICE static void execute(const T *ptr, T &value) {                    \
       if constexpr (sizeof(T) == 2) {                                          \
-        if constexpr (is_bfloat16_v<T>) {                                      \
-          uint16_t value_bits;                                                 \
-          asm volatile("ld" SEM_LIT SCOPE_LIT NC_LIT NA_LIT ".b16 %0, [%1];"   \
-                       : "=h"(value_bits)                                      \
-                       : "l"(ptr)                                              \
-                       : "memory");                                            \
-          value = *reinterpret_cast<T *>(&value_bits);                         \
-        } else {                                                               \
-          asm volatile("ld" SEM_LIT SCOPE_LIT NC_LIT NA_LIT ".b16 %0, [%1];"   \
-                       : "=h"(value)                                           \
-                       : "l"(ptr)                                              \
-                       : "memory");                                            \
-        }                                                                      \
+        /* Mirror of the store path: a 16-bit float type cannot be an "=h"     \
+         * output operand at all, so always load into uint16_t and bit-cast.   \
+         */                                                                    \
+        uint16_t value_bits;                                                   \
+        asm volatile("ld" SEM_LIT SCOPE_LIT NC_LIT NA_LIT ".b16 %0, [%1];"     \
+                     : "=h"(value_bits)                                        \
+                     : "l"(ptr)                                                \
+                     : "memory");                                              \
+        value = *reinterpret_cast<T *>(&value_bits);                           \
       } else if constexpr (sizeof(T) == 4) {                                   \
         if constexpr (std::is_floating_point_v<T>) {                           \
           asm volatile("ld" SEM_LIT SCOPE_LIT NC_LIT NA_LIT ".b32 %0, [%1];"   \
@@ -176,12 +152,12 @@ TL_ST_IMPL(RELEASE, SYS, false, ".release", ".sys.global", "")
 TL_ST_IMPL(RELEASE, SYS, true, ".release", ".sys.global", ".L1::no_allocate")
 
 // Register all combinations of arguments for tl::ld in need here
-// nc (must with no scope and semantic)
-TL_LD_IMPL(WEAK, CTA, true, false, "", ".global", ".nc", "")
+// nc: `ld.global.nc` takes neither a memory-ordering nor a scope qualifier, so
+// only one scope is registered. Instantiating another scope would have produced
+// a byte-identical unscoped load, silently discarding the requested scope; it
+// is now a compile error instead. tl.tileop.ld rejects the same combinations.
 TL_LD_IMPL(WEAK, GPU, true, false, "", ".global", ".nc", "")
-TL_LD_IMPL(WEAK, SYS, true, false, "", ".global", ".nc", "")
 TL_LD_IMPL(WEAK, GPU, true, true, "", ".global", ".nc", ".L1::no_allocate")
-TL_LD_IMPL(WEAK, SYS, true, true, "", ".global", ".nc", ".L1::no_allocate")
 
 // WEAK (always .global)
 TL_LD_IMPL(WEAK, CTA, false, false, ".weak", ".global", "", "")

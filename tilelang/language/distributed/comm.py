@@ -67,9 +67,21 @@ def ld(
     nc: bool = False,
     src_pe: PrimExpr | IntImm | None = -1,
 ):
-    """Load a value from an address with explicit PTX scope and semantic."""
+    """Load a value from an address with explicit PTX scope and semantic.
+
+    ``nc=True`` lowers to ``ld.global.nc``, which reads through the non-coherent
+    (read-only) cache and carries neither a memory-ordering nor a scope
+    qualifier. It is therefore only valid with ``sem="weak"`` and without an
+    explicit scope, and it must not be used on memory a peer may write during the
+    kernel, because the read-only cache is not kept coherent.
+    """
     assert scope in ["cta", "gpu", "sys"], "Scope must be one of 'cta', 'gpu', or 'sys'."
     assert sem in ["weak", "volatile", "acquire", "relaxed"], "Semantic must be one of 'weak', 'volatile', 'acquire', or 'relaxed'."
+    if nc:
+        # Accepting either of these would silently drop it: ld.global.nc has no
+        # slot for a semantic or a scope.
+        assert sem == "weak", f"nc=True requires sem='weak', got sem={sem!r}: ld.global.nc has no memory ordering. Use nc=False for an ordered load."
+        assert scope == "gpu", f"nc=True does not accept an explicit scope, got scope={scope!r}: ld.global.nc is unscoped. Use nc=False for a scoped load."
     scope_id = {"cta": 0, "gpu": 1, "sys": 2}[scope]
     sem_id = {"weak": 0, "volatile": 1, "acquire": 2, "release": 3, "relaxed": 4}[sem]
     return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.ld"), address_of(src), value, sem_id, scope_id, int(na), int(nc), src_pe)
