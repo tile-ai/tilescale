@@ -19,7 +19,7 @@ body:
     attributes:
       label: "Milestone"
       description: "Link or name of the milestone for this release"
-      placeholder: "https://github.com/tile-ai/tilelang/milestone/XX"
+      placeholder: "https://github.com/tile-ai/tilescale/milestone/XX"
 
   - type: textarea
     id: scope

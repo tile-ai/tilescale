@@ -1,9 +1,10 @@
 from dataclasses import dataclass
 from tilelang import tvm as tvm
 from tvm.target import Target
-from tvm import tir
+from tvm import tirx
+from tvm.ir import Range
 from tilelang.utils.language import is_shared, is_fragment
-from tilelang.tileop.base import GemmWarpPolicy
+from tilelang.ir import GemmSPWarpPolicy
 from tvm.ir.base import Node
 
 
@@ -14,7 +15,7 @@ class GemmSPBase:
     def infer_layout(self, target: Target, thread_nums: int):
         raise NotImplementedError("infer_layout is not implemented")
 
-    def lower(self, target: Target, thread_nums: int, thread_var: tir.Var):
+    def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tirx.Var):
         raise NotImplementedError("lower is not implemented")
 
     def is_gemm_ss(self) -> bool:
@@ -58,45 +59,50 @@ class GemmSPBase:
         return self.E.dtype
 
     @property
-    def in_dtype(self) -> str:
+    def a_dtype(self):
         assert self.A.dtype == self.B.dtype, "A and B must have the same dtype"
         return self.A.dtype
+
+    @property
+    def b_dtype(self):
+        assert self.A.dtype == self.B.dtype, "A and B must have the same dtype"
+        return self.B.dtype
 
     @property
     def accum_dtype(self) -> str:
         return self.C.dtype
 
     @property
-    def A(self) -> tir.Buffer:
+    def A(self) -> tirx.Buffer:
         return self.gemm_sp_node.A
 
     @property
-    def E(self) -> tir.Buffer:
+    def E(self) -> tirx.Buffer:
         return self.gemm_sp_node.E
 
     @property
-    def B(self) -> tir.Buffer:
+    def B(self) -> tirx.Buffer:
         return self.gemm_sp_node.B
 
     @property
-    def C(self) -> tir.Buffer:
+    def C(self) -> tirx.Buffer:
         return self.gemm_sp_node.C
 
     @property
-    def ARegion(self) -> tir.PrimExpr:
-        return self.gemm_sp_node.ARegion
+    def ARegion(self) -> tirx.PrimExpr:
+        return self.gemm_sp_node.aRegion
 
     @property
-    def ERegion(self) -> tir.PrimExpr:
-        return self.gemm_sp_node.ERegion
+    def ERegion(self) -> tirx.PrimExpr:
+        return self.gemm_sp_node.eRegion
 
     @property
-    def BRegion(self) -> tir.PrimExpr:
-        return self.gemm_sp_node.BRegion
+    def BRegion(self) -> tirx.PrimExpr:
+        return self.gemm_sp_node.bRegion
 
     @property
-    def CRegion(self) -> tir.PrimExpr:
-        return self.gemm_sp_node.CRegion
+    def CRegion(self) -> tirx.PrimExpr:
+        return self.gemm_sp_node.cRegion
 
     @property
     def stride_A(self) -> int:
@@ -127,5 +133,5 @@ class GemmSPBase:
         return self.gemm_sp_node.wg_wait
 
     @property
-    def policy(self) -> GemmWarpPolicy:
+    def policy(self) -> GemmSPWarpPolicy:
         return self.gemm_sp_node.policy

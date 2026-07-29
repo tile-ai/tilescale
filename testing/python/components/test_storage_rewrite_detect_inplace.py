@@ -54,8 +54,11 @@ def test_storage_rewrite_detect_inplace_toggle():
     script_off = _get_device_kernel_script(detect_inplace=False)
     script_on = _get_device_kernel_script(detect_inplace=True)
 
-    assert script_off.count("read = (read * 2);") == 0
-    assert script_on.count("read = (read * 2);") > 0
+    pattern_on = "read = (read * 2);"
+    pattern_off = "write = (read * 2);"
+    assert script_off.count(pattern_on) == 0, f"inplace pattern found when disabled:\n{script_off}"
+    assert script_on.count(pattern_on) > 0, f"inplace pattern not found when enabled:\n{script_on}"
+    assert script_off.count(pattern_off) > 0, f"separate-write pattern not found when disabled:\n{script_off}"
 
 
 if __name__ == "__main__":

@@ -63,7 +63,6 @@ doc/doxygen/html/*
 
 # python egg
 *.egg-info
-.eggs/
 
 # Macos
 **/.DS_Store
@@ -95,14 +94,6 @@ tilelang/lib
 # cython
 tilelang/jit/adapter/cython/.cycache
 
-# nvshmem
-3rdparty/nvshmem
-
-# .so
-*.so
-
-# redundant nvshmem source code
-nvshmem_src/
 # cache directory for clangd
 .cache/
 
@@ -112,6 +103,7 @@ nvshmem_src/
 # CMake
 cmake-build/
 cmake-build-*/
+CMakeFiles/
 
 # Git version for sdist
 .git_commit.txt
@@ -128,8 +120,11 @@ maint/host_checks/logs/*
 # csv
 *.csv
 
-# clang-tidy
-/run-clang-tidy.py
-
 # perf regression test
 .perf_regression/
+
+# agent skills folder
+.humanize*
+
+# uv Lockfile
+uv.lock

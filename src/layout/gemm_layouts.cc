@@ -4,14 +4,28 @@
  *
  */
 
-#include <tvm/tir/stmt_functor.h>
+#include "support/check.h"
+#include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include <cmath>
 
 #include "layout.h"
 
+#if defined(_MSC_VER)
+#define TILELANG_COMPILER_UNREACHABLE() __assume(0)
+#elif defined(__GNUC__) || defined(__clang__)
+#define TILELANG_COMPILER_UNREACHABLE() __builtin_unreachable()
+#else
+#define TILELANG_COMPILER_UNREACHABLE() ((void)0)
+#endif
+
 namespace tvm {
 namespace tl {
+
+using namespace ffi;
 
 IterVar make_itervar(std::string name, PrimExpr dom) {
   Var var = Var(name, dom->dtype);
@@ -56,6 +70,8 @@ Fragment makeGemmFragment8x8Transposed() {
 
 /*
 From https://github.com/RadeonOpenCompute/amd_matrix_instruction_calculator
+Copyright (c) 2022-2024 Advanced Micro Devices, Inc. Licensed under MIT;
+see THIRDPARTYNOTICES.txt and LICENSES/AMD-Matrix-Instruction-Calculator.txt.
 ./matrix_calculator.py --architecture cdna1 --instruction v_mfma_f32_16x16x16f16
 --detail-instruction
 */
@@ -378,14 +394,62 @@ PrimExpr xor8x8(const PrimExpr &i, const PrimExpr j) {
   return 2 * xor4x4(i1, j1) + xor2x2(i0, j0);
 }
 
+namespace {
+struct SwizzleShapeInfo {
+  int64_t stride;
+  int64_t continuous;
+  int element_size;
+};
+
+SwizzleShapeInfo GetSwizzleShapeInfoChecked(const Buffer &buffer) {
+  ICHECK(buffer.defined()) << "Swizzle layout expects a defined buffer";
+  ICHECK(buffer->shape.size() >= 2)
+      << "Swizzle layout expects rank >= 2 buffer, got rank="
+      << buffer->shape.size();
+  size_t ndim = buffer->shape.size();
+  auto stride = as_const_int(buffer->shape[ndim - 2]);
+  auto continuous = as_const_int(buffer->shape[ndim - 1]);
+  ICHECK(stride && continuous)
+      << "Swizzle layout requires constant last-2 dims";
+  return SwizzleShapeInfo{*stride, *continuous, buffer->dtype.bits()};
+}
+
+bool TryGetSwizzleShapeInfo(const Buffer &buffer, SwizzleShapeInfo *info) {
+  if (!buffer.defined() || buffer->shape.size() < 2) {
+    return false;
+  }
+  size_t ndim = buffer->shape.size();
+  auto stride = as_const_int(buffer->shape[ndim - 2]);
+  auto continuous = as_const_int(buffer->shape[ndim - 1]);
+  if (!stride || !continuous) {
+    return false;
+  }
+  *info = SwizzleShapeInfo{*stride, *continuous, buffer->dtype.bits()};
+  return true;
+}
+
+} // namespace
+
+static Layout ExpandLayout2D(const Layout &base, const Buffer &buffer) {
+  Array<PrimExpr> leading_shape;
+  leading_shape.reserve(buffer->shape.size() - 2);
+  for (size_t i = 0; i + 2 < buffer->shape.size(); ++i) {
+    leading_shape.push_back(buffer->shape[i]);
+  }
+  return base->Expand(leading_shape);
+}
+
 // Layout swizzling for 32 bytes
-Layout makeQuarterBankSwizzleLayout(int stride, int continuous,
-                                    int element_size) {
+static Layout MakeQuarterBankSwizzleLayout2D(int stride, int continuous,
+                                             int element_size) {
   // Swizzle 1 bit
   Var i = InputPlaceholder(0);
   Var j = InputPlaceholder(1);
   int vector_size = 128 / element_size;
-  ICHECK(stride % 8 == 0) << "stride=" << stride;
+  // stride==4 is a truncated 4-row period used by tile::gather4/scatter4
+  // (s=i%8 ∈ [0,4) is a valid subset of the 8-row XOR pattern, matching
+  // what TMA applies per-row in hardware).
+  ICHECK(stride == 4 || stride % 8 == 0) << "stride=" << stride;
   ICHECK(continuous % (vector_size * 2) == 0)
       << "continuous=" << continuous << ", vector_size=" << vector_size;
   PrimExpr ts = FloorDiv(i, 8);
@@ -398,13 +462,23 @@ Layout makeQuarterBankSwizzleLayout(int stride, int continuous,
   return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
 }
 
+Layout makeQuarterBankSwizzleLayout(const Buffer &buffer) {
+  auto info = GetSwizzleShapeInfoChecked(buffer);
+  auto base = MakeQuarterBankSwizzleLayout2D(static_cast<int>(info.stride),
+                                             static_cast<int>(info.continuous),
+                                             info.element_size);
+  return ExpandLayout2D(base, buffer);
+}
+
 // Layout swizzling for 64 bytes
-Layout makeHalfBankSwizzleLayout(int stride, int continuous, int element_size) {
+static Layout MakeHalfBankSwizzleLayout2D(int stride, int continuous,
+                                          int element_size) {
   // Swizzle 2 bit
   Var i = InputPlaceholder(0);
   Var j = InputPlaceholder(1);
   int vector_size = 128 / element_size;
-  ICHECK(stride % 8 == 0) << "stride=" << stride;
+  // See MakeQuarterBankSwizzleLayout2D for stride==4 rationale.
+  ICHECK(stride == 4 || stride % 8 == 0) << "stride=" << stride;
   ICHECK(continuous % (vector_size * 4) == 0)
       << "continuous=" << continuous << ", vector_size=" << vector_size;
   PrimExpr ts = FloorDiv(i, 8);
@@ -417,13 +491,23 @@ Layout makeHalfBankSwizzleLayout(int stride, int continuous, int element_size) {
   return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
 }
 
+Layout makeHalfBankSwizzleLayout(const Buffer &buffer) {
+  auto info = GetSwizzleShapeInfoChecked(buffer);
+  auto base = MakeHalfBankSwizzleLayout2D(static_cast<int>(info.stride),
+                                          static_cast<int>(info.continuous),
+                                          info.element_size);
+  return ExpandLayout2D(base, buffer);
+}
+
 // Layout swizzling for 128 bytes
-Layout makeFullBankSwizzleLayout(int stride, int continuous, int element_size) {
+static Layout MakeFullBankSwizzleLayout2D(int stride, int continuous,
+                                          int element_size) {
   // Swizzle 3 bit
   Var i = InputPlaceholder(0);
   Var j = InputPlaceholder(1);
   int vector_size = 128 / element_size;
-  ICHECK(stride % 8 == 0) << "stride=" << stride;
+  // See MakeQuarterBankSwizzleLayout2D for stride==4 rationale.
+  ICHECK(stride == 4 || stride % 8 == 0) << "stride=" << stride;
   ICHECK(continuous % (vector_size * 8) == 0)
       << "continuous=" << continuous << ", vector_size=" << vector_size;
   PrimExpr ts = FloorDiv(i, 8);
@@ -434,6 +518,14 @@ Layout makeFullBankSwizzleLayout(int stride, int continuous, int element_size) {
   PrimExpr c_swizzle = xor8x8(c, s);
   PrimExpr index = vec + (c_swizzle + s * 8) * vector_size;
   return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
+}
+
+Layout makeFullBankSwizzleLayout(const Buffer &buffer) {
+  auto info = GetSwizzleShapeInfoChecked(buffer);
+  auto base = MakeFullBankSwizzleLayout2D(static_cast<int>(info.stride),
+                                          static_cast<int>(info.continuous),
+                                          info.element_size);
+  return ExpandLayout2D(base, buffer);
 }
 
 // Detail implementation please ref to
@@ -453,8 +545,8 @@ Layout makeMatrixCoreSwizzleLayout(int stride, int continuous, int element_size,
 
   IterVar row = make_itervar("row", stride);
   IterVar col = make_itervar("col", continuous);
-  PrimExpr phase = FloorMod(row / perPhase, maxPhase);
-  PrimExpr colOffSwizzled = ((col / vecSize) ^ phase) * vecSize;
+  PrimExpr phase = FloorMod(FloorDiv(row, perPhase), maxPhase);
+  PrimExpr colOffSwizzled = (FloorDiv(col, vecSize) ^ phase) * vecSize;
   PrimExpr colOffOrdered = FloorMod(col, vecSize);
   PrimExpr colOff = colOffSwizzled + colOffOrdered;
 
@@ -742,9 +834,14 @@ Layout makeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
   if (!k_inner && element_size == 8) // int8 KxN
     return makeGemmABLayoutPadded(mat_stride, mat_continuous, element_size);
   else if (mat_continuous % (vector_size * 8) == 0)
-    return makeFullBankSwizzleLayout(mat_stride, mat_continuous, element_size);
+    return MakeFullBankSwizzleLayout2D(mat_stride, mat_continuous,
+                                       element_size);
   else if (mat_continuous % (vector_size * 4) == 0)
-    return makeHalfBankSwizzleLayout(mat_stride, mat_continuous, element_size);
+    return MakeHalfBankSwizzleLayout2D(mat_stride, mat_continuous,
+                                       element_size);
+  else if (mat_continuous % (vector_size * 2) == 0)
+    return MakeQuarterBankSwizzleLayout2D(mat_stride, mat_continuous,
+                                          element_size);
   else {
     return makeGemmABLayoutPadded(mat_stride, mat_continuous, element_size);
   }
@@ -761,21 +858,21 @@ Layout makeGemmABLayoutHopper(int mat_stride, int mat_continuous,
     if (mat_stride % 8 != 0)
       return makeLinearLayout(
           Array<PrimExpr>{Integer(mat_stride), Integer(mat_continuous)});
-    return makeQuarterBankSwizzleLayout(mat_stride, mat_continuous,
-                                        element_size);
+    return MakeQuarterBankSwizzleLayout2D(mat_stride, mat_continuous,
+                                          element_size);
   }
   int vector_size = 128 / element_size;
 
   if (mat_stride % 8 == 0) {
     if (mat_continuous % (vector_size * 8) == 0)
-      return makeFullBankSwizzleLayout(mat_stride, mat_continuous,
-                                       element_size);
+      return MakeFullBankSwizzleLayout2D(mat_stride, mat_continuous,
+                                         element_size);
     else if (mat_continuous % (vector_size * 4) == 0)
-      return makeHalfBankSwizzleLayout(mat_stride, mat_continuous,
-                                       element_size);
+      return MakeHalfBankSwizzleLayout2D(mat_stride, mat_continuous,
+                                         element_size);
     else if (mat_continuous % (vector_size * 2) == 0)
-      return makeQuarterBankSwizzleLayout(mat_stride, mat_continuous,
-                                          element_size);
+      return MakeQuarterBankSwizzleLayout2D(mat_stride, mat_continuous,
+                                            element_size);
   }
 
   if (mat_continuous % vector_size == 0)
@@ -785,6 +882,7 @@ Layout makeGemmABLayoutHopper(int mat_stride, int mat_continuous,
     ICHECK(0) << "Unsupported layout for Hopper with stride=" << mat_stride
               << ", continuous=" << mat_continuous
               << ", element_size=" << element_size << ", k_inner=" << k_inner;
+  TILELANG_COMPILER_UNREACHABLE(); // to prevent compiler warning
 }
 
 Layout makeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
@@ -796,14 +894,14 @@ Layout makeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
 
   if (mat_stride % 8 == 0) {
     if (mat_continuous % (vector_size * 8) == 0)
-      return makeFullBankSwizzleLayout(mat_stride, mat_continuous,
-                                       element_size);
+      return MakeFullBankSwizzleLayout2D(mat_stride, mat_continuous,
+                                         element_size);
     else if (mat_continuous % (vector_size * 4) == 0)
-      return makeHalfBankSwizzleLayout(mat_stride, mat_continuous,
-                                       element_size);
+      return MakeHalfBankSwizzleLayout2D(mat_stride, mat_continuous,
+                                         element_size);
     else if (mat_continuous % (vector_size * 2) == 0)
-      return makeQuarterBankSwizzleLayout(mat_stride, mat_continuous,
-                                          element_size);
+      return MakeQuarterBankSwizzleLayout2D(mat_stride, mat_continuous,
+                                            element_size);
   }
 
   if (mat_continuous % vector_size == 0)
@@ -813,12 +911,121 @@ Layout makeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
     ICHECK(0) << "Unsupported layout for sm100 with stride=" << mat_stride
               << ", continuous=" << mat_continuous
               << ", element_size=" << element_size << ", k_inner=" << k_inner;
-  __builtin_unreachable(); // to prevent compiler warning
+  TILELANG_COMPILER_UNREACHABLE(); // to prevent compiler warning
 }
 
 Layout makeGemmABLayoutCDNA(int stride, int continuous, int element_size,
                             int kPack) {
   return makeMatrixCoreSwizzleLayout(stride, continuous, element_size, kPack);
 }
+
+Layout makeSwizzledLayout(const Buffer &buffer, bool k_inner, bool allow_pad) {
+  auto info = GetSwizzleShapeInfoChecked(buffer);
+  Layout base;
+  if (allow_pad) {
+    base = makeGemmABLayout(
+        static_cast<int>(info.stride), static_cast<int>(info.continuous),
+        static_cast<int>(info.continuous), info.element_size, k_inner);
+  } else {
+    base = makeGemmABLayoutHopper(
+        static_cast<int>(info.stride), static_cast<int>(info.continuous),
+        static_cast<int>(info.continuous), info.element_size, k_inner);
+  }
+  return ExpandLayout2D(base, buffer);
+}
+
+Layout makeVoltaSwizzledLayout(const Buffer &buffer, bool is_a, bool k_inner) {
+  auto info = GetSwizzleShapeInfoChecked(buffer);
+  auto base =
+      makeGemmVoltaABLayout(static_cast<int>(info.stride),
+                            static_cast<int>(info.continuous), is_a, k_inner);
+  return ExpandLayout2D(base, buffer);
+}
+
+Layout makeWgmmaSwizzledLayout(const Buffer &buffer, int continuity,
+                               bool k_inner) {
+  auto info = GetSwizzleShapeInfoChecked(buffer);
+  if (continuity < 0)
+    continuity = static_cast<int>(info.continuous);
+  auto base = makeGemmABLayoutHopper(static_cast<int>(info.stride),
+                                     static_cast<int>(info.continuous),
+                                     continuity, info.element_size, k_inner);
+  return ExpandLayout2D(base, buffer);
+}
+
+Layout makeTcgen05mmaSwizzledLayout(const Buffer &buffer, int continuity,
+                                    bool k_inner) {
+  auto info = GetSwizzleShapeInfoChecked(buffer);
+  if (continuity < 0)
+    continuity = static_cast<int>(info.continuous);
+  auto base = makeGemmABLayoutSm100(static_cast<int>(info.stride),
+                                    static_cast<int>(info.continuous),
+                                    continuity, info.element_size, k_inner);
+  return ExpandLayout2D(base, buffer);
+}
+
+SwizzleMode DetectSwizzleMode(const Layout &layout, const Buffer &buffer) {
+  SwizzleShapeInfo info;
+  if (!TryGetSwizzleShapeInfo(buffer, &info)) {
+    return SwizzleMode::kNone;
+  }
+  int vector_size = 128 / info.element_size;
+
+  // Check from smallest to largest granularity
+  // Need to verify stride and continuous constraints before comparing.
+  // stride==4 is the truncated 4-row period used by tile::gather4/scatter4
+  // (see Make{Quarter,Half,Full}BankSwizzleLayout2D).
+  bool stride_ok = info.stride == 4 || info.stride % 8 == 0;
+  if (stride_ok &&
+      info.continuous % (static_cast<int64_t>(vector_size) * 2) == 0) {
+    if (StructuralEqual()(layout, makeQuarterBankSwizzleLayout(buffer))) {
+      return SwizzleMode::kQuarter;
+    }
+  }
+  if (stride_ok &&
+      info.continuous % (static_cast<int64_t>(vector_size) * 4) == 0) {
+    if (StructuralEqual()(layout, makeHalfBankSwizzleLayout(buffer))) {
+      return SwizzleMode::kHalf;
+    }
+  }
+  if (stride_ok &&
+      info.continuous % (static_cast<int64_t>(vector_size) * 8) == 0) {
+    if (StructuralEqual()(layout, makeFullBankSwizzleLayout(buffer))) {
+      return SwizzleMode::kFull;
+    }
+  }
+  return SwizzleMode::kNone;
+}
+
+Optional<Layout> MergeSwizzleLayouts(const Layout &layout1,
+                                     const Layout &layout2,
+                                     const Buffer &buffer) {
+  SwizzleShapeInfo info;
+  if (!TryGetSwizzleShapeInfo(buffer, &info)) {
+    return std::nullopt;
+  }
+  SwizzleMode mode1 = DetectSwizzleMode(layout1, buffer);
+  SwizzleMode mode2 = DetectSwizzleMode(layout2, buffer);
+
+  // If either is not a swizzle layout, cannot merge
+  if (mode1 == SwizzleMode::kNone || mode2 == SwizzleMode::kNone) {
+    return std::nullopt;
+  }
+
+  // Take the smaller swizzle granularity (smaller enum value)
+  SwizzleMode min_mode = std::min(mode1, mode2);
+
+  switch (min_mode) {
+  case SwizzleMode::kQuarter:
+    return makeQuarterBankSwizzleLayout(buffer);
+  case SwizzleMode::kHalf:
+    return makeHalfBankSwizzleLayout(buffer);
+  case SwizzleMode::kFull:
+    return makeFullBankSwizzleLayout(buffer);
+  default:
+    return std::nullopt;
+  }
+}
+
 } // namespace tl
 } // namespace tvm

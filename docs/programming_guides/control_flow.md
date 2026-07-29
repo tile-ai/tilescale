@@ -80,7 +80,11 @@ for i, j in T.Parallel(M, N):
     C[i, j] = A[i, j] + B[i, j]
 ```
 
-Optional: `coalesced_width=` can hint memory coalescing for the innermost loop.
+Optional hints:
+- `coalesced_width=` controls memory coalescing width (used for vectorization checks).
+- `loop_layout=` accepts a `T.Fragment` to annotate the layout of the entire
+  nested parallel loop. The annotation is attached to the outermost loop only
+  and must have `InputDim == number of nested parallel extents`.
 
 ### Pipelined (software pipelining)
 
@@ -94,6 +98,10 @@ for ko in T.Pipelined(T.ceildiv(K, BK), num_stages=3):
     T.copy(B[ko * BK, bx * BN], B_s)  # stage: copy B tile
     T.gemm(A_s, B_s, C_f)             # stage: compute
 ```
+
+For manual `stage` / `order` annotations and the rule that scalar `Bind`
+statements do not consume annotation slots, see
+[Software Pipeline Annotations](software_pipeline.md).
 
 ### Persistent (advanced)
 

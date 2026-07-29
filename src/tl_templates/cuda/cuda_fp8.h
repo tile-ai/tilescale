@@ -7,13 +7,13 @@
 using fp8_e4_t = tl::float_e4m3_t;
 using fp8_e5_t = tl::float_e5m2_t;
 
-// __nv_fp8_e8m0 is only available in CUDA 12.6+
+// __nv_fp8_e8m0 is only available in CUDA 12.8+
 #if __CUDACC_VER_MAJOR__ > 12 ||                                               \
-    (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 6)
+    (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 8)
 using fp8_e8_t = __nv_fp8_e8m0;
 #define TL_HAS_FP8_E8M0 1
 #else
-// Placeholder for CUDA < 12.6
+// Placeholder for CUDA < 12.8
 struct fp8_e8_t {
   unsigned char data;
 };
@@ -312,3 +312,130 @@ __tl_cvt_fp8x2_to_float2(const __nv_fp8x2_storage_t x,
   result.y = (float)tmp.y;
   return result;
 }
+
+// ============================================================================
+// Inline PTX FP8 Conversions with Stochastic Rounding
+// ============================================================================
+//
+// PTX ISA: cvt.rs.satfinite.f8x4type.f32 d, {a, b, e, f}, rbits
+//   Output layout: d[31:24]=a, d[23:16]=b, d[15:8]=e, d[7:0]=f
+//   To get little-endian byte order (byte0=elem0), pass elements in reverse.
+
+// --- float4 -> e4m3x4 stochastic rounding ---
+
+// Full 4-element version (float4 input)
+TL_DEVICE __nv_fp8x4_storage_t
+__tl_cvt_f32x4_to_e4m3x4_rs_sat(float4 src, unsigned int rbits) {
+  __nv_fp8x4_storage_t result;
+  asm("cvt.rs.satfinite.e4m3x4.f32 %0, {%1, %2, %3, %4}, %5;"
+      : "=r"(result)
+      : "f"(src.w), "f"(src.z), "f"(src.y), "f"(src.x), "r"(rbits));
+  return result;
+}
+
+// 1-element version: pass src as f (lowest position), returns byte0
+TL_DEVICE __nv_fp8_storage_t
+__tl_cvt_f32x1_to_e4m3x1_rs_sat(float src, unsigned int rbits) {
+  __nv_fp8x4_storage_t tmp;
+  asm("cvt.rs.satfinite.e4m3x4.f32 %0, {%1, %2, %3, %4}, %5;"
+      : "=r"(tmp)
+      : "f"(0.0f), "f"(0.0f), "f"(0.0f), "f"(src), "r"(rbits));
+  return static_cast<__nv_fp8_storage_t>(tmp & 0xFF);
+}
+
+// 2-element version: pass src.x as f, src.y as e, returns lower 2 bytes
+TL_DEVICE __nv_fp8x2_storage_t
+__tl_cvt_f32x2_to_e4m3x2_rs_sat(float2 src, unsigned int rbits) {
+  __nv_fp8x4_storage_t tmp;
+  asm("cvt.rs.satfinite.e4m3x4.f32 %0, {%1, %2, %3, %4}, %5;"
+      : "=r"(tmp)
+      : "f"(0.0f), "f"(0.0f), "f"(src.y), "f"(src.x), "r"(rbits));
+  return static_cast<__nv_fp8x2_storage_t>(tmp & 0xFFFF);
+}
+
+// --- float4 -> e5m2x4 stochastic rounding ---
+
+// Full 4-element version (float4 input)
+TL_DEVICE __nv_fp8x4_storage_t
+__tl_cvt_f32x4_to_e5m2x4_rs_sat(float4 src, unsigned int rbits) {
+  __nv_fp8x4_storage_t result;
+  asm("cvt.rs.satfinite.e5m2x4.f32 %0, {%1, %2, %3, %4}, %5;"
+      : "=r"(result)
+      : "f"(src.w), "f"(src.z), "f"(src.y), "f"(src.x), "r"(rbits));
+  return result;
+}
+
+// 1-element version: pass src as f (lowest position), returns byte0
+TL_DEVICE __nv_fp8_storage_t
+__tl_cvt_f32x1_to_e5m2x1_rs_sat(float src, unsigned int rbits) {
+  __nv_fp8x4_storage_t tmp;
+  asm("cvt.rs.satfinite.e5m2x4.f32 %0, {%1, %2, %3, %4}, %5;"
+      : "=r"(tmp)
+      : "f"(0.0f), "f"(0.0f), "f"(0.0f), "f"(src), "r"(rbits));
+  return static_cast<__nv_fp8_storage_t>(tmp & 0xFF);
+}
+
+// 2-element version: pass src.x as f, src.y as e, returns lower 2 bytes
+TL_DEVICE __nv_fp8x2_storage_t
+__tl_cvt_f32x2_to_e5m2x2_rs_sat(float2 src, unsigned int rbits) {
+  __nv_fp8x4_storage_t tmp;
+  asm("cvt.rs.satfinite.e5m2x4.f32 %0, {%1, %2, %3, %4}, %5;"
+      : "=r"(tmp)
+      : "f"(0.0f), "f"(0.0f), "f"(src.y), "f"(src.x), "r"(rbits));
+  return static_cast<__nv_fp8x2_storage_t>(tmp & 0xFFFF);
+}
+
+// ============================================================================
+// FP8 E8M0 Related Conversions
+// ============================================================================
+#if TL_HAS_FP8_E8M0
+
+// fp8_e8m0 -> bfloat16
+TL_DEVICE __nv_bfloat16
+__tl_cvt_e8m0_to_bfloat16(const __nv_fp8_storage_t src) {
+  __nv_bfloat16_raw raw = __nv_cvt_e8m0_to_bf16raw(src);
+  return *reinterpret_cast<const __nv_bfloat16 *>(&raw);
+}
+
+// fp8_e8m0x2 -> bfloat16x2
+TL_DEVICE __nv_bfloat162
+__tl_cvt_e8m0x2_to_bfloat162(const __nv_fp8x2_storage_t src) {
+  __nv_bfloat162_raw raw = __nv_cvt_e8m0x2_to_bf162raw(src);
+  return *reinterpret_cast<const __nv_bfloat162 *>(&raw);
+}
+
+// bfloat16 -> fp8_e8m0
+TL_DEVICE
+__nv_fp8_storage_t __tl_cvt_bfloat16_to_e8m0(const __nv_bfloat16 src) {
+  __nv_bfloat16_raw raw = *reinterpret_cast<const __nv_bfloat16_raw *>(&src);
+  return __nv_cvt_bfloat16raw_to_e8m0(raw, __NV_SATFINITE, cudaRoundPosInf);
+}
+
+// bfloat162 -> fp8_e8m0x2
+TL_DEVICE __nv_fp8x2_storage_t
+__tl_cvt_bfloat162_to_e8m0x2(const __nv_bfloat162 src) {
+  __nv_bfloat162_raw raw = *reinterpret_cast<const __nv_bfloat162_raw *>(&src);
+  return __nv_cvt_bfloat162raw_to_e8m0x2(raw, __NV_SATFINITE, cudaRoundPosInf);
+}
+
+// float -> fp8_e8m0
+TL_DEVICE __nv_fp8_storage_t __tl_cvt_float_to_e8m0(const float src) {
+  return __nv_cvt_float_to_e8m0(src, __NV_SATFINITE, cudaRoundPosInf);
+}
+
+// float2 -> fp8_e8m0x2
+TL_DEVICE __nv_fp8x2_storage_t __tl_cvt_float2_to_e8m0x2(const float2 src) {
+  return __nv_cvt_float2_to_e8m0x2(src, __NV_SATFINITE, cudaRoundPosInf);
+}
+
+// double -> fp8_e8m0
+TL_DEVICE __nv_fp8_storage_t __tl_cvt_double_to_e8m0(const double src) {
+  return __nv_cvt_double_to_e8m0(src, __NV_SATFINITE, cudaRoundPosInf);
+}
+
+// double2 -> fp8_e8m0x2
+TL_DEVICE __nv_fp8x2_storage_t __tl_cvt_double2_to_e8m0x2(const double2 src) {
+  return __nv_cvt_double2_to_e8m0x2(src, __NV_SATFINITE, cudaRoundPosInf);
+}
+
+#endif

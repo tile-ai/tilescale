@@ -1,0 +1,432 @@
+#pragma once
+
+#include "../common.h"
+#include "ldst.h"
+
+#define IS_MASTER_THREAD()                                                     \
+  (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0)
+#define IS_MASTER_BLOCK()                                                      \
+  (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0)
+
+#define BARRIER_MAGIC 0x80000000
+
+namespace tl {
+
+enum class WaitScope { kSys, kGpu };
+enum class WaitSemantics { kAcquire, kVolatile };
+
+// Triggers a GPU trap for debugging
+TL_DEVICE void trap() { asm("trap;\n"); }
+
+// CTA-level memory fence
+TL_DEVICE void memory_fence_cta() {
+  asm volatile("fence.acq_rel.cta;\n" ::: "memory");
+}
+
+// GPU-level memory fence
+TL_DEVICE void memory_fence_gpu() {
+  asm volatile("fence.acq_rel.gpu;\n" ::: "memory");
+}
+
+// System-level memory fence
+TL_DEVICE void memory_fence_sys() {
+  asm volatile("fence.acq_rel.sys;\n" ::: "memory");
+}
+
+// GPU-level load with acquire semantics
+TL_DEVICE uint32_t ld_acquire_gpu_u32(const uint32_t *ptr) {
+  uint32_t ret;
+  asm volatile("ld.acquire.gpu.global.u32 %0, [%1];\n" : "=r"(ret) : "l"(ptr));
+  return ret;
+}
+
+// GPU-level atomic add with release semantics
+TL_DEVICE uint32_t atomic_add_release_gpu_u32(const uint32_t *ptr,
+                                              uint32_t value) {
+  uint32_t ret;
+  asm volatile("atom.add.release.gpu.global.s32 %0, [%1], %2;\n"
+               : "=r"(ret)
+               : "l"(ptr), "r"(value));
+  return ret;
+}
+
+template <typename T> struct AcquireLoadSys;
+
+template <> struct AcquireLoadSys<uint32_t> {
+  TL_DEVICE static uint32_t run(const uint32_t *ptr) {
+    uint32_t ret;
+    asm volatile("ld.acquire.sys.global.u32 %0, [%1];\n"
+                 : "=r"(ret)
+                 : "l"(ptr)
+                 : "memory");
+    return ret;
+  }
+};
+
+template <> struct AcquireLoadSys<int32_t> {
+  TL_DEVICE static int32_t run(const int32_t *ptr) {
+    int32_t ret;
+    asm volatile("ld.acquire.sys.global.s32 %0, [%1];\n"
+                 : "=r"(ret)
+                 : "l"(ptr)
+                 : "memory");
+    return ret;
+  }
+};
+
+template <> struct AcquireLoadSys<uint64_t> {
+  TL_DEVICE static uint64_t run(const uint64_t *ptr) {
+    uint64_t ret;
+    asm volatile("ld.acquire.sys.global.u64 %0, [%1];\n"
+                 : "=l"(ret)
+                 : "l"(ptr)
+                 : "memory");
+    return ret;
+  }
+};
+
+template <> struct AcquireLoadSys<int64_t> {
+  TL_DEVICE static int64_t run(const int64_t *ptr) {
+    int64_t ret;
+    asm volatile("ld.acquire.sys.global.s64 %0, [%1];\n"
+                 : "=l"(ret)
+                 : "l"(ptr)
+                 : "memory");
+    return ret;
+  }
+};
+
+template <typename T> TL_DEVICE T ld_acquire_sys(const T *ptr) {
+  return AcquireLoadSys<T>::run(ptr);
+}
+
+template <typename T> struct AcquireLoadGpu;
+
+template <> struct AcquireLoadGpu<uint32_t> {
+  TL_DEVICE static uint32_t run(const uint32_t *ptr) {
+    uint32_t ret;
+    asm volatile("ld.acquire.gpu.global.u32 %0, [%1];\n"
+                 : "=r"(ret)
+                 : "l"(ptr)
+                 : "memory");
+    return ret;
+  }
+};
+
+template <> struct AcquireLoadGpu<int32_t> {
+  TL_DEVICE static int32_t run(const int32_t *ptr) {
+    int32_t ret;
+    asm volatile("ld.acquire.gpu.global.s32 %0, [%1];\n"
+                 : "=r"(ret)
+                 : "l"(ptr)
+                 : "memory");
+    return ret;
+  }
+};
+
+template <> struct AcquireLoadGpu<uint64_t> {
+  TL_DEVICE static uint64_t run(const uint64_t *ptr) {
+    uint64_t ret;
+    asm volatile("ld.acquire.gpu.global.u64 %0, [%1];\n"
+                 : "=l"(ret)
+                 : "l"(ptr)
+                 : "memory");
+    return ret;
+  }
+};
+
+template <> struct AcquireLoadGpu<int64_t> {
+  TL_DEVICE static int64_t run(const int64_t *ptr) {
+    int64_t ret;
+    asm volatile("ld.acquire.gpu.global.s64 %0, [%1];\n"
+                 : "=l"(ret)
+                 : "l"(ptr)
+                 : "memory");
+    return ret;
+  }
+};
+
+template <typename T> TL_DEVICE T ld_acquire_gpu(const T *ptr) {
+  return AcquireLoadGpu<T>::run(ptr);
+}
+
+template <typename T> struct VolatileLoad;
+
+template <> struct VolatileLoad<uint32_t> {
+  TL_DEVICE static uint32_t run(const uint32_t *ptr) {
+    uint32_t ret;
+    asm volatile("ld.volatile.global.u32 %0, [%1];\n"
+                 : "=r"(ret)
+                 : "l"(ptr)
+                 : "memory");
+    return ret;
+  }
+};
+
+template <> struct VolatileLoad<int32_t> {
+  TL_DEVICE static int32_t run(const int32_t *ptr) {
+    int32_t ret;
+    asm volatile("ld.volatile.global.s32 %0, [%1];\n"
+                 : "=r"(ret)
+                 : "l"(ptr)
+                 : "memory");
+    return ret;
+  }
+};
+
+template <> struct VolatileLoad<uint64_t> {
+  TL_DEVICE static uint64_t run(const uint64_t *ptr) {
+    uint64_t ret;
+    asm volatile("ld.volatile.global.u64 %0, [%1];\n"
+                 : "=l"(ret)
+                 : "l"(ptr)
+                 : "memory");
+    return ret;
+  }
+};
+
+template <> struct VolatileLoad<int64_t> {
+  TL_DEVICE static int64_t run(const int64_t *ptr) {
+    int64_t ret;
+    asm volatile("ld.volatile.global.s64 %0, [%1];\n"
+                 : "=l"(ret)
+                 : "l"(ptr)
+                 : "memory");
+    return ret;
+  }
+};
+
+template <typename T> TL_DEVICE T ld_volatile(const T *ptr) {
+  return VolatileLoad<T>::run(ptr);
+}
+
+template <WaitScope Scope, WaitSemantics Semantics, typename T>
+TL_DEVICE T wait_load(const T *ptr) {
+  if constexpr (Semantics == WaitSemantics::kVolatile) {
+    return ld_volatile(ptr);
+  } else if constexpr (Scope == WaitScope::kGpu) {
+    return ld_acquire_gpu(ptr);
+  } else {
+    return ld_acquire_sys(ptr);
+  }
+}
+
+TL_DEVICE uint32_t ld_acquire_sys_u32(const uint32_t *ptr) {
+  return ld_acquire_sys<uint32_t>(ptr);
+}
+
+// Initialize a GPU barrier
+template <const uint32_t kExpected>
+TL_DEVICE void init_barrier_gpu(uint32_t *barrier) {
+  if (IS_MASTER_BLOCK() && IS_MASTER_THREAD()) {
+    *barrier = BARRIER_MAGIC - kExpected;
+  }
+  memory_fence_gpu(); // TODO: Is fence or sync needed here?
+}
+
+// Arrive at a GPU barrier (atomic increment)
+TL_DEVICE void arrive_barrier_gpu(uint32_t *barrier) {
+  memory_fence_gpu();
+  if (IS_MASTER_THREAD()) {
+    atomic_add_release_gpu_u32(barrier, 1);
+  }
+}
+
+// Wait at a GPU barrier until all expected blocks have arrived
+TL_DEVICE void wait_barrier_gpu(uint32_t *barrier) {
+  if (IS_MASTER_THREAD()) {
+    uint32_t arrive = ld_acquire_gpu_u32(barrier);
+    while (!(arrive & BARRIER_MAGIC)) {
+      arrive = ld_acquire_gpu_u32(barrier);
+    }
+  }
+  __syncthreads();
+}
+
+// Synchronize at a GPU barrier (arrive + wait)
+TL_DEVICE void sync_barrier_gpu(uint32_t *barrier) {
+  // memory_fence_gpu();
+  __syncthreads();
+  if (IS_MASTER_THREAD()) {
+    atomic_add_release_gpu_u32(barrier, 1);
+    uint32_t arrive = ld_acquire_gpu_u32(barrier);
+    while (arrive < BARRIER_MAGIC) {
+      arrive = ld_acquire_gpu_u32(barrier);
+    }
+  }
+  __syncthreads();
+}
+
+// cooperative groups version of GPU barrier arrive
+TL_DEVICE unsigned int sync_grids_arrive(uint32_t *barrier) {
+  unsigned int oldArrive = 0;
+
+  __syncthreads();
+
+  if (IS_MASTER_THREAD()) {
+    unsigned int expected = gridDim.x * gridDim.y * gridDim.z;
+    unsigned int nb = 1;
+    if (IS_MASTER_BLOCK()) {
+      nb = 0x80000000 - (expected - 1);
+    }
+    asm volatile("atom.add.release.gpu.u32 %0,[%1],%2;"
+                 : "=r"(oldArrive)
+                 : "l"((unsigned int *)barrier), "r"(nb)
+                 : "memory");
+  }
+
+  return oldArrive;
+}
+
+// cooperative groups version of GPU barrier arrive
+TL_DEVICE void sync_grids_wait(unsigned int oldArrive, uint32_t *barrier) {
+  if (IS_MASTER_THREAD()) {
+    unsigned int current_arrive;
+    do {
+      asm volatile("ld.acquire.gpu.u32 %0,[%1];"
+                   : "=r"(current_arrive)
+                   : "l"((unsigned int *)barrier)
+                   : "memory");
+    } while (!(((oldArrive ^ current_arrive) & 0x80000000) != 0));
+  }
+  __syncthreads();
+}
+
+TL_DEVICE void sync_grid(uint32_t *barrier) {
+  unsigned int token = sync_grids_arrive(barrier);
+  sync_grids_wait(token, barrier);
+}
+
+// Sync blocks at a system-level barrier with an optinal fence
+// TODO(wt): Add timeout handling
+
+template <bool need_fence = true>
+TL_DEVICE void barrier_blocks(int offset, int rank, int num_ranks) {
+// Macro to compute the barrier pointer for a given target rank
+#define BARRIER_PTR(tgt_rank)                                                  \
+  (reinterpret_cast<int32_t *>(get_remote_base_ptr(tgt_rank) + offset))
+#define FINISHED_SUM_TAG (1024)
+
+  if constexpr (need_fence) {
+    memory_fence_sys();
+    __syncthreads();
+  }
+
+  int tid = threadIdx.x;
+  if (tid < num_ranks) {
+    atomicAdd_system(BARRIER_PTR(rank) + tid, FINISHED_SUM_TAG);
+    atomicSub_system(BARRIER_PTR(tid) + rank, FINISHED_SUM_TAG);
+  }
+
+  while (true) {
+    int value =
+        tid < num_ranks ? ld_volatile<int32_t>(BARRIER_PTR(rank) + tid) : 0;
+    if (__all_sync(0xffffffff, value <= 0)) {
+      break;
+    }
+  }
+  __syncthreads();
+
+#undef BARRIER_PTR
+#undef FINISHED_SUM_TAG
+}
+
+template <typename ValueT, typename P, typename T>
+using WaitValueType = std::conditional_t<
+    std::is_void_v<ValueT>,
+    std::conditional_t<std::is_pointer_v<P>,
+                       std::remove_cv_t<std::remove_pointer_t<P>>,
+                       std::remove_cv_t<T>>,
+    std::remove_cv_t<ValueT>>;
+
+template <WaitScope Scope = WaitScope::kSys,
+          WaitSemantics Semantics = WaitSemantics::kAcquire,
+          typename ValueT = void, typename P, typename T>
+TL_DEVICE void wait_eq(P ptr, T val) {
+  static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
+                "P must be a pointer or uint64_t");
+  using FlagT = WaitValueType<ValueT, P, T>;
+  const FlagT *flag_ptr = reinterpret_cast<const FlagT *>(ptr);
+  const FlagT expected = static_cast<FlagT>(val);
+// Spin-loop
+#pragma unroll 1
+  while (wait_load<Scope, Semantics>(flag_ptr) != expected)
+    ;
+}
+
+template <WaitScope Scope = WaitScope::kSys,
+          WaitSemantics Semantics = WaitSemantics::kAcquire,
+          typename ValueT = void, typename P, typename T>
+TL_DEVICE void wait_ne(P ptr, T val) {
+  static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
+                "P must be a pointer or uint64_t");
+  using FlagT = WaitValueType<ValueT, P, T>;
+  const FlagT *flag_ptr = reinterpret_cast<const FlagT *>(ptr);
+  const FlagT expected = static_cast<FlagT>(val);
+// Spin-loop
+#pragma unroll 1
+  while (wait_load<Scope, Semantics>(flag_ptr) == expected)
+    ;
+}
+
+template <WaitScope Scope = WaitScope::kSys,
+          WaitSemantics Semantics = WaitSemantics::kAcquire,
+          typename ValueT = void, typename P, typename T>
+TL_DEVICE void wait_ge(P ptr, T val) {
+  static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
+                "P must be a pointer or uint64_t");
+  using FlagT = WaitValueType<ValueT, P, T>;
+  const FlagT *flag_ptr = reinterpret_cast<const FlagT *>(ptr);
+  const FlagT expected = static_cast<FlagT>(val);
+// Spin-loop
+#pragma unroll 1
+  while (wait_load<Scope, Semantics>(flag_ptr) < expected)
+    ;
+}
+
+template <WaitScope Scope = WaitScope::kSys,
+          WaitSemantics Semantics = WaitSemantics::kAcquire,
+          typename ValueT = void, typename P, typename T>
+TL_DEVICE void wait_le(P ptr, T val) {
+  static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
+                "P must be a pointer or uint64_t");
+  using FlagT = WaitValueType<ValueT, P, T>;
+  const FlagT *flag_ptr = reinterpret_cast<const FlagT *>(ptr);
+  const FlagT expected = static_cast<FlagT>(val);
+// Spin-loop
+#pragma unroll 1
+  while (wait_load<Scope, Semantics>(flag_ptr) > expected)
+    ;
+}
+
+template <WaitScope Scope = WaitScope::kSys,
+          WaitSemantics Semantics = WaitSemantics::kAcquire,
+          typename ValueT = void, typename P, typename T>
+TL_DEVICE void wait_gt(P ptr, T val) {
+  static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
+                "P must be a pointer or uint64_t");
+  using FlagT = WaitValueType<ValueT, P, T>;
+  const FlagT *flag_ptr = reinterpret_cast<const FlagT *>(ptr);
+  const FlagT expected = static_cast<FlagT>(val);
+// Spin-loop
+#pragma unroll 1
+  while (wait_load<Scope, Semantics>(flag_ptr) <= expected)
+    ;
+}
+
+template <WaitScope Scope = WaitScope::kSys,
+          WaitSemantics Semantics = WaitSemantics::kAcquire,
+          typename ValueT = void, typename P, typename T>
+TL_DEVICE void wait_lt(P ptr, T val) {
+  static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
+                "P must be a pointer or uint64_t");
+  using FlagT = WaitValueType<ValueT, P, T>;
+  const FlagT *flag_ptr = reinterpret_cast<const FlagT *>(ptr);
+  const FlagT expected = static_cast<FlagT>(val);
+// Spin-loop
+#pragma unroll 1
+  while (wait_load<Scope, Semantics>(flag_ptr) >= expected)
+    ;
+}
+
+} // namespace tl

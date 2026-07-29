@@ -8,6 +8,9 @@
 #include <cutlass/arch/barrier.h>
 #include <cutlass/cutlass.h>
 #include <cutlass/gemm/collective/collective_builder.hpp>
+#ifdef __CUDACC_RTC__
+#include <cutlass/gemm/collective/builders/sm100_common.inl>
+#endif
 
 namespace cute {
 

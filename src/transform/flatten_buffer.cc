@@ -21,15 +21,17 @@
  * \file flatten_buffer.cc
  */
 
+#include "../../3rdparty/tvm/src/tirx/ir/data_type_rewriter.h"
 #include "arith/ir_mutator_with_analyzer.h"
+#include "support/check.h"
 #include "tir/transforms/ir_utils.h"
 #include <tvm/arith/iter_affine_map.h>
-#include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/attrs.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/data_type_rewriter.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include <tvm/ir/cast.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include <utility>
 
@@ -38,7 +40,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 /*!
  * \brief Transform multi-dimension BufferLoad/BufferStore into device-supported
@@ -69,29 +72,29 @@ private:
   using IRMutatorWithAnalyzer::VisitStmt;
   using IRMutatorWithAnalyzer::VisitStmt_;
 
-  class Int64Promoter : public tir::IndexDataTypeRewriter {
+  class Int64Promoter : public tirx::IndexDataTypeRewriter {
   public:
     using Parent = IndexDataTypeRewriter;
 
     PrimExpr VisitExpr_(const VarNode *op) final {
       if (op->dtype.is_int() && op->dtype.bits() < 64) {
-        return cast(DataType::Int(64), tvm::ffi::GetRef<Var>(op));
+        return cast(DataType::Int(64), GetRef<Var>(op));
       }
-      return tvm::ffi::GetRef<PrimExpr>(op);
+      return GetRef<PrimExpr>(op);
     }
 
     PrimExpr VisitExpr_(const IntImmNode *op) final {
       if (op->dtype.is_int() && op->dtype.bits() < 64) {
         return IntImm(DataType::Int(64), op->value);
       }
-      return tvm::ffi::GetRef<PrimExpr>(op);
+      return GetRef<PrimExpr>(op);
     }
 
     PrimExpr VisitExpr_(const CastNode *op) final {
       if (op->dtype.is_int() && op->dtype.bits() < 64) {
         return cast(DataType::Int(64), op->value);
       }
-      return tvm::ffi::GetRef<PrimExpr>(op);
+      return GetRef<PrimExpr>(op);
     }
 
     Stmt VisitStmt_(const BufferStoreNode *op) final {
@@ -108,14 +111,14 @@ private:
 
   explicit BufferFlattener(arith::Analyzer *ana) : IRMutatorWithAnalyzer(ana) {}
 
-  Stmt VisitStmt_(const BlockNode *op) final {
+  Stmt VisitStmt_(const SBlockNode *op) final {
     ICHECK_EQ(op->match_buffers.size(), 0)
         << "Unexpected MatchBufferRegion found during "
            "tir.transform.FlattenBuffer.  "
         << "All MatchBufferRegion should be removed in "
            "tir.transform.LowerMatchBuffer.";
 
-    Block block = tvm::ffi::GetRef<Block>(op);
+    SBlock block = GetRef<SBlock>(op);
 
     Array<Buffer> alloc_buffers = op->alloc_buffers;
     alloc_buffers.MutateByApply(
@@ -143,85 +146,40 @@ private:
     return StmtExprMutator::VisitStmt_(block.get());
   }
 
-  Stmt VisitStmt_(const AllocateNode *op) final {
-    // Determine the flattened extents first, before stripping of
-    // DeclBuffer.
-    auto new_extents = [&]() -> Array<PrimExpr> {
-      if (op->extents.size() == 1) {
-        // No flattening required for buffers that are already flat
-        return op->extents;
-      }
+  Stmt VisitStmt_(const AllocBufferNode *op) final {
+    auto node = Downcast<AllocBuffer>(StmtExprMutator::VisitStmt_(op));
 
-      if (auto *decl_buffer = op->body.as<DeclBufferNode>()) {
-        // N-d buffer, use the DeclBuffer inside to determine how it
-        // should be flattened.
-        auto &buffer = decl_buffer->buffer;
-        bool matching_buffer = [&]() {
-          if (!decl_buffer->buffer->data.same_as(op->buffer_var)) {
-            return false;
-          }
-          if (op->dtype != buffer->dtype) {
-            return false;
-          }
-          if (op->extents.size() != buffer->shape.size()) {
-            return false;
-          }
-          ExprDeepEqual expr_equal;
-          for (size_t i = 0; i < op->extents.size(); i++) {
-            if (!expr_equal(op->extents[i], buffer->shape[i])) {
-              return false;
-            }
-          }
-          return true;
-        }();
-
-        if (matching_buffer) {
-          Buffer flattened = GetFlattenedBuffer(buffer);
-          return flattened->shape;
-        } else {
-          ICHECK(decl_buffer->buffer->axis_separators.empty())
-              << "DeclBuffer node doesn't match Allocate extents, but also "
-                 "shouldn't be "
-                 "flattened to 1-d physical memory";
-        }
-      }
-
-      // Fallback, this is an allocation without a matching DeclBuffer
-      PrimExpr flat_extent = 1;
-      for (const auto &dim : op->extents) {
-        flat_extent *= dim;
-      }
-      return {flat_extent};
-    }();
-
-    Allocate alloc = Downcast<Allocate>(StmtExprMutator::VisitStmt_(op));
-
+    auto new_buf = GetFlattenedBuffer(node->buffer);
     // TODO(Lunderberg): Move the handling of boolean into a
     // dedicated pass.
-    if (alloc->dtype == DataType::Bool()) {
-      alloc.CopyOnWrite()->dtype = DataType::Int(8);
+    if (new_buf->dtype == DataType::Bool()) {
+      auto writer = new_buf.CopyOnWrite();
+      writer->dtype = DataType::Int(8);
+    }
+    if (!node->buffer.same_as(new_buf)) {
+      node.CopyOnWrite()->buffer = new_buf;
     }
 
-    if (!new_extents.same_as(alloc->extents)) {
-      alloc.CopyOnWrite()->extents = new_extents;
-    }
     if (!local_var_init_map_.empty()) {
-      auto init_it = local_var_init_map_.find(alloc->buffer_var);
+      auto init_it = local_var_init_map_.find(node->buffer->data);
       if (init_it != local_var_init_map_.end()) {
         const PrimExpr &init = (*init_it).second;
-        alloc.CopyOnWrite()->annotations.Set(tl::attr::kLocalVarInit, init);
+        node.CopyOnWrite()->annotations.Set(tl::attr::kLocalVarInit, init);
       }
     }
 
-    return std::move(alloc);
+    return std::move(node);
   }
 
   Stmt VisitStmt_(const DeclBufferNode *op) final {
-    // TODO(rfc-70): Update the DeclBuffer node instead of
-    // stripping it out.  Stripping it out in the current
-    // implementation as not all lowering passes support
-    // DeclBuffer.
-    return VisitStmt(op->body);
+    auto node = Downcast<DeclBuffer>(StmtExprMutator::VisitStmt_(op));
+
+    auto new_buf = GetFlattenedBuffer(node->buffer);
+    if (!node->buffer.same_as(new_buf)) {
+      node.CopyOnWrite()->buffer = new_buf;
+    }
+
+    return std::move(node);
   }
 
   Buffer GetFlattenedBuffer(const Buffer &buf) {
@@ -241,6 +199,11 @@ private:
     for (size_t i = 0; i < flattened->shape.size(); ++i) {
       writer->shape.Set(i, analyzer_->canonical_simplify(flattened->shape[i]));
     }
+    // Flattened indices already include buf->elem_offset (see
+    // VisitBufferAccess). Zero elem_offset so later passes (e.g.
+    // Buffer::access_ptr) use index as the sole offset and do not add
+    // buffer->elem_offset again.
+    writer->elem_offset = make_const(flattened->DefaultIndexType(), 0);
 
     buffer_remap_[buf] = flattened;
     return flattened;
@@ -289,30 +252,41 @@ private:
       under_address_of = false;
       return result;
     }
-    return StmtExprMutator::VisitExpr_(op);
+    Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
+    if (call->op.same_as(builtin::tvm_access_ptr())) {
+      ICHECK_GE(call->args.size(), 3)
+          << "tvm_access_ptr must have at least 3 arguments";
+      PrimExpr offset = call->args[2];
+      if (NeedsInt64Promotion(offset)) {
+        Int64Promoter promoter;
+        call.CopyOnWrite()->args.Set(2, promoter(offset));
+      }
+    }
+    return std::move(call);
+  }
+
+  bool NeedsInt64Promotion(const PrimExpr &index) {
+    DataType dtype = index->dtype;
+    if (!dtype.is_int() || dtype.bits() >= 64) {
+      return false;
+    }
+
+    auto int_bound = analyzer_->const_int_bound(index);
+    int64_t max_value = int_bound->max_value;
+    int64_t min_value = int_bound->min_value;
+    const int64_t type_max = (1LL << (dtype.bits() - 1));
+    const int64_t type_min = -(1LL << (dtype.bits() - 1));
+    return max_value >= (type_max - 1) || min_value < type_min;
   }
 
   Array<PrimExpr> GetSimplifiedElemOffset(const Buffer &buffer,
                                           const Array<PrimExpr> &indices) {
     auto flattened_indices = buffer->ElemOffset(indices);
     Array<PrimExpr> safe_indices;
-    for (auto index : flattened_indices) {
-      auto int_bound = analyzer_->const_int_bound(index);
-      DataType dtype = index->dtype;
-      if (dtype.is_int() && dtype.bits() < 64) {
-        int64_t max_value = int_bound->max_value;
-        int64_t min_value = int_bound->min_value;
-        const int64_t type_max = (1LL << (dtype.bits() - 1));
-        const int64_t type_min = -(1LL << (dtype.bits() - 1));
-
-        if (max_value >= (type_max - 1) || min_value < type_min) {
-          Int64Promoter promoter;
-          for (auto &index : flattened_indices) {
-            safe_indices.push_back(promoter(index));
-          }
-        } else {
-          safe_indices.push_back(index);
-        }
+    Int64Promoter promoter;
+    for (const auto &index : flattened_indices) {
+      if (NeedsInt64Promotion(index)) {
+        safe_indices.push_back(promoter(index));
       } else {
         safe_indices.push_back(index);
       }
@@ -377,7 +351,7 @@ PrimFunc FlattenBufferRewriter(PrimFunc f) {
   return BufferFlattener::Flatten(std::move(f));
 }
 
-using namespace tir::transform;
+using namespace tirx::transform;
 tvm::transform::Pass FlattenBuffer() {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     return FlattenBufferRewriter(std::move(f));
@@ -386,7 +360,7 @@ tvm::transform::Pass FlattenBuffer() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.FlattenBuffer", FlattenBuffer);
 }
 

@@ -11,7 +11,7 @@ jobs:
     if: github.repository_owner == 'tile-ai'
     steps:
       - name: Remind
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -19,7 +19,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: '👋 Hi! Thank you for contributing to the **TileLang** project.\n\n' +
+              body: '👋 Hi! Thank you for contributing to the **TileScale** project.\n\n' +
                 'Please remember to run `pre-commit run --all-files` in the root directory of the project ' +
                 'to ensure your changes are properly linted and formatted. ' +
                 'This will help ensure your contribution passes the format check.\n\n' +

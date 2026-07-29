@@ -1,21 +1,28 @@
 """The profiler and convert to torch utils"""
 
-from __future__ import annotations
+# Portions adapted from PyTorch under its BSD-style license. See
+# THIRDPARTYNOTICES.txt and the packaged PyTorch license and notice.
+
 from enum import Enum
 import torch
-from tvm import tir
+from tvm import tirx
 import numpy as np
-from tilelang.utils.target import parse_device
-from tilelang.utils.allocator import BaseAllocator
+
+
+def _get_float8_dtypes():
+    """Collect available float8 dtypes - some may not exist in older torch versions."""
+    dtypes = set()
+    for name in ("float8_e5m2", "float8_e5m2fnuz", "float8_e4m3fn", "float8_e4m3fnuz"):
+        if hasattr(torch, name):
+            dtypes.add(getattr(torch, name))
+    return dtypes
+
+
+_FLOAT8_DTYPES = _get_float8_dtypes()
 
 
 def is_float8_dtype(dtype: torch.dtype) -> bool:
-    return dtype in {
-        torch.float8_e5m2,
-        torch.float8_e5m2fnuz,
-        torch.float8_e4m3fn,
-        torch.float8_e4m3fnuz,
-    }
+    return dtype in _FLOAT8_DTYPES
 
 
 def fp8_remove_negative_zeros_(tensor: torch.Tensor):
@@ -35,70 +42,6 @@ class TensorSupplyType(Enum):
     Auto = 7
 
 
-def tensor(
-    shape: tuple[int, ...],
-    dtype: torch.dtype,
-    device: str | torch.device | int | None = None,
-    allocator: BaseAllocator | None = None,
-    return_peers: bool | None = None,
-) -> torch.Tensor | list[torch.Tensor]:
-    """Allocate a tensor using the given allocator or standard torch allocation.
-
-    Args:
-        shape: The shape of the tensor to allocate.
-        dtype: The data type of the tensor.
-        device: The device to allocate on (if not using allocator).
-        allocator: Optional BaseAllocator for distributed memory allocation.
-        return_peers: If True, return peer tensors for distributed allocation.
-
-    Returns:
-        A torch.Tensor or list of torch.Tensors (if return_peers is True).
-    """
-    if allocator is not None:
-        assert allocator.initialized(), "Allocator is not initialized"
-        if device is not None:
-            device = parse_device(device)
-            assert allocator.device == device, (
-                f"Allocator device must be the same as the device of the tensor, but got {allocator.device} != {device}"
-            )
-        return allocator._allocate_tensor(shape, dtype, return_peers)
-    else:
-        return torch.empty(shape, dtype=dtype, device=device)
-
-
-def map_torch_type(intype) -> torch.dtype:
-    # Convert to string if needed
-    if not isinstance(intype, str):
-        intype = str(intype)
-
-    if intype == "float8_e4m3":
-        assert hasattr(torch, "float8_e4m3fn"), "torch.float8_e4m3fn is not supported in this version of torchPlease upgrade torch >= 2.1.0"
-        return torch.float8_e4m3fn
-    elif intype == "float8_e5m2":
-        assert hasattr(torch, "float8_e5m2"), "torch.float8_e5m2 is not supported in this version of torchPlease upgrade torch >= 2.1.0"
-        return torch.float8_e5m2
-    elif intype == "e4m3fnuz_float8":
-        assert hasattr(torch, "float8_e4m3fnuz"), (
-            "torch.float8_e4m3fnuz is not supported in this version of torchPlease upgrade torch >= 2.2.0"
-        )
-        return torch.float8_e4m3fnuz
-    elif intype == "float8_e8m0fnu":
-        assert hasattr(torch, "float8_e8m0fnu"), (
-            "torch.float8_e8m0fnu is not supported in this version of torchPlease upgrade torch >= 2.8.0"
-        )
-        return torch.float8_e8m0fnu
-    elif intype == "float4_e2m1fnx2":
-        assert hasattr(torch, "float4_e2m1fnx2"), (
-            "torch.float4_e2m1fnx2 is not supported in this version of torchPlease upgrade torch >= 2.8.0"
-        )
-        return torch.float4_e2m1fnx2
-    elif "float4" in intype:
-        # PyTorch doesn't support float4, use int8 as storage type
-        return torch.int8
-    else:
-        return getattr(torch, intype)
-
-
 def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):
     from tilelang.engine.param import KernelParam
     from .device import get_current_device
@@ -116,7 +59,7 @@ def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):
 
         # Check if with dynamic symbolic shape
         for shape in param.shape:
-            if isinstance(shape, tir.Var):
+            if isinstance(shape, tirx.Var):
                 raise ValueError(
                     f"TensorType must have a static shape, but got {shape}, "
                     "likely you are trying to generate a random tensor with a dynamic symbolic shape."
@@ -231,7 +174,7 @@ def _equalize_attributes(actual: torch.Tensor, expected: torch.Tensor) -> tuple[
         actual (Tensor): Actual tensor.
         expected (Tensor): Expected tensor.
     Returns:
-        (tuple[Tensor, Tensor]): Equalized tensors.
+        (Tuple[Tensor, Tensor]): Equalized tensors.
     """
     # The comparison logic uses operators currently not supported by the MPS backends.
     #  See https://github.com/pytorch/pytorch/issues/77144 for details.
@@ -351,3 +294,16 @@ def torch_assert_close(
         )
     else:
         return True
+
+
+def tensor(shape, dtype, device=None, allocator=None, return_peers=None):
+    """Allocate a tensor, loading distributed allocator support only on demand."""
+    from tilelang.distributed.tensor import tensor as distributed_tensor
+
+    return distributed_tensor(
+        shape,
+        dtype,
+        device=device,
+        allocator=allocator,
+        return_peers=return_peers,
+    )

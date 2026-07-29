@@ -6,23 +6,23 @@
 
 #include "remote_copy.h"
 
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/op_attr_types.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/op_attr_types.h>
 
 #include <sstream>
 
-#include "../target/cuda.h"
-#include "../target/utils.h"
+#include "backend/common/target_utils.h"
 #include "builtin.h"
 #include "distributed.h"
+#include "distributed_utils.h"
 #include "operator.h"
 #include "parallel.h"
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 PrimExpr PutOpNode::get_offset(const BufferLoadNode *load) const {
   PrimExpr offset = 0;
@@ -33,22 +33,6 @@ PrimExpr PutOpNode::get_offset(const BufferLoadNode *load) const {
     stride *= buffer_shape[i];
   }
   return div(offset * load->dtype.bits(), 8);
-}
-
-PrimExpr PutOpNode::MakeAddress(const Buffer &buffer,
-                                const Array<PrimExpr> &indices) const {
-  return Call(DataType::Handle(), builtin::address_of(),
-              {BufferLoad(buffer, indices)});
-}
-
-PrimExpr PutOpNode::MakeRemappedAddress(const LowerArgs &T,
-                                        const Buffer &buffer,
-                                        const Array<PrimExpr> &indices) const {
-  Buffer remapped = buffer;
-  if (T.buffer_remap.count(buffer)) {
-    remapped = T.buffer_remap[buffer];
-  }
-  return MakeAddress(remapped, indices);
 }
 
 PutOp::PutOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
@@ -88,15 +72,35 @@ bool PutOpNode::is_distributed() const {
            dst_pe.as<IntImmNode>()->value == -1);
 }
 
+// The copy size becomes a C++ template argument (tl::cp_warp<N, ...>), so it
+// has to fold to a compile-time constant. Without this check a runtime size is
+// emitted verbatim and the only diagnostic is an nvcc template error much
+// later.
+static int64_t RequireConstantCopySize(const PrimExpr &copy_size,
+                                       arith::Analyzer *analyzer,
+                                       const char *op_name) {
+  PrimExpr folded =
+      analyzer != nullptr ? analyzer->Simplify(copy_size) : copy_size;
+  const auto *imm = folded.as<IntImmNode>();
+  ICHECK(imm) << op_name
+              << " requires a compile-time constant size, because the size is "
+                 "emitted as a template argument; got "
+              << copy_size;
+  ICHECK_GT(imm->value, 0) << op_name << " size must be positive, got "
+                           << imm->value;
+  return imm->value;
+}
+
 Stmt PutOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  (void)analyzer;
+  int64_t const_copy_size =
+      RequireConstantCopySize(copy_size, analyzer, "T.put_warp/T.put_block");
   Array<PrimExpr> new_args;
   std::stringstream ss;
   if (scope == "warp") {
-    ss << "tl::cp_warp<" << copy_size << ", " << unroll_factor << ", "
+    ss << "tl::cp_warp<" << const_copy_size << ", " << unroll_factor << ", "
        << (enable_aggressive_vectorize ? "true" : "false") << ">";
   } else if (scope == "block") {
-    ss << "tl::cp_block<" << copy_size << ">";
+    ss << "tl::cp_block<" << const_copy_size << ">";
   } else {
     LOG(FATAL) << "Invalid scope: " << scope;
   }
@@ -104,15 +108,7 @@ Stmt PutOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   new_args.push_back(StringImm(ss.str()));
   if (is_distributed()) {
     PrimExpr dst_addr_expr = MakeRemappedAddress(T, dst_buffer, dst_indices);
-    PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
-    PrimExpr local_base_ptr =
-        Call(DataType::Handle(), tl::get_remote_base_ptr(), {local_rank});
-    PrimExpr offset_to_base =
-        Sub(Call(DataType::Handle(), tl::get_uintptr_t(), {dst_addr_expr}),
-            local_base_ptr);
-    new_args.push_back(
-        Call(DataType::Handle(), tl::get_remote_base_ptr(), {dst_pe}) +
-        offset_to_base);
+    new_args.push_back(RemapRemoteAddress(dst_addr_expr, dst_pe));
   } else {
     new_args.push_back(MakeRemappedAddress(T, dst_buffer, dst_indices));
   }
@@ -142,22 +138,6 @@ PrimExpr GetOpNode::get_offset(const BufferLoadNode *load) const {
     stride *= buffer_shape[i];
   }
   return div(offset * load->dtype.bits(), 8);
-}
-
-PrimExpr GetOpNode::MakeAddress(const Buffer &buffer,
-                                const Array<PrimExpr> &indices) const {
-  return Call(DataType::Handle(), builtin::address_of(),
-              {BufferLoad(buffer, indices)});
-}
-
-PrimExpr GetOpNode::MakeRemappedAddress(const LowerArgs &T,
-                                        const Buffer &buffer,
-                                        const Array<PrimExpr> &indices) const {
-  Buffer remapped = buffer;
-  if (T.buffer_remap.count(buffer)) {
-    remapped = T.buffer_remap[buffer];
-  }
-  return MakeAddress(remapped, indices);
 }
 
 GetOp::GetOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
@@ -198,14 +178,15 @@ bool GetOpNode::is_distributed() const {
 }
 
 Stmt GetOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  (void)analyzer;
+  int64_t const_copy_size =
+      RequireConstantCopySize(copy_size, analyzer, "T.get_warp/T.get_block");
   Array<PrimExpr> new_args;
   std::stringstream ss;
   if (scope == "warp") {
-    ss << "tl::cp_warp<" << copy_size << ", " << unroll_factor << ", "
+    ss << "tl::cp_warp<" << const_copy_size << ", " << unroll_factor << ", "
        << (enable_aggressive_vectorize ? "true" : "false") << ">";
   } else if (scope == "block") {
-    ss << "tl::cp_block<" << copy_size << ">";
+    ss << "tl::cp_block<" << const_copy_size << ">";
   } else {
     LOG(FATAL) << "Invalid scope: " << scope;
   }
@@ -215,15 +196,7 @@ Stmt GetOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   new_args.push_back(dst_addr_expr); // Always dst first in tl_templates
   if (is_distributed()) {
     PrimExpr src_addr_expr = MakeRemappedAddress(T, src_buffer, src_indices);
-    PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
-    PrimExpr local_base_ptr =
-        Call(DataType::Handle(), tl::get_remote_base_ptr(), {local_rank});
-    PrimExpr offset_to_base =
-        Sub(Call(DataType::Handle(), tl::get_uintptr_t(), {src_addr_expr}),
-            local_base_ptr);
-    new_args.push_back(
-        Call(DataType::Handle(), tl::get_remote_base_ptr(), {src_pe}) +
-        offset_to_base);
+    new_args.push_back(RemapRemoteAddress(src_addr_expr, src_pe));
   } else {
     new_args.push_back(MakeRemappedAddress(T, src_buffer, src_indices));
   }
@@ -282,14 +255,7 @@ Stmt StOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   new_args.push_back(StringImm(ss.str()));
   if (is_distributed()) {
-    PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
-    PrimExpr local_base_ptr =
-        Call(DataType::Handle(), tl::get_remote_base_ptr(), {local_rank});
-    PrimExpr offset_to_base = Sub(
-        Call(DataType::Handle(), tl::get_uintptr_t(), {dst}), local_base_ptr);
-    new_args.push_back(
-        Call(DataType::Handle(), tl::get_remote_base_ptr(), {dst_pe}) +
-        offset_to_base);
+    new_args.push_back(RemapRemoteAddress(dst, dst_pe));
   } else {
     new_args.push_back(dst);
   }
@@ -350,14 +316,7 @@ Stmt LdOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   new_args.push_back(StringImm(ss.str()));
   if (is_distributed()) {
-    PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
-    PrimExpr local_base_ptr =
-        Call(DataType::Handle(), tl::get_remote_base_ptr(), {local_rank});
-    PrimExpr offset_to_base = Sub(
-        Call(DataType::Handle(), tl::get_uintptr_t(), {src}), local_base_ptr);
-    new_args.push_back(
-        Call(DataType::Handle(), tl::get_remote_base_ptr(), {src_pe}) +
-        offset_to_base);
+    new_args.push_back(RemapRemoteAddress(src, src_pe));
   } else {
     new_args.push_back(src);
   }

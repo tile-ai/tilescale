@@ -4,6 +4,7 @@ import sys  # noqa: F401
 
 import tilelang
 import tilelang.language as T
+from tilelang.profiler import do_bench
 
 print(tilelang.__file__, flush=True)
 
@@ -249,9 +250,9 @@ def tilelang_chunk_gated_delta_rule_bwd_dhu(
             dv_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
             dv_fragment_2 = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
             dO_shared = T.alloc_shared((block_S, block_DV), dtype=input_dtype)
-            dO_shared_t = T.alloc_shared((block_DV, block_S), dtype=T.float32)
+            dO_shared_t = T.alloc_shared((block_DV, block_S), dtype=T.tfloat32)
             dO_fragment = T.alloc_fragment((block_S, block_DV), dtype=T.float32)
-            dO_fragment_t = T.alloc_fragment((block_DV, block_S), dtype=T.float32)
+            dO_fragment_t = T.alloc_fragment((block_DV, block_S), dtype=T.tfloat32)
             K_shared = T.alloc_shared((block_S, DK), dtype=input_dtype)
 
             Q_shared = T.alloc_shared((block_S, DK), dtype=input_dtype)
@@ -262,7 +263,7 @@ def tilelang_chunk_gated_delta_rule_bwd_dhu(
             G_fragment_post = T.alloc_fragment((block_S), dtype=gate_dtype)
             G_fragment_exp = T.alloc_fragment((block_S), dtype=gate_dtype)
             Q_fragment = T.alloc_fragment((block_S, DK), dtype=accum_dtype)
-            Q_fragment_t = T.alloc_fragment((DK, block_S), dtype=accum_dtype)
+            Q_fragment_t = T.alloc_fragment((DK, block_S), dtype=T.tfloat32)
 
             T.use_swizzle(10)
 
@@ -542,31 +543,6 @@ def run_test(
         assert_similar(dh_ref_torch, dh_tilelang, 1e-5, "torch-tilelang", data="dh")
         assert_similar(dh0_ref_torch, dh0_tilelang, 1e-5, "torch-tilelang", data="dh0")
         assert_similar(dv2_ref_torch, dv2_tilelang, 1e-5, "torch-tilelang", data="dv2")
-
-
-def do_bench(fn, *args, warmup=10, rep=10, **kwargs):
-    """
-    Do benchmark for a function.
-    """
-    start_event = [torch.cuda.Event(enable_timing=True) for i in range(rep)]
-    end_event = [torch.cuda.Event(enable_timing=True) for i in range(rep)]
-    for _ in range(warmup):
-        fn(*args, **kwargs)
-
-    torch.cuda.synchronize()
-    for i in range(rep):
-        start_event[i].record()
-        fn(*args, **kwargs)
-        end_event[i].record()
-    torch.cuda.synchronize()
-
-    # Record clocks
-    times = torch.tensor(
-        [s.elapsed_time(e) for s, e in zip(start_event, end_event)],
-        dtype=torch.float,
-    )
-
-    return times.mean().item()
 
 
 def main():

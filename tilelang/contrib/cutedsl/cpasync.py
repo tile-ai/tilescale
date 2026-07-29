@@ -1,4 +1,32 @@
 from __future__ import annotations
+
+__all__ = [
+    # cp.async operations
+    "cp_async_commit",
+    "cp_async_wait",
+    "cp_async_gs",
+    "cp_async_gs_conditional",
+    "cp_async_shared_global",
+    # TMA operations
+    "extract_tensormap_ptr",
+    "tma_load",
+    "tma_store",
+    "tma_reduce",
+    "tma_store_arrive",
+    "tma_store_wait",
+    "prefetch_tma_descriptor",
+    # Mbarrier operations (merged from mbar.py)
+    "mbarrier_init",
+    "mbarrier_expect_tx",
+    "mbarrier_arrive",
+    "arrive_and_expect_tx",
+    "mbarrier_cp_async_arrive_noinc",
+    "mbarrier_wait",
+    "mbarrier_cp_async_arrive",
+    "fence_proxy_async",
+    "fence_barrier_init",
+]
+
 from cutlass.cutlass_dsl import CuTeDSL, T, if_generate, dsl_user_op  # noqa: F401
 
 from cutlass._mlir.dialects import nvvm, cute_nvgpu  # noqa: F401
@@ -8,17 +36,20 @@ import cutlass._mlir.dialects.cute as _cute_ir
 import cutlass._mlir.dialects.cute_nvgpu as _cute_nvgpu_ir
 
 import cutlass.cute as cute
-from cutlass.cute.typing import Int, Boolean, Int32, Int16, Uint64, Union  # noqa: F401
+from cutlass.cute.typing import Int, Boolean, Int32, Int16, Uint64, Pointer, Union  # noqa: F401
 from cutlass.impl_utils import check_value_in
 
 from cutlass.cute.arch import cp_async_commit_group as cp_async_commit  # noqa: F401
 from cutlass.cute.arch import cp_async_wait_group as cp_async_wait  # noqa: F401
 
-BYTES_PER_TENSORMAP = 128
-BYTES_PER_POINTER = 8
+# Mbarrier operations (merged from mbar.py)
+from cutlass.cute.arch import mbarrier_init, mbarrier_expect_tx, mbarrier_arrive  # noqa: F401
+from cutlass.cute.arch import mbarrier_arrive_and_expect_tx as arrive_and_expect_tx  # noqa: F401
+from cutlass.cute.arch import cp_async_mbarrier_arrive_noinc as mbarrier_cp_async_arrive_noinc  # noqa: F401
+import cutlass.cute.arch as arch
 
 
-def cp_async_gs(size, dst, dst_offset, src, src_offset):
+def cp_async_gs(size, dst, src):
     assert size in [16, 8, 4]
     # use CG (cache global) to by pass L1 when loading contiguous 128B.
     mode = nvvm.LoadCacheModifierKind.CG if size == 16 else nvvm.LoadCacheModifierKind.CA
@@ -34,13 +65,13 @@ def cp_async_gs(size, dst, dst_offset, src, src_offset):
         dst_ptr = dst
     else:
         raise ValueError(f"Invalid destination type: {type(dst)}")
-    cp_async_shared_global(dst_ptr + dst_offset, src_ptr + src_offset, size, mode)
+    cp_async_shared_global(dst_ptr, src_ptr, size, mode)
 
 
 @cute.jit
-def cp_async_gs_conditional(size, dst, dst_offset, src, src_offset, cond):
+def cp_async_gs_conditional(size, dst, src, cond):
     if cond:
-        cp_async_gs(size, dst, dst_offset, src, src_offset)
+        cp_async_gs(size, dst, src)
 
 
 @dsl_user_op
@@ -93,17 +124,32 @@ def tma_load(tma_desc, mbar: cute.Pointer, smem_ptr: cute.Pointer, crd: Int | tu
             tma_desc_ptr = tma_desc.iterator
         else:
             tma_desc_ptr = tma_desc
+        # Ensure crd is a tuple (handle single coordinate case)
+        if not isinstance(crd, tuple):
+            crd = (crd,)
+        if hasattr(nvvm, "TMALoadMode"):
+            # CUTLASS DSL 4.6 renamed both the mode/group enums and the mode
+            # keyword used by the generated NVVM binding. Its CTA-only form
+            # avoids the obsolete intrinsic signature used by the old binding.
+            load_options = {
+                "mode": nvvm.TMALoadMode.TILE,
+                "is_cta_only": True,
+            }
+        else:
+            load_options = {
+                "load_mode": nvvm.CpAsyncBulkTensorLoadMode.TILE,
+                "group": nvvm.Tcgen05GroupKind.CTA_1,
+            }
         nvvm.cp_async_bulk_tensor_shared_cluster_global(
             dst_mem=smem_ptr.llvm_ptr,
             tma_descriptor=tma_desc_ptr.llvm_ptr,
             coordinates=[Int32(i).ir_value(loc=loc, ip=ip) for i in crd],
             mbar=mbar.llvm_ptr,
             im2col_offsets=[],
-            load_mode=nvvm.CpAsyncBulkTensorLoadMode.TILE,
-            group=nvvm.Tcgen05GroupKind.CTA_1,
             use_intrinsic=False,  # set to True would lead to compile error
             loc=loc,
             ip=ip,
+            **load_options,
         )
 
 
@@ -150,6 +196,48 @@ def tma_store(tma_desc, smem_ptr: cute.Pointer, crd: Int | tuple[Int, ...], *, l
 
 
 @dsl_user_op
+def tma_reduce(tma_desc, smem_ptr: cute.Pointer, crd: Int | tuple[Int, ...], *, loc=None, ip=None) -> None:
+    """
+    Reduce data from shared memory to global memory using TMA with atomic ADD reduction.
+
+    This performs an atomic add of shared memory data to global memory using
+    the TMA unit's reduce capability.
+
+    :param tma_desc:                 TMA descriptor for the tensor
+    :type tma_desc:                  TMA descriptor
+    :param smem_ptr:                 Source pointer in shared memory
+    :type smem_ptr:                  Pointer
+    :param crd:                      Coordinates tuple for the tensor access
+    :type crd:                       tuple[Int, ...]
+    """
+    from cutlass._mlir.dialects._nvvm_enum_gen import TMAReduxKind, TMAStoreMode
+
+    arch = CuTeDSL._get_dsl().envar.arch
+    check_value_in(arch, ["sm_90", "sm_90a", "sm_100a"], "arch")
+
+    if isinstance(tma_desc, cute.CopyAtom):
+        tma_desc_ptr = extract_tensormap_ptr(tma_desc)
+    elif isinstance(tma_desc, cute.Tensor):
+        tma_desc_ptr = tma_desc.iterator
+    else:
+        tma_desc_ptr = tma_desc
+
+    # Ensure crd is a tuple
+    if not isinstance(crd, tuple):
+        crd = (crd,)
+
+    nvvm.cp_async_bulk_tensor_reduce(
+        tma_descriptor=tma_desc_ptr.llvm_ptr,
+        src_mem=smem_ptr.llvm_ptr,
+        red_kind=TMAReduxKind.ADD,
+        coordinates=[Int32(i).ir_value(loc=loc, ip=ip) for i in crd],
+        mode=TMAStoreMode.TILE,
+        loc=loc,
+        ip=ip,
+    )
+
+
+@dsl_user_op
 def tma_store_arrive(*, loc=None, ip=None) -> None:
     """
     Indicate arrival of warp issuing TMA_STORE.
@@ -162,10 +250,12 @@ def tma_store_arrive(*, loc=None, ip=None) -> None:
 def tma_store_wait(count: int, *, read=None, loc=None, ip=None) -> None:
     """
     Wait for TMA_STORE operations to complete.
-    Corresponds to PTX instruction: cp.async.bulk.wait_group.read <count>;
+    Corresponds to PTX instruction: cp.async.bulk.wait_group{.read} <count>;
 
     :param count: The number of outstanding bulk async groups to wait for
     :type count: Int
+    :param read: Whether to use the PTX .read modifier
+    :type read: Optional[bool]
     """
     nvvm.cp_async_bulk_wait_group(group=count, read=read, loc=loc, ip=ip)
 
@@ -206,10 +296,75 @@ def prefetch_tma_descriptor(tma_desc, *, loc=None, ip=None) -> None:
     Prefetch a TMA descriptor.
     Corresponds to PTX instruction: prefetch.tensormap;
     """
+    # CUTLASS DSL 4.6 removed ``nvvm.prefetch_tensormap`` in favor of the
+    # public CopyAtom helper. Prefer that API when available, while retaining
+    # the pointer-based paths for older DSL releases and explicit descriptors.
+    nvgpu = getattr(cute, "nvgpu", None)
+    cpasync = getattr(nvgpu, "cpasync", None)
+    prefetch_descriptor = getattr(cpasync, "prefetch_descriptor", None)
+    if isinstance(tma_desc, cute.CopyAtom) and prefetch_descriptor is not None:
+        prefetch_descriptor(tma_desc, loc=loc, ip=ip)
+        return
+
     if isinstance(tma_desc, cute.CopyAtom):
         tma_desc_ptr = extract_tensormap_ptr(tma_desc)
     elif isinstance(tma_desc, cute.Tensor):
         tma_desc_ptr = tma_desc.iterator
     else:
         tma_desc_ptr = tma_desc
-    nvvm.prefetch_tensormap(tma_desc_ptr.llvm_ptr, loc=loc, ip=ip)
+
+    legacy_prefetch = getattr(nvvm, "prefetch_tensormap", None)
+    if legacy_prefetch is not None:
+        legacy_prefetch(tma_desc_ptr.llvm_ptr, loc=loc, ip=ip)
+        return
+
+    generic_prefetch = getattr(arch, "prefetch", None)
+    if generic_prefetch is None:
+        raise RuntimeError("This nvidia-cutlass-dsl version does not expose a TMA descriptor prefetch API")
+    generic_prefetch(tma_desc_ptr.llvm_ptr, tensormap=True, loc=loc, ip=ip)
+
+
+# ---------------------------------------------------------------------------
+# Mbarrier operations (merged from mbar.py)
+# ---------------------------------------------------------------------------
+
+from cutlass._mlir.dialects import llvm
+
+
+@dsl_user_op
+def mbarrier_wait(mbar_ptr: Pointer, phase: Int, timeout_ns: Int = 10000000, *, loc=None, ip=None) -> None:
+    """Waits on a mbarrier with a specified phase (blocking loop).
+
+    Uses inline PTX to loop until the try_wait succeeds.
+    The CUDA backend does: while (!mbar.try_wait(parity)) {}
+    """
+    llvm.inline_asm(
+        None,
+        [mbar_ptr.llvm_ptr, Int32(phase).ir_value(loc=loc, ip=ip), Int32(timeout_ns).ir_value(loc=loc, ip=ip)],
+        "{\n.reg .pred p;\nLAB_WAIT:\nmbarrier.try_wait.parity.shared::cta.b64 p, [$0], $1, $2;\n@!p bra LAB_WAIT;\n}",
+        "r,r,r",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )
+
+
+@dsl_user_op
+def mbarrier_cp_async_arrive(mbar_ptr: Pointer, *, loc=None, ip=None) -> None:
+    mbar_llvm_ptr = mbar_ptr.llvm_ptr
+    nvvm.cp_async_mbarrier_arrive_shared(
+        mbar_llvm_ptr,
+        noinc=False,
+        loc=loc,
+        ip=ip,
+    )
+
+
+def fence_proxy_async():
+    arch.fence_proxy(arch.ProxyKind.async_shared, space=arch.SharedSpace.shared_cta)
+
+
+def fence_barrier_init():
+    arch.mbarrier_init_fence()

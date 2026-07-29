@@ -9,9 +9,8 @@
 #include <tvm/runtime/module.h>
 
 #include <string>
-#include <unordered_map>
 
-#include "runtime/meta_data.h"
+#include "runtime/metadata.h"
 
 namespace tvm {
 namespace runtime {
@@ -28,10 +27,9 @@ namespace runtime {
  * \param fmap The map function information map of each function.
  * \param cuda_source Optional, cuda source file
  */
-ffi::Module
-TileScaleCUDAModuleCreate(std::string data, std::string fmt,
-                          std::unordered_map<std::string, FunctionInfo> fmap,
-                          std::string cuda_source);
+ffi::Module TileScaleCUDAModuleCreate(std::string data, std::string fmt,
+                                      ffi::Map<ffi::String, FunctionInfo> fmap,
+                                      std::string cuda_source);
 
 } // namespace runtime
 } // namespace tvm

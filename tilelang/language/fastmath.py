@@ -1,9 +1,10 @@
 """Fast math operations exposed on the TileLang language surface."""
 
-from tvm import tir
+from tvm import tirx
+from tvm.tirx import PrimExpr
 
 
-def __log(x):
+def __log(x: PrimExpr) -> PrimExpr:
     """Calculate log(x) with fast math
 
     Parameters
@@ -16,11 +17,11 @@ def __log(x):
     y : PrimExpr
         The result.
     """
-    x = tir.convert(x)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__log"), x)
+    x = tirx.convert(x)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__log"), x)
 
 
-def __log2(x):
+def __log2(x: PrimExpr) -> PrimExpr:
     """Calculate log2(x) with fast math
 
     Parameters
@@ -33,11 +34,11 @@ def __log2(x):
     y : PrimExpr
         The result.
     """
-    x = tir.convert(x)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__log2"), x)
+    x = tirx.convert(x)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__log2"), x)
 
 
-def __log10(x):
+def __log10(x: PrimExpr) -> PrimExpr:
     """Calculate log10(x) with fast math
 
     Parameters
@@ -50,11 +51,11 @@ def __log10(x):
     y : PrimExpr
         The result.
     """
-    x = tir.convert(x)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__log10"), x)
+    x = tirx.convert(x)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__log10"), x)
 
 
-def __tan(x):
+def __tan(x: PrimExpr) -> PrimExpr:
     """Calculate tan(x) with fast math
 
     Parameters
@@ -67,11 +68,11 @@ def __tan(x):
     y : PrimExpr
         The result.
     """
-    x = tir.convert(x)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__tan"), x)
+    x = tirx.convert(x)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__tan"), x)
 
 
-def __cos(x):
+def __cos(x: PrimExpr) -> PrimExpr:
     """Calculate cos(x) with fast math
 
     Parameters
@@ -84,11 +85,11 @@ def __cos(x):
     y : PrimExpr
         The result.
     """
-    x = tir.convert(x)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__cos"), x)
+    x = tirx.convert(x)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__cos"), x)
 
 
-def __sin(x):
+def __sin(x: PrimExpr) -> PrimExpr:
     """Calculate sin(x) with fast math
 
     Parameters
@@ -101,11 +102,11 @@ def __sin(x):
     y : PrimExpr
         The result.
     """
-    x = tir.convert(x)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__sin"), x)
+    x = tirx.convert(x)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__sin"), x)
 
 
-def __exp10(x):
+def __exp10(x: PrimExpr) -> PrimExpr:
     """Calculate 10**x with fast math
 
     Parameters
@@ -118,11 +119,11 @@ def __exp10(x):
     y : PrimExpr
         The result.
     """
-    x = tir.convert(x)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__exp10"), x)
+    x = tirx.convert(x)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__exp10"), x)
 
 
-def __exp(x):
+def __exp(x: PrimExpr) -> PrimExpr:
     """Calculate 2**x with fast math
 
     Parameters
@@ -135,8 +136,8 @@ def __exp(x):
     y : PrimExpr
         The result.
     """
-    x = tir.convert(x)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__exp"), x)
+    x = tirx.convert(x)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__exp"), x)
 
 
 __all__ = [

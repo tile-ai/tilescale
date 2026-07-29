@@ -3,30 +3,34 @@
  * \brief infer the fragment/shared memory layout
  */
 
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/index_map.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
-#include <tvm/tir/utils.h>
+#include "support/check.h"
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/s_tir/utils.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/index_map.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include <algorithm>
 #include <deque>
 #include <memory>
 #include <queue>
 
+#include "../layout/layout.h"
 #include "../layout/utils.h"
+#include "../op/builtin.h"
 #include "../op/copy.h"
 #include "../op/parallel.h"
 #include "../op/region.h"
 #include "../op/utils.h"
-#include "../target/utils.h"
-
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
+#include "backend/common/target_utils.h"
 #include "common/loop_fusion_utils.h"
-#include "common/loop_parallel_transform_utils.h"
+#include "common/pipeline_utils.h"
 #include "common/union_find.h"
 #include "layout_reducer.h"
 #include "parallel_loop_layout_validator.h"
@@ -35,7 +39,44 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
+
+namespace {
+
+int64_t GetElementStorageBits(DataType dtype) {
+  // Layout aliasing must be reasoned about in logical storage bits per element,
+  // not in bytes.  For sub-byte dtypes such as fp4, `dtype.bytes()` rounds up
+  // to 1 and loses the "two fp4 values share one byte" relationship that
+  // subtype-changing views rely on.
+  return static_cast<int64_t>(dtype.bits()) * dtype.lanes();
+}
+
+bool ShapesEqual(const Array<PrimExpr> &lhs, const Array<PrimExpr> &rhs,
+                 arith::Analyzer *analyzer) {
+  if (lhs.size() != rhs.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < lhs.size(); ++i) {
+    if (!analyzer->CanProveEqual(lhs[i], rhs[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+Optional<Buffer> FindLayoutAnchorBuffer(const Array<Buffer> &buffers,
+                                        const Layout &layout,
+                                        arith::Analyzer *analyzer) {
+  for (const auto &buffer : buffers) {
+    if (ShapesEqual(layout->InputShape(), buffer->shape, analyzer)) {
+      return buffer;
+    }
+  }
+  return Optional<Buffer>();
+}
+
+} // namespace
 
 /*!
  * \brief collect the mapping from the buffer var to it allocated buffer
@@ -43,7 +84,7 @@ using namespace tir;
 class ThreadBindingCollector : public StmtExprVisitor {
 public:
   void VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tir::attr::thread_extent) {
+    if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       thread_binding_[iv->var.get()] = iv;
     }
@@ -54,7 +95,7 @@ public:
   std::unordered_map<const VarNode *, IterVar> thread_binding_;
 };
 
-using namespace tir;
+using namespace tirx;
 using arith::IRMutatorWithAnalyzer;
 using arith::IRVisitorWithAnalyzer;
 
@@ -62,6 +103,7 @@ struct LayoutInferenceResult {
   Map<Buffer, Layout> layout_map;
   Map<For, Fragment> for_map;
   Map<For, PrimExpr> predicate_map;
+  Map<For, Bool> padding_guard_map;
 };
 
 class BufferUseDefCollector : public IRVisitorWithAnalyzer {
@@ -115,7 +157,8 @@ public:
                                                      cur_analyzer,
                                                      buffer_oob,
                                                      {},
-                                                     let_var_to_expr_},
+                                                     bind_var_to_expr_,
+                                                     false},
                                      level);
 
     // Process the returned updates
@@ -147,9 +190,15 @@ public:
           Layout target_layout =
               shapes_equal
                   ? src_layout
-                  : src_layout->Reshape(sib->shape, &analyzer_,
-                                        Integer(src_buffer->dtype.bytes()),
-                                        Integer(sib->dtype.bytes()));
+                  // Alias buffers may reinterpret the same storage with a
+                  // different element width.  Reshape the inferred layout using
+                  // the old/new storage bit ratio so that layout inference
+                  // keeps the physical storage footprint unchanged while
+                  // allowing the logical element count to change.
+                  : src_layout->Reshape(
+                        sib->shape, &analyzer_,
+                        Integer(GetElementStorageBits(src_buffer->dtype)),
+                        Integer(GetElementStorageBits(sib->dtype)));
           if (layout_map.count(sib)) {
             ICHECK(target_layout->IsEqual(layout_map[sib].get()))
                 << "Get different layout for alias buffer " << sib
@@ -206,11 +255,26 @@ public:
             continue;
           }
         }
-        // If already in map, ensure they are structurally equal
-        ICHECK(layout->IsEqual(layout_map[buffer].get()))
-            << "Get different layout for " << buffer
-            << "\n current layout: " << layout->DebugOutput()
-            << "\n previous layout: " << layout_map[buffer]->DebugOutput();
+
+        // If already in map, check if they are structurally equal
+        if (!layout->IsEqual(layout_map[buffer].get())) {
+          // Try to merge swizzle layouts if both are swizzle layouts
+          const Layout &existing = layout_map[buffer];
+          if (!layout.as<Fragment>() && !existing.as<Fragment>()) {
+            if (auto merged = MergeSwizzleLayouts(existing, layout, buffer)) {
+              DLOG(WARNING) << "Swizzle layout conflict for buffer " << buffer
+                            << ", merging to smaller granularity";
+              layout_map.Set(buffer, merged.value());
+              propagate_alias(buffer, merged.value());
+              continue;
+            }
+          }
+          // If not swizzle layouts or merge failed, raise error
+          LOG(FATAL) << "Get different layout for " << buffer
+                     << "\n current layout: " << layout->DebugOutput()
+                     << "\n previous layout: "
+                     << layout_map[buffer]->DebugOutput();
+        }
         // Ensure aliases are consistent too
         propagate_alias(buffer, layout);
       } else {
@@ -222,7 +286,7 @@ public:
           continue;
 
         // Check if buffer exists in use_list_
-        if (!use_list_.count(buffer)) {
+        if (!use_list_.count(buffer) && IsFragmentBuffer(buffer)) {
           LOG(WARNING) << "Layout inference failed for buffer " << buffer
                        << ". "
                        << "The buffer cannot be inferred with current layout "
@@ -277,7 +341,6 @@ public:
     ICHECK_EQ(buffer_oob_vec_.size(), infer_list_.size())
         << "Size mismatch: buffer_oob_vec_ and infer_list_ must match in "
            "length.";
-
     DLOG(INFO) << "[InferLayout] all participating operators:" << '\n';
     for (int i = 0; i < infer_list_stmt_.size(); ++i) {
       DLOG(INFO) << "    op " << i << ":" << infer_list_stmt_[i] << '\n';
@@ -314,7 +377,8 @@ public:
       if (layout_map.count(buffer))
         continue;
       auto frag =
-          Fragment::FullyReplicated(buffer->shape, thread_bounds->extent);
+          Fragment::FullyReplicated(buffer->shape, thread_bounds->extent)
+              ->BindThreadRange(thread_bounds);
       layout_map.Set(buffer, frag);
     }
 
@@ -363,13 +427,13 @@ public:
               }
             }
           }
-
-          Layout reshaped = shapes_equal
-                                ? rep_layout.value()
-                                : rep_layout.value()->Reshape(
-                                      buf->shape, &analyzer_,
-                                      Integer(rep.value()->dtype.bytes()),
-                                      Integer(buf->dtype.bytes()));
+          Layout reshaped =
+              shapes_equal
+                  ? rep_layout.value()
+                  : rep_layout.value()->Reshape(
+                        buf->shape, &analyzer_,
+                        Integer(GetElementStorageBits(rep.value()->dtype)),
+                        Integer(GetElementStorageBits(buf->dtype)));
           layout_map.Set(buf, reshaped);
         }
       }
@@ -387,6 +451,7 @@ public:
     // Collect layout info for For nodes
     Map<For, Fragment> for_map;
     Map<For, PrimExpr> predicate_map;
+    Map<For, Bool> padding_guard_map;
     ICHECK(infer_list_.size() == thread_var_vec_.size())
         << "infer_list_ and thread_var_vec_ size mismatch";
     for (int i = 0; i < infer_list_.size(); i++) {
@@ -402,6 +467,9 @@ public:
             << "The Layout for Parallel for cannot be inferred correctly:\n"
             << for_infer->GetRoot();
         for_map.Set(for_infer->GetRoot(), for_infer->GetLoopLayout());
+        if (for_infer->LoopLayoutRequiresPaddingGuard()) {
+          padding_guard_map.Set(for_infer->GetRoot(), Bool(true));
+        }
         // thread_var_ should be defined if we rely on it
         ICHECK(thread_var.defined())
             << "thread_var is not defined. Cannot retrieve predicate.";
@@ -412,7 +480,7 @@ public:
       }
     }
 
-    return {layout_map, for_map, predicate_map};
+    return {layout_map, for_map, predicate_map, padding_guard_map};
   }
 
   void Collect(const PrimFunc &f) {
@@ -485,7 +553,7 @@ private:
     if (op->op.as<GlobalVarNode>())
       return;
 
-    auto p = ParseOperator(tvm::ffi::GetRef<Call>(op));
+    auto p = ParseOperator(GetRef<Call>(op));
     if (p.defined()) {
       for (const auto &arg : op->args) {
         if (auto buffer = getBufferFromAccessPtr(arg)) {
@@ -493,24 +561,14 @@ private:
         } else if (auto buffer = getBufferFromRegion(arg)) {
           addToUseList(buffer.value());
         }
-        // Check if the argument uses any LetStmt variables that reference
+        // Check if the argument uses any Bind variables that reference
         // fragment buffers. If so, add those buffers to the use list.
         // This handles cases like: a = block_mask_f[i]; T.copy(A[a, 0], ...)
         CollectFragmentBuffersFromExpr(arg);
       }
       // Compute thread_var_ and thread_bounds_
       thread_var_vec_.push_back(thread_var_);
-      if (analyzer_.const_int_bound.IsBound(thread_var_->var)) {
-        auto const_int_bound = analyzer_.const_int_bound(thread_var_);
-        auto min_value = const_int_bound->min_value;
-        auto max_value = const_int_bound->max_value;
-        auto extent = max_value - min_value + 1;
-        auto dtype = thread_var_->var.dtype();
-        thread_bounds_vec_.push_back(Range::FromMinExtent(
-            IntImm(dtype, min_value), IntImm(dtype, extent)));
-      } else {
-        thread_bounds_vec_.push_back(Range::FromMinExtent(0, 1));
-      }
+      thread_bounds_vec_.push_back(CurrentThreadBounds());
       analyzer_vec_.push_back(analyzer_.Clone());
 
       // Compute buffer oob for each buffer in the op
@@ -543,7 +601,7 @@ private:
       }
 
       // Add the tile operator to infer_list_
-      infer_list_stmt_.push_back(tvm::ffi::GetRef<ObjectRef>(op));
+      infer_list_stmt_.push_back(GetRef<ObjectRef>(op));
       infer_list_.push_back(std::move(p));
     }
   }
@@ -609,7 +667,7 @@ private:
 
   void VisitStmt_(const ForNode *op) final {
     if (op->kind == ForKind::kParallel) {
-      auto infer = ParallelOp(tvm::ffi::GetRef<For>(op));
+      auto infer = ParallelOp(GetRef<For>(op));
       for (const auto &[buffer, _] : infer->GetIndiceMap()) {
         addToUseList(buffer);
       }
@@ -678,20 +736,10 @@ private:
           }
         }
       });
-      infer_list_stmt_.push_back(tvm::ffi::GetRef<ObjectRef>(op));
+      infer_list_stmt_.push_back(GetRef<ObjectRef>(op));
       infer_list_.push_back(std::move(infer));
       thread_var_vec_.push_back(thread_var_);
-      if (thread_var_.defined() &&
-          analyzer_.const_int_bound.IsBound(thread_var_->var)) {
-        auto const_int_bound = analyzer_.const_int_bound(thread_var_);
-        auto dtype = thread_var_->var.dtype();
-        auto extent =
-            const_int_bound->max_value - const_int_bound->min_value + 1;
-        thread_bounds_vec_.push_back(Range::FromMinExtent(
-            IntImm(dtype, const_int_bound->min_value), IntImm(dtype, extent)));
-      } else {
-        thread_bounds_vec_.push_back(Range::FromMinExtent(0, 1));
-      }
+      thread_bounds_vec_.push_back(CurrentThreadBounds());
       analyzer_vec_.push_back(analyzer_.Clone());
       buffer_oob_vec_.push_back(false);
     } else {
@@ -699,7 +747,7 @@ private:
     }
   }
 
-  void VisitStmt_(const BlockNode *op) final {
+  void VisitStmt_(const SBlockNode *op) final {
     for (auto buffer : op->alloc_buffers) {
       if (buffer_data_to_buffers_.count(buffer->data)) {
         auto buffers = buffer_data_to_buffers_[buffer->data];
@@ -724,31 +772,26 @@ private:
             << "buffer " << var << " is not found in the block";
         const auto &buffers = buffer_data_to_buffers_[var];
         ICHECK(!buffers.empty()) << "buffer list for " << var << " is empty";
+        Optional<Buffer> anchor_buffer =
+            FindLayoutAnchorBuffer(buffers, layout, &analyzer_);
+        int64_t anchor_bits =
+            anchor_buffer.defined()
+                ? GetElementStorageBits(anchor_buffer.value()->dtype)
+                : GetElementStorageBits(buffers[0]->dtype);
         // Apply layout to all buffers associated with this var
         for (const auto &buffer : buffers) {
 
           // Reshape the layout to match the buffer's shape
           // Check if shapes are structurally equal
           bool shapes_equal =
-              layout->InputShape().size() == buffer->shape.size();
-          if (shapes_equal) {
-            for (size_t i = 0; i < layout->InputShape().size(); ++i) {
-              if (!analyzer_.CanProveEqual(layout->InputShape()[i],
-                                           buffer->shape[i])) {
-                shapes_equal = false;
-                break;
-              }
-            }
-          }
+              ShapesEqual(layout->InputShape(), buffer->shape, &analyzer_);
 
           if (shapes_equal) {
             annotated_layout_map_.Set(buffer, layout);
           } else {
-            // Use the first buffer sharing this var as the base for dtype ratio
-            int base_bytes = buffers[0]->dtype.bytes();
             auto reshaped_layout =
-                layout->Reshape(buffer->shape, &analyzer_, Integer(base_bytes),
-                                Integer(buffer->dtype.bytes()));
+                layout->Reshape(buffer->shape, &analyzer_, Integer(anchor_bits),
+                                Integer(GetElementStorageBits(buffer->dtype)));
             annotated_layout_map_.Set(buffer, reshaped_layout);
           }
         }
@@ -757,25 +800,49 @@ private:
   }
 
   void VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tir::attr::thread_extent) {
+    if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       if (iv->thread_tag == "threadIdx.x") {
         ICHECK(iv->dom->extent.as<IntImmNode>());
         thread_var_ = iv;
       }
     }
+    if (op->attr_key == attr::kWarpSpecializationScope) {
+      if (const auto *if_node = op->body.as<IfThenElseNode>()) {
+        if (if_node->else_case.defined()) {
+          Array<IntImm> partitions = Downcast<Array<IntImm>>(op->node);
+          ICHECK_EQ(partitions.size(), 2U);
+          PrimExpr producer_extent = partitions[0];
+          PrimExpr consumer_extent = partitions[1];
+          PrimExpr old_override_min = thread_bounds_override_min_;
+          PrimExpr old_override_extent = thread_bounds_override_extent_;
+
+          thread_bounds_override_min_ = consumer_extent;
+          thread_bounds_override_extent_ = producer_extent;
+          IRVisitorWithAnalyzer::VisitStmt(if_node->then_case);
+
+          thread_bounds_override_min_ = IntImm(thread_var_->var.dtype(), 0);
+          thread_bounds_override_extent_ = consumer_extent;
+          IRVisitorWithAnalyzer::VisitStmt(if_node->else_case.value());
+
+          thread_bounds_override_min_ = old_override_min;
+          thread_bounds_override_extent_ = old_override_extent;
+          return;
+        }
+      }
+    }
     IRVisitorWithAnalyzer::VisitStmt_(op);
   }
 
-  void VisitStmt_(const LetStmtNode *op) final {
-    // Record Let variable to its bound expression.
-    // This enables tracking fragment buffer accesses through let bindings.
-    let_var_to_expr_.Set(op->var, op->value);
+  void VisitStmt_(const BindNode *op) final {
+    // Record Bind variable to its bound expression.
+    // This enables tracking fragment buffer accesses through Bind values.
+    bind_var_to_expr_.Set(op->var, op->value);
     IRVisitorWithAnalyzer::VisitStmt_(op);
   }
 
   // Helper: recursively collect fragment buffers from an expression,
-  // following let bindings chain.
+  // following Bind value chains.
   void CollectFragmentBuffersFromExpr(const PrimExpr &expr) {
     PostOrderVisit(expr, [this](const ObjectRef &node) {
       if (auto bl = node.as<BufferLoadNode>()) {
@@ -783,12 +850,21 @@ private:
           addToUseList(bl->buffer);
         }
       } else if (auto var_node = node.as<VarNode>()) {
-        auto var = tvm::ffi::GetRef<Var>(var_node);
-        if (let_var_to_expr_.count(var)) {
-          CollectFragmentBuffersFromExpr(let_var_to_expr_[var]);
+        auto var = GetRef<Var>(var_node);
+        if (bind_var_to_expr_.count(var)) {
+          CollectFragmentBuffersFromExpr(bind_var_to_expr_[var]);
         }
       }
     });
+  }
+
+  Range CurrentThreadBounds() const {
+    if (thread_bounds_override_min_.defined() &&
+        thread_bounds_override_extent_.defined()) {
+      return Range::FromMinExtent(thread_bounds_override_min_,
+                                  thread_bounds_override_extent_);
+    }
+    return ComputeThreadBounds(thread_var_, analyzer_);
   }
 
   void VisitExpr_(const BufferLoadNode *op) final {
@@ -893,10 +969,34 @@ private:
             floating_buffers_(floating_buffers) {}
 
       void VisitStmt_(const AttrStmtNode *op) final {
-        if (op->attr_key == tir::attr::thread_extent) {
+        if (op->attr_key == tirx::attr::thread_extent) {
           IterVar iv = Downcast<IterVar>(op->node);
           if (iv->thread_tag == "threadIdx.x") {
             thread_var_ = iv;
+          }
+        }
+        if (op->attr_key == attr::kWarpSpecializationScope) {
+          if (const auto *if_node = op->body.as<IfThenElseNode>()) {
+            if (if_node->else_case.defined()) {
+              Array<IntImm> partitions = Downcast<Array<IntImm>>(op->node);
+              ICHECK_EQ(partitions.size(), 2U);
+              PrimExpr producer_extent = partitions[0];
+              PrimExpr consumer_extent = partitions[1];
+              PrimExpr old_override_min = thread_bounds_override_min_;
+              PrimExpr old_override_extent = thread_bounds_override_extent_;
+
+              thread_bounds_override_min_ = consumer_extent;
+              thread_bounds_override_extent_ = producer_extent;
+              IRVisitorWithAnalyzer::VisitStmt(if_node->then_case);
+
+              thread_bounds_override_min_ = IntImm(thread_var_->var.dtype(), 0);
+              thread_bounds_override_extent_ = consumer_extent;
+              IRVisitorWithAnalyzer::VisitStmt(if_node->else_case.value());
+
+              thread_bounds_override_min_ = old_override_min;
+              thread_bounds_override_extent_ = old_override_extent;
+              return;
+            }
           }
         }
         IRVisitorWithAnalyzer::VisitStmt_(op);
@@ -921,23 +1021,24 @@ private:
         // This is a floating access - record buffer with current thread_bounds
         if (floating_buffers_.find(buffer) != floating_buffers_.end())
           return; // Already recorded
-        Range thread_bounds = Range::FromMinExtent(0, 1);
-        if (thread_var_.defined() &&
-            analyzer_.const_int_bound.IsBound(thread_var_->var)) {
-          auto const_int_bound = analyzer_.const_int_bound(thread_var_);
-          auto dtype = thread_var_->var.dtype();
-          auto extent =
-              const_int_bound->max_value - const_int_bound->min_value + 1;
-          thread_bounds = Range::FromMinExtent(
-              IntImm(dtype, const_int_bound->min_value), IntImm(dtype, extent));
+        floating_buffers_[buffer] = CurrentThreadBounds();
+      }
+
+      Range CurrentThreadBounds() const {
+        if (thread_bounds_override_min_.defined() &&
+            thread_bounds_override_extent_.defined()) {
+          return Range::FromMinExtent(thread_bounds_override_min_,
+                                      thread_bounds_override_extent_);
         }
-        floating_buffers_[buffer] = thread_bounds;
+        return ComputeThreadBounds(thread_var_, analyzer_);
       }
 
       const std::unordered_set<const Object *> &nodes_in_tileops_;
       std::unordered_map<Buffer, Range, ObjectPtrHash, ObjectPtrEqual>
           &floating_buffers_;
       IterVar thread_var_;
+      PrimExpr thread_bounds_override_min_;
+      PrimExpr thread_bounds_override_extent_;
     };
 
     FloatingBufferCollector collector(nodes_in_tileops,
@@ -956,8 +1057,8 @@ private:
   }
 
   Map<Var, Array<Buffer>> buffer_data_to_buffers_;
-  // Map from LetStmt variable to its bound expression
-  Map<Var, PrimExpr> let_var_to_expr_;
+  // Map from Bind variable to its bound expression
+  Map<Var, PrimExpr> bind_var_to_expr_;
   std::vector<ObjectRef> infer_list_stmt_;
   std::vector<TileOperator> infer_list_;
   // Fragment buffers that have accesses outside of TileOps.
@@ -975,6 +1076,8 @@ private:
   // we need to define a thread_var for the serial loop.
   IterVar thread_var_ = IterVar(Range::FromMinExtent(0, 1), Var("v_thread"),
                                 IterVarType::kDataPar);
+  PrimExpr thread_bounds_override_min_;
+  PrimExpr thread_bounds_override_extent_;
   std::vector<IterVar> thread_var_vec_;
   std::vector<Range> thread_bounds_vec_;
   std::vector<std::unique_ptr<arith::Analyzer>> analyzer_vec_;
@@ -1184,8 +1287,8 @@ private:
    * @return Stmt The (possibly modified) Block statement with the layout-map
    * annotation set.
    */
-  Stmt VisitStmt_(const BlockNode *op) final {
-    Block block = Downcast<Block>(IRMutatorWithAnalyzer::VisitStmt_(op));
+  Stmt VisitStmt_(const SBlockNode *op) final {
+    SBlock block = Downcast<SBlock>(IRMutatorWithAnalyzer::VisitStmt_(op));
 
     for (auto buffer : block->alloc_buffers) {
       if (buffer.scope() == "local.framgent") {
@@ -1209,22 +1312,28 @@ private:
    * The stored annotations are:
    * - attr::kParallelLoopLayout: The Fragment layout for the parallel loop
    * - attr::kParallelLoopPredicate: The predicate expression (if any)
+   * - attr::kParallelLoopRequiresPaddingGuard: Whether inverse lowering must
+   *   allow and guard padded points from a ragged SIMT partition
    *
    * @return The For statement with layout annotations attached
    */
   Stmt VisitStmt_(const ForNode *op) final {
-    if (!result_.for_map.count(tvm::ffi::GetRef<For>(op))) {
+    if (!result_.for_map.count(GetRef<For>(op))) {
       return IRMutatorWithAnalyzer::VisitStmt_(op);
     }
 
     For for_node = Downcast<For>(IRMutatorWithAnalyzer::VisitStmt_(op));
-    auto root = tvm::ffi::GetRef<For>(op);
+    auto root = GetRef<For>(op);
 
     auto loop_layout = result_.for_map[root];
 
-    // Store the loop layout as an annotation on the For node
+    // Store the loop layout as an annotation on the For node (outermost)
     auto for_ptr = for_node.CopyOnWrite();
     for_ptr->annotations.Set(attr::kParallelLoopLayout, loop_layout);
+    if (result_.padding_guard_map.count(root)) {
+      for_ptr->annotations.Set(attr::kParallelLoopRequiresPaddingGuard,
+                               result_.padding_guard_map[root]);
+    }
 
     // Store the predicate as an annotation if it exists and is not trivially
     // true
@@ -1240,7 +1349,7 @@ private:
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tir::attr::thread_extent) {
+    if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
     }
     return IRMutatorWithAnalyzer::VisitStmt_(op);
@@ -1251,9 +1360,8 @@ private:
 };
 
 tvm::transform::Pass LayoutInference() {
-  using namespace tir::transform;
+  using namespace tirx::transform;
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    f.CopyOnWrite()->body = ParallelLoopTransformer::Substitute(f->body);
     ThreadBindingCollector collector;
     collector(f->body);
     bool has_thread_binding = !collector.thread_binding_.empty();
@@ -1267,7 +1375,7 @@ tvm::transform::Pass LayoutInference() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.LayoutInference", LayoutInference);
 }
 

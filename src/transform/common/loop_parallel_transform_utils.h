@@ -1,17 +1,34 @@
 /*!
- * \file common.h
- * \brief Common utilities for TL transforms
+ * \file loop_parallel_transform_utils.h
+ * \brief Fragment-bounds predication for kParallel loops (multimem lowering).
+ *
+ * ParallelLoopTransformer is used exclusively by MultimemOpNode::Lower to
+ * guard out-of-bounds fragment register accesses before the ParallelOp layout
+ * inference step.
+ *
+ * Background: multimem ops (NVSwitch SHARP multicast) reuse the CopyNode
+ * ParallelOp pipeline but post-process the result to replace buffer accesses
+ * with multimem PTX instructions.  The fragment layout assigned during
+ * InferLayout may allocate more register slots than actual data elements (due
+ * to warp-level alignment), so a plain iteration over all slots would issue
+ * out-of-bounds multicast writes.  CopyNode handles this via MakePredicate on
+ * src/dst ranges, but that mechanism does not cover structural over-allocation
+ * inside the fragment itself.
+ *
+ * This transformer fills the gap: it analyzes each fragment buffer index with
+ * the arithmetic analyzer, and if the proven upper bound is smaller than the
+ * buffer dimension it wraps the loop body in an IfThenElse predicate before
+ * the loop reaches ParallelOp.
  */
 
 #include <tvm/arith/analyzer.h>
-#include <tvm/tir/stmt.h>
+#include <tvm/tirx/stmt.h>
 
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/index_map.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
-#include <tvm/tir/utils.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/index_map.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
@@ -22,7 +39,7 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 using arith::IRMutatorWithAnalyzer;
 using arith::IRVisitorWithAnalyzer;
 

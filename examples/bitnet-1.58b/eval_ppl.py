@@ -1,5 +1,9 @@
+# Copyright (c) Tile-AI Corporation.
+# Licensed under MIT. Modified from the 1bitLLM BitNet model repository; see
+# THIRDPARTYNOTICES.txt and LICENSES/1bitLLM-BitNet.txt.
+
 # pylint: disable=missing-docstring, invalid-name
-"""This is modified from https://huggingface.co/1bitLLM/bitnet_b1_58-3B/blob/main/utils_quant.py."""
+"""Modified from the upstream BitNet ``eval_ppl.py``."""
 
 import math
 import argparse

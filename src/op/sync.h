@@ -8,14 +8,14 @@
 #define TVM_TL_OP_SYNC_H_
 
 #include <tvm/target/target.h>
-#include <tvm/tir/stmt_functor.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include "operator.h"
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 /*!
  * \brief TileOperatorNode for wait operation.
@@ -29,6 +29,8 @@ public:
   PrimExpr expected; ///< The expected value to compare against.
   PrimExpr peer;     ///< The peer to compare against.
   int relation;      ///< The relation to compare against.
+  int scope;         ///< Memory scope used by wait loads.
+  int semantics;     ///< Memory semantics used by wait loads.
 
   bool is_distributed() const;
 
@@ -40,7 +42,9 @@ public:
         .def_ro("addr", &WaitOpNode::addr)
         .def_ro("expected", &WaitOpNode::expected)
         .def_ro("peer", &WaitOpNode::peer)
-        .def_ro("relation", &WaitOpNode::relation);
+        .def_ro("relation", &WaitOpNode::relation)
+        .def_ro("scope", &WaitOpNode::scope)
+        .def_ro("semantics", &WaitOpNode::semantics);
   }
 
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;

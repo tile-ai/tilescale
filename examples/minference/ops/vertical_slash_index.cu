@@ -1,5 +1,6 @@
 // Copyright (c) Microsoft Corporation.
-// Licensed under the MIT license.
+// Licensed under MIT; see THIRDPARTYNOTICES.txt and LICENSES/MInference.txt.
+// Modified for TileScale.
 
 #include <assert.h>
 

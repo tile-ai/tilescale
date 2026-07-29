@@ -6,16 +6,40 @@
 
 #include "sync.h"
 
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/op_attr_types.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/op_attr_types.h>
 
 #include "distributed.h"
+#include "distributed_utils.h"
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+
+namespace {
+
+const char *WaitValueTypeName(DataType dtype) {
+  if (dtype == DataType::UInt(32)) {
+    return "uint32_t";
+  }
+  if (dtype == DataType::Int(32)) {
+    return "int32_t";
+  }
+  if (dtype == DataType::UInt(64)) {
+    return "uint64_t";
+  }
+  if (dtype == DataType::Int(64)) {
+    return "int64_t";
+  }
+  ICHECK(false) << "Wait operations only support int32, uint32, int64, and "
+                   "uint64 signals, but got "
+                << dtype;
+  return "";
+}
+
+} // namespace
 
 PrimExpr BarrierBlocksOpNode::get_offset(const BufferLoadNode *load) const {
   PrimExpr offset = 0;
@@ -66,15 +90,10 @@ Stmt BarrierBlocksOpNode::Lower(const LowerArgs &T,
   new_args.push_back(StringImm(ss.str()));
 
   PrimExpr bar_addr = MakeLocalBarAddr(T);
-  PrimExpr rank = Call(DataType::Int(64), tl::get_rank(), {});
-  PrimExpr num_ranks = Call(DataType::Int(64), tl::get_num_ranks(), {});
-  PrimExpr local_base_ptr =
-      Call(DataType::Handle(), tl::get_remote_base_ptr(), {rank});
-  PrimExpr offset_to_base =
-      Sub(Call(DataType::Handle(), tl::get_uintptr_t(), {bar_addr}),
-          local_base_ptr);
+  PrimExpr rank = Call(DataType::Int(32), tl::get_rank(), {});
+  PrimExpr num_ranks = Call(DataType::Int(32), tl::get_num_ranks(), {});
 
-  new_args.push_back(offset_to_base);
+  new_args.push_back(GetOffsetFromLocalBase(bar_addr));
   new_args.push_back(rank);
   new_args.push_back(num_ranks);
 
@@ -105,8 +124,7 @@ PrimExpr BarrierBlocksOpNode::MakeLocalBarAddr(const LowerArgs &T) const {
   if (T.buffer_remap.count(buffer)) {
     buffer = T.buffer_remap[buffer];
   }
-  return Call(DataType::Handle(), builtin::address_of(),
-              {BufferLoad(buffer, local_indices)});
+  return MakeAddress(buffer, local_indices);
 }
 
 WaitOp::WaitOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
@@ -115,6 +133,8 @@ WaitOp::WaitOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->addr = args[1];
   node->expected = args[2];
   node->peer = args[3];
+  node->scope = args.size() > 4 ? args[4].as<IntImmNode>()->value : 0;
+  node->semantics = args.size() > 5 ? args[5].as<IntImmNode>()->value : 0;
   data_ = std::move(node);
 }
 
@@ -131,18 +151,25 @@ Stmt WaitOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   // Map relation as int to literal_strings
   const char *relation_str[] = {"eq", "ne", "ge", "le", "gt", "lt"};
+  const char *scope_str[] = {"tl::WaitScope::kSys", "tl::WaitScope::kGpu"};
+  const char *semantics_str[] = {"tl::WaitSemantics::kAcquire",
+                                 "tl::WaitSemantics::kVolatile"};
+  const auto *addr_call = addr.as<CallNode>();
+  ICHECK(addr_call && addr_call->op.same_as(builtin::address_of()))
+      << "Wait address must remain an address_of call";
+  const auto *load = addr_call->args[0].as<BufferLoadNode>();
+  ICHECK(load) << "Wait address_of must wrap a BufferLoad";
+  ICHECK_GE(scope, 0);
+  ICHECK_LT(scope, 2);
+  ICHECK_GE(semantics, 0);
+  ICHECK_LT(semantics, 2);
   ss << "tl::wait_" << relation_str[relation];
+  ss << "<" << scope_str[scope] << ", " << semantics_str[semantics] << ", "
+     << WaitValueTypeName(load->dtype) << ">";
 
   new_args.push_back(StringImm(ss.str()));
   if (is_distributed()) {
-    PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
-    PrimExpr local_base_ptr =
-        Call(DataType::Handle(), tl::get_remote_base_ptr(), {local_rank});
-    PrimExpr offset_to_base = Sub(
-        Call(DataType::Handle(), tl::get_uintptr_t(), {addr}), local_base_ptr);
-    new_args.push_back(
-        Call(DataType::Handle(), tl::get_remote_base_ptr(), {peer}) +
-        offset_to_base);
+    new_args.push_back(RemapRemoteAddress(addr, peer));
   } else {
     new_args.push_back(addr);
   }
@@ -170,7 +197,7 @@ TIR_REGISTER_TL_TILE_OP(BarrierBlocksOp, barrier_blocks)
                                Integer(CallEffectKind::kOpaque));
 
 TIR_REGISTER_TL_TILE_OP(WaitOp, wait)
-    .set_num_inputs(4)
+    .set_num_inputs(-1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 

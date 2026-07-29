@@ -21,13 +21,15 @@
  * \file lower_device_kernel_launch.cc
  * \brief Split device function from host.
  */
-#include <tvm/ffi/reflection/registry.h>
+#include "support/check.h"
+#include <tvm/ir/cast.h>
 #include <tvm/ir/transform.h>
+#include <tvm/runtime/logging.h>
 #include <tvm/target/target.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/expr.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
@@ -35,7 +37,7 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 using namespace ffi;
 namespace {
 struct KernelInfo {
@@ -64,6 +66,8 @@ struct KernelInfo {
   Map<String, PrimExpr> thread_extent;
   // The amount of dynamic shared memory used
   Optional<PrimExpr> dyn_shmem_size{std::nullopt};
+  // Cluster dimensions for SM90+ cluster launch
+  Optional<Array<Integer>> cluster_dims{std::nullopt};
 };
 
 /*!
@@ -78,6 +82,11 @@ public:
     collector.info_.params = func->params;
 
     collector(func->body);
+
+    // Cluster dims are promoted to a PrimFunc attr by LowerOpaqueBlock.
+    if (auto opt = func->GetAttr<Array<Integer>>("cluster_dims")) {
+      collector.info_.cluster_dims = opt.value();
+    }
 
     // The dynamic shared memory is required to be the last of the
     // kernel launch parameters
@@ -94,6 +103,26 @@ public:
         [&](const auto &param) { return collector.GetArgument(param); });
     collector.info_.dyn_shmem_size = collector.dyn_shmem_size;
     collector.info_.thread_extent = collector.thread_extent;
+
+    // Prepend cluster dim tags and static values so the TVM runtime
+    // can read them from packed-function args at launch time.
+    if (collector.info_.cluster_dims.defined()) {
+      auto dims = collector.info_.cluster_dims.value();
+      Array<PrimExpr> new_launch_args = {PrimExpr(dims[0]), PrimExpr(dims[1]),
+                                         PrimExpr(dims[2])};
+      for (auto arg : collector.info_.launch_args)
+        new_launch_args.push_back(arg);
+      collector.info_.launch_args = new_launch_args;
+
+      Array<String> new_launch_params = {
+          String(tvm::runtime::launch_param::kClusterDimX),
+          String(tvm::runtime::launch_param::kClusterDimY),
+          String(tvm::runtime::launch_param::kClusterDimZ)};
+      for (auto param : collector.info_.launch_params)
+        new_launch_params.push_back(param);
+      collector.info_.launch_params = new_launch_params;
+    }
+
     return collector.info_;
   }
 
@@ -101,7 +130,7 @@ private:
   PrimExpr GetArgument(const String &launch_param) const {
     if (launch_param ==
         tvm::runtime::launch_param::kUseDynamicSharedMemoryTag) {
-      CHECK(dyn_shmem_size.defined())
+      ICHECK(dyn_shmem_size.defined())
           << "Compute kernel requires launch parameter \"" << launch_param
           << "\", but PrimFunc did not contain Allocate node with shared "
              "dynamic scope.";
@@ -109,16 +138,16 @@ private:
     }
 
     auto extent = thread_extent.Get(launch_param);
-    CHECK(extent) << "Compute kernel requires launch parameter \""
-                  << launch_param
-                  << "\", but PrimFunc does not contain AttrStmt \""
-                  << tir::attr::thread_extent
-                  << "\" defining this thread extent";
+    ICHECK(extent) << "Compute kernel requires launch parameter \""
+                   << launch_param
+                   << "\", but PrimFunc does not contain AttrStmt \""
+                   << tirx::attr::thread_extent
+                   << "\" defining this thread extent";
     return extent.value();
   }
 
   void VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tir::attr::thread_extent) {
+    if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       ICHECK_NE(iv->thread_tag.length(), 0U);
       // thread_extent can appear multiple times
@@ -133,20 +162,20 @@ private:
     StmtVisitor::VisitStmt_(op);
   }
 
-  void VisitStmt_(const AllocateNode *op) final {
+  void VisitStmt_(const AllocBufferNode *op) final {
     auto storage_scope =
-        runtime::StorageScope::Create(GetPtrStorageScope(op->buffer_var));
+        runtime::StorageScope::Create(GetPtrStorageScope(op->buffer->data));
     if (storage_scope.rank == runtime::StorageRank::kShared &&
         storage_scope.tag == ".dyn") {
       ICHECK(!dyn_shmem_size.defined())
           << "Only one dynamic shared memory allocation is allowed.";
-      ICHECK_GT(op->extents.size(), 0);
+      ICHECK_GT(op->buffer->shape.size(), 0);
 
       PrimExpr dyn_size = Integer(1);
-      for (const auto &extent : op->extents) {
+      for (const auto &extent : op->buffer->shape) {
         dyn_size *= extent;
       }
-      dyn_size *= op->dtype.bytes() * op->dtype.lanes();
+      dyn_size *= op->buffer->dtype.bytes() * op->buffer->dtype.lanes();
 
       dyn_shmem_size = dyn_size;
     }
@@ -221,7 +250,7 @@ public:
   PrimFunc UpdateKernelAttributes(const GlobalVar &gvar, PrimFunc func) const {
     bool is_kernel_launch = device_kernel_launch_.count(gvar.get());
     bool is_call_extern = extern_function_call_.count(gvar.get());
-    CHECK(!is_kernel_launch || !is_call_extern)
+    ICHECK(!is_kernel_launch || !is_call_extern)
         << "Function " << gvar << " has multiple callees, "
         << "and would need to be lowered into a call_extern at some call "
            "sites, "
@@ -230,7 +259,7 @@ public:
 
     if (is_kernel_launch || is_call_extern) {
       func =
-          WithAttr(std::move(func), tvm::tir::attr::kIsGlobalFunc, Bool(true));
+          WithAttr(std::move(func), tvm::tirx::attr::kIsGlobalFunc, Bool(true));
     }
 
     if (is_kernel_launch) {
@@ -248,12 +277,15 @@ public:
           WithAttrs(std::move(func),
                     {{tvm::attr::kCallingConv,
                       Integer(tvm::CallingConv::kDeviceKernelLaunch)},
-                     {tvm::tir::attr::kKernelLaunchParams, info.launch_params},
+                     {tvm::tirx::attr::kKernelLaunchParams, info.launch_params},
                      {tvm::attr::kGlobalSymbol, info.global_symbol}});
     }
-    // @lei: workaround as we may require c host codegen, so we need to set the
-    // global symbol for cpu backend.
-    func = WithAttr(func, tvm::attr::kGlobalSymbol, gvar->name_hint);
+    // Preserve any global_symbol chosen earlier during device splitting.
+    // Source kernels rely on this to launch the external CUDA entry directly.
+    if (!func->GetAttr<String>(tvm::attr::kGlobalSymbol)) {
+      func =
+          WithAttr(std::move(func), tvm::attr::kGlobalSymbol, gvar->name_hint);
+    }
 
     const auto &info = device_info_map_.at(gvar.get());
     const auto &thread_extent = info.thread_extent;
@@ -261,6 +293,10 @@ public:
     if (info.dyn_shmem_size.defined()) {
       func = WithAttr(std::move(func), "dyn_shared_memory_buf",
                       info.dyn_shmem_size.value());
+    }
+    if (info.cluster_dims.defined()) {
+      func =
+          WithAttr(std::move(func), "cluster_dims", info.cluster_dims.value());
     }
     return func;
   }
@@ -309,7 +345,7 @@ private:
         << "CallNode attempted kernel launch to " << gvar->name_hint
         << " on target " << dev_info.target << ", but subroutine "
         << gvar->name_hint
-        << " did not have the tir::attr::kKernelLaunchParams attribute "
+        << " did not have the tirx::attr::kKernelLaunchParams attribute "
         << "required for cross-target kernel launch";
 
     // Collected kernel information may be in terms of the callee's
@@ -319,7 +355,7 @@ private:
     // expressions that are valid within the caller.
     Map<Var, PrimExpr> param_map = [&]() {
       Map<Var, PrimExpr> param_map;
-      CHECK_EQ(node->args.size(), dev_info.params.size())
+      ICHECK_EQ(node->args.size(), dev_info.params.size())
           << "Function " << gvar->name_hint << " accepts "
           << dev_info.params.size()
           << " arguments as input, but is called using " << node->args.size()
@@ -356,7 +392,7 @@ namespace transform {
 
 tvm::transform::Pass LowerDeviceKernelLaunch() {
   auto pass_func = [](IRModule mod,
-                      const tir::transform::PassContext &ctx) -> IRModule {
+                      const tirx::transform::PassContext &ctx) -> IRModule {
     auto mutator = [&mod]() {
       std::unordered_map<const GlobalVarNode *, KernelInfo> device_info_map;
       for (const auto &[gvar, base_func] : mod->functions) {
@@ -372,8 +408,8 @@ tvm::transform::Pass LowerDeviceKernelLaunch() {
       IRModule updates;
       for (const auto &[gvar, base_func] : mod->functions) {
         if (auto *ptr = base_func.as<PrimFuncNode>()) {
-          auto prim_func = mutator.RewriteKernelLaunchSite(
-              gvar, tvm::ffi::GetRef<PrimFunc>(ptr));
+          auto prim_func =
+              mutator.RewriteKernelLaunchSite(gvar, GetRef<PrimFunc>(ptr));
           if (!prim_func.same_as(base_func)) {
             updates->Add(gvar, prim_func);
           }
@@ -388,8 +424,8 @@ tvm::transform::Pass LowerDeviceKernelLaunch() {
       IRModule updates;
       for (const auto &[gvar, base_func] : mod->functions) {
         if (auto *ptr = base_func.as<PrimFuncNode>()) {
-          auto prim_func = mutator.UpdateKernelAttributes(
-              gvar, tvm::ffi::GetRef<PrimFunc>(ptr));
+          auto prim_func =
+              mutator.UpdateKernelAttributes(gvar, GetRef<PrimFunc>(ptr));
           if (!prim_func.same_as(base_func)) {
             updates->Add(gvar, prim_func);
           }
@@ -408,7 +444,7 @@ tvm::transform::Pass LowerDeviceKernelLaunch() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.LowerDeviceKernelLaunch",
                         LowerDeviceKernelLaunch);
 }

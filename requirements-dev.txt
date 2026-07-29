@@ -1,17 +1,17 @@
 # Requirements to run local build with `--no-build-isolation` or other developments
 
-apache-tvm-ffi~=0.1.0,>=0.1.6
+# Keep the local build ABI aligned with the vendored TVM-FFI headers.
+apache-tvm-ffi==0.1.11
 build
 cmake>=3.26
-cython>=3.0.0
+cython>=3.1.0
 ninja
 packaging
+pre-commit>=4.0.0
 scikit-build-core
 setuptools>=61
-torch
-cuda-python>=12.0.0
 wheel
-z3-solver>=4.13.0
+z3-solver==4.15.4.0
 
 auditwheel; platform_system == 'Linux'
 patchelf; platform_system == 'Linux'

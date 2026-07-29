@@ -7,7 +7,7 @@
 #define TVM_TL_OP_REMOTE_COPY_H_
 
 #include <tvm/target/target.h>
-#include <tvm/tir/stmt_functor.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include "../layout/layout.h"
 #include "operator.h"
@@ -15,7 +15,7 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 /*!
  * \brief Put operation for remote memory copy (local -> remote).
@@ -66,12 +66,6 @@ public:
   TileOperator Clone() const override;
 
   PrimExpr get_offset(const BufferLoadNode *load) const;
-
-private:
-  PrimExpr MakeAddress(const Buffer &buffer,
-                       const Array<PrimExpr> &indices) const;
-  PrimExpr MakeRemappedAddress(const LowerArgs &T, const Buffer &buffer,
-                               const Array<PrimExpr> &indices) const;
 };
 
 class PutOp : public TileOperator {
@@ -131,12 +125,6 @@ public:
   TileOperator Clone() const override;
 
   PrimExpr get_offset(const BufferLoadNode *load) const;
-
-private:
-  PrimExpr MakeAddress(const Buffer &buffer,
-                       const Array<PrimExpr> &indices) const;
-  PrimExpr MakeRemappedAddress(const LowerArgs &T, const Buffer &buffer,
-                               const Array<PrimExpr> &indices) const;
 };
 
 class GetOp : public TileOperator {

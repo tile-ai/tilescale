@@ -94,7 +94,7 @@ def prepare_output(
 
 @tilelang.jit(
     out_idx=[-5, -4, -3, -2, -1],
-    pass_configs={tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
 )
 def tilelang_wy_fast_bwd(
     # task config
@@ -247,7 +247,7 @@ def tilelang_wy_fast_bwd(
     return kernel
 
 
-@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True})
+@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True})
 def tilelang_wy_fast_bwd_split(
     # task config
     B,
@@ -345,26 +345,25 @@ def tilelang_wy_fast_bwd_split(
             T.copy(dA_shared, dA_fragment)
 
             for i_s1, i_s2 in T.Parallel(block_S, block_S):
-                with T.If(i_s1 <= i_s2):  # noqa: SIM117
-                    with T.Then():
-                        dA_fragment[i_s1, i_s2] = 0
+                if i_s1 <= i_s2:
+                    dA_fragment[i_s1, i_s2] = 0
             T.copy(dA_fragment, dA_shared)
             T.gemm(dA_shared, A_shared, dA_fragment, clear_accum=True, transpose_B=True)
             T.copy(dA_fragment, dA_shared)
             T.gemm(A_shared, dA_shared, dA_fragment, clear_accum=True, transpose_A=True)
             for i_s1, i_s2 in T.Parallel(block_S, block_S):
-                with T.If(i_s1 <= i_s2):
-                    with T.Then():
-                        dA_fragment[i_s1, i_s2] = 0
-                    with T.Else():
-                        dA_fragment[i_s1, i_s2] = -dA_fragment[i_s1, i_s2]
+                dA_fragment[i_s1, i_s2] = T.if_then_else(
+                    i_s1 <= i_s2,
+                    0,
+                    -dA_fragment[i_s1, i_s2],
+                )
 
             for i_s1, i_s2 in T.Parallel(block_S, block_S):
-                with T.If(G[bb, bs * block_S + i_s1, bh] - G[bb, bs * block_S + i_s2, bh] <= 0):
-                    with T.Then():
-                        dA_fragment[i_s1, i_s2] *= T.exp(G[bb, bs * block_S + i_s1, bh] - G[bb, bs * block_S + i_s2, bh])
-                    with T.Else():
-                        dA_fragment[i_s1, i_s2] = 0
+                dA_fragment[i_s1, i_s2] = T.if_then_else(
+                    G[bb, bs * block_S + i_s1, bh] - G[bb, bs * block_S + i_s2, bh] <= 0,
+                    dA_fragment[i_s1, i_s2] * T.exp(G[bb, bs * block_S + i_s1, bh] - G[bb, bs * block_S + i_s2, bh]),
+                    0,
+                )
             T.copy(dA_fragment, dA_shared)
 
             # acceptable dA diff

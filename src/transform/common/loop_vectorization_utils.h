@@ -22,14 +22,17 @@
  * \brief Common utilities for TL transforms
  */
 
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
-#include <tvm/tir/utils.h>
+#include "support/check.h"
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/s_tir/utils.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include <queue>
-#include <string>
 #include <utility>
 
 #include "../../op/parallel.h"
@@ -40,7 +43,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 // Vectorize Part
 // Use the same code as tir.transform.vectorize_loop
@@ -212,7 +216,7 @@ public:
     PrimExpr a = this->VisitExpr(op->a);
     PrimExpr b = this->VisitExpr(op->b);
     if (a.same_as(op->a) && b.same_as(op->b)) {
-      return tvm::ffi::GetRef<PrimExpr>(op);
+      return GetRef<PrimExpr>(op);
     } else {
       bool is_vec_a = a.dtype().is_scalable_or_fixed_length_vector();
       bool is_vec_b = b.dtype().is_scalable_or_fixed_length_vector();
@@ -266,7 +270,7 @@ public:
   PrimExpr VisitExpr_(const NotNode *op) final {
     PrimExpr a = this->VisitExpr(op->a);
     if (a.same_as(op->a)) {
-      return tvm::ffi::GetRef<PrimExpr>(op);
+      return GetRef<PrimExpr>(op);
     } else {
       return !(a);
     }
@@ -307,10 +311,10 @@ public:
     PrimExpr value = this->VisitExpr(op->value);
     if (value.dtype().is_scalable_or_fixed_length_vector()) {
       need_scalarize_ = true;
-      return tvm::ffi::GetRef<PrimExpr>(op);
+      return GetRef<PrimExpr>(op);
     }
     if (value.same_as(op->value)) {
-      return tvm::ffi::GetRef<PrimExpr>(op);
+      return GetRef<PrimExpr>(op);
     } else {
       return Broadcast(op->value, op->lanes);
     }
@@ -322,7 +326,7 @@ public:
     PrimExpr f = this->VisitExpr(op->false_value);
     if (cond.same_as(op->condition) && t.same_as(op->true_value) &&
         f.same_as(op->false_value)) {
-      return tvm::ffi::GetRef<PrimExpr>(op);
+      return GetRef<PrimExpr>(op);
     } else {
       int cond_lanes = cond.dtype().get_lanes_or_vscale_factor();
       int t_lanes = t.dtype().get_lanes_or_vscale_factor();
@@ -339,34 +343,51 @@ public:
 
   PrimExpr VisitExpr_(const CastNode *op) final {
     PrimExpr value = this->VisitExpr(op->value);
-    if (value.same_as(op->value)) {
-      return tvm::ffi::GetRef<PrimExpr>(op);
-    } else {
-      if (value.dtype().is_scalable_vector()) {
-        return Cast(op->dtype.with_scalable_vscale_factor(
-                        value.dtype().vscale_factor()),
-                    value);
+
+    // Vectorize PrimExpr values inside annotations (e.g. "rbits" for
+    // stochastic-rounding casts). Keys and non-PrimExpr values pass through
+    // unchanged.
+    ffi::Map<ffi::String, ffi::Any> new_annotations;
+    bool annotations_changed = false;
+    for (const auto &kv : op->annotations) {
+      if (auto opt = kv.second.as<PrimExpr>()) {
+        PrimExpr new_val = this->VisitExpr(opt.value());
+        new_annotations.Set(kv.first, new_val);
+        if (!new_val.same_as(opt.value()))
+          annotations_changed = true;
       } else {
-        return Cast(op->dtype.with_lanes(value.dtype().lanes()), value);
+        new_annotations.Set(kv.first, kv.second);
       }
     }
+    if (value.same_as(op->value) && !annotations_changed) {
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    }
+    DataType new_dtype = value.dtype().is_scalable_vector()
+                             ? op->dtype.with_scalable_vscale_factor(
+                                   value.dtype().vscale_factor())
+                             : op->dtype.with_lanes(value.dtype().lanes());
+    if (op->annotations.empty()) {
+      return Cast(new_dtype, value);
+    }
+    return Cast(new_dtype, value,
+                annotations_changed ? new_annotations : op->annotations);
   }
 
   PrimExpr VisitExpr_(const FloatImmNode *op) final {
-    return tvm::ffi::GetRef<PrimExpr>(op);
+    return GetRef<PrimExpr>(op);
   }
 
   PrimExpr VisitExpr_(const IntImmNode *op) final {
-    return tvm::ffi::GetRef<PrimExpr>(op);
+    return GetRef<PrimExpr>(op);
   }
 
   PrimExpr VisitExpr_(const StringImmNode *op) final {
-    return tvm::ffi::GetRef<PrimExpr>(op);
+    return GetRef<PrimExpr>(op);
   }
 
   // Variable
   PrimExpr VisitExpr_(const VarNode *op) final {
-    Var var = tvm::ffi::GetRef<Var>(op);
+    Var var = GetRef<Var>(op);
 
     if (var.same_as(var_)) {
       return ramp_;
@@ -383,13 +404,13 @@ public:
     PrimExpr cond = this->VisitExpr(op->args[0]);
     if (cond.dtype().is_scalable_or_fixed_length_vector()) {
       need_scalarize_ = true;
-      return tvm::ffi::GetRef<PrimExpr>(op);
+      return GetRef<PrimExpr>(op);
     }
     PrimExpr t = this->VisitExpr(op->args[1]);
     PrimExpr f = this->VisitExpr(op->args[2]);
     if (cond.same_as(op->args[0]) && t.same_as(op->args[1]) &&
         f.same_as(op->args[2])) {
-      return tvm::ffi::GetRef<PrimExpr>(op);
+      return GetRef<PrimExpr>(op);
     } else {
       int t_lanes = t.dtype().get_lanes_or_vscale_factor();
       int f_lanes = f.dtype().get_lanes_or_vscale_factor();
@@ -411,7 +432,7 @@ public:
     ICHECK(op->op.same_as(builtin::reinterpret()));
     PrimExpr value = this->VisitExpr(op->args[0]);
     if (value.same_as(op->args[0])) {
-      return tvm::ffi::GetRef<PrimExpr>(op);
+      return GetRef<PrimExpr>(op);
     } else {
       int lanes = value.dtype().get_lanes_or_vscale_factor();
       if (value.dtype().is_scalable_vector()) {
@@ -422,165 +443,10 @@ public:
       }
     }
   }
-  // tl::ld or tl::st expr vectorization
-  // Transform: for k in vectorized(N): tl::ld(&buf[base+k], val[k])
-  // Into: tl::ld(&buf[base], reinterpret<int4>(val[base])) with vectorized load
-  //
-  // This function handles the vectorization of tl::ld and tl::st calls.
-  // The key insight is that for 8 consecutive bf16 loads (128 bits total),
-  // we can use a single int4 load which is more efficient by reinterpreting
-  // the value as int4.
-  PrimExpr MutateTlLdStExpr_(const CallNode *op, bool is_load) {
-    // Structure: call_extern("tl::ld<...>", address_of(BufferLoad), value, ...)
-    // or: call_extern("tl::st<...>", address_of(BufferLoad), value, ...)
-    ICHECK(op->args.size() >= 3) << "tl::ld/st expects at least 3 arguments";
-
-    PrimExpr func_name = op->args[0];
-    PrimExpr addr_arg = op->args[1];
-    PrimExpr value_arg = op->args[2];
-
-    // Visit the address argument to vectorize indices
-    PrimExpr new_addr = this->VisitExpr(addr_arg);
-    PrimExpr new_value = this->VisitExpr(value_arg);
-
-    // Helper to extract base from Ramp and get lanes
-    auto extract_ramp_info =
-        [](const Array<PrimExpr> &indices) -> std::pair<Array<PrimExpr>, int> {
-      Array<PrimExpr> base_indices;
-      int ramp_lanes = 1;
-      for (const auto &idx : indices) {
-        auto ramp = idx.as<RampNode>();
-        if (ramp && is_one(ramp->stride)) {
-          auto lanes_imm = ramp->lanes.as<IntImmNode>();
-          if (lanes_imm) {
-            ramp_lanes = lanes_imm->value;
-          }
-          base_indices.push_back(ramp->base);
-        } else {
-          base_indices.push_back(idx);
-        }
-      }
-      return {base_indices, ramp_lanes};
-    };
-
-    // Check source address for Ramp pattern
-    int src_ramp_lanes = 1;
-    auto addr_call = new_addr.as<CallNode>();
-    if (addr_call && addr_call->op.same_as(builtin::address_of())) {
-      auto buffer_load = addr_call->args[0].as<BufferLoadNode>();
-      if (buffer_load) {
-        auto [base_indices, lanes] = extract_ramp_info(buffer_load->indices);
-        if (lanes > 1) {
-          src_ramp_lanes = lanes;
-          // Create new address with base indices only
-          BufferLoad new_buffer_load(buffer_load->buffer, base_indices);
-          new_addr = Call(DataType::Handle(), builtin::address_of(),
-                          {new_buffer_load});
-        }
-      }
-    }
-
-    // Check destination value for Ramp pattern (for local buffer stores)
-    int dst_ramp_lanes = 1;
-    auto value_load = new_value.as<BufferLoadNode>();
-    if (value_load) {
-      auto [base_indices, lanes] = extract_ramp_info(value_load->indices);
-      if (lanes > 1) {
-        dst_ramp_lanes = lanes;
-        // Create new value with base indices only
-        new_value = BufferLoad(value_load->buffer, base_indices);
-      }
-    }
-
-    // Determine vectorization lanes
-    int vector_lanes = std::max(src_ramp_lanes, dst_ramp_lanes);
-    if (vector_lanes > 1) {
-      // Determine the vector type based on total bytes
-      // 8 x 16-bit = 128 bits = int4, 4 x 32-bit = 128 bits = int4
-      // 4 x 16-bit = 64 bits = int2, 2 x 32-bit = 64 bits = int2
-      DataType vec_dtype;
-      int elem_bits = 16; // Default assumption for bf16/f16
-
-      // Try to get element dtype from source buffer
-      auto addr_call_check = new_addr.as<CallNode>();
-      if (addr_call_check &&
-          addr_call_check->op.same_as(builtin::address_of())) {
-        auto buffer_load = addr_call_check->args[0].as<BufferLoadNode>();
-        if (buffer_load) {
-          elem_bits = buffer_load->buffer->dtype.bits();
-        }
-      }
-
-      int total_bits = vector_lanes * elem_bits;
-      if (total_bits == 128) {
-        vec_dtype = DataType::Int(32, 4); // int4 equivalent (128 bits)
-      } else if (total_bits == 64) {
-        vec_dtype = DataType::Int(32, 2); // int2 equivalent (64 bits)
-      } else if (total_bits == 32) {
-        vec_dtype = DataType::Int(32);
-      } else {
-        // Can't vectorize to a standard type, fall back to scalarize
-        need_scalarize_ = true;
-        return tvm::ffi::GetRef<PrimExpr>(op);
-      }
-
-      // Reinterpret the value to vector type (e.g., int4 for 8xbf16)
-      // This generates: reinterpret_cast<int4&>(dst[base])
-      PrimExpr vec_value = Call(vec_dtype, builtin::reinterpret(), {new_value});
-
-      // Build new args with base addresses and reinterpreted value
-      Array<PrimExpr> new_args;
-      new_args.push_back(func_name);
-      new_args.push_back(new_addr);
-      new_args.push_back(vec_value);
-      // Copy remaining args (sem, scope, etc.)
-      for (size_t i = 3; i < op->args.size(); ++i) {
-        new_args.push_back(this->VisitExpr(op->args[i]));
-      }
-
-      // Return the vectorized call with same function but vectorized value type
-      return Call(op->dtype, op->op, new_args);
-    }
-
-    // If we couldn't vectorize but args became vectors, need to scalarize
-    if (new_addr.dtype().is_scalable_or_fixed_length_vector() ||
-        new_value.dtype().is_scalable_or_fixed_length_vector()) {
-      need_scalarize_ = true;
-      return tvm::ffi::GetRef<PrimExpr>(op);
-    }
-
-    // No vectorization needed, return with updated args if changed
-    if (new_addr.same_as(addr_arg) && new_value.same_as(value_arg)) {
-      return tvm::ffi::GetRef<PrimExpr>(op);
-    }
-
-    Array<PrimExpr> new_args;
-    new_args.push_back(func_name);
-    new_args.push_back(new_addr);
-    new_args.push_back(new_value);
-    for (size_t i = 3; i < op->args.size(); ++i) {
-      new_args.push_back(this->VisitExpr(op->args[i]));
-    }
-    return Call(op->dtype, op->op, new_args);
-  }
-
   // Call
   PrimExpr VisitExpr_(const CallNode *op) final {
     if (op->op.same_as(builtin::if_then_else())) {
       return MutateIfThenElseExpr_(op);
-    } else if (op->op.same_as(builtin::call_extern())) {
-      // Check if this is a tl::ld or tl::st call which can be vectorized
-      if (op->args.size() >= 3) {
-        auto func_name_node = op->args[0].as<StringImmNode>();
-        if (func_name_node) {
-          std::string func_name = func_name_node->value;
-          // Check for tl::ld<...> or tl::st<...> patterns
-          if (func_name.rfind("tl::ld<", 0) == 0 ||
-              func_name.rfind("tl::st<", 0) == 0) {
-            return MutateTlLdStExpr_(op, func_name.rfind("tl::ld<", 0) == 0);
-          }
-        }
-      }
     } else if (op->op.same_as(builtin::texture2d_load())) {
       int lane = 0;
       Array<PrimExpr> fcd = MutateArray({op->args.back()}, &lane);
@@ -611,12 +477,12 @@ public:
         auto new_arg = this->VisitExpr(arg);
         if (new_arg.dtype().is_scalable_or_fixed_length_vector()) {
           need_scalarize_ = true;
-          return tvm::ffi::GetRef<PrimExpr>(op);
+          return GetRef<PrimExpr>(op);
         }
         new_args.push_back(new_arg);
       }
       if (op->args.same_as(new_args)) {
-        return tvm::ffi::GetRef<PrimExpr>(op);
+        return GetRef<PrimExpr>(op);
       } else {
         return Call(op->dtype, op->op, new_args);
       }
@@ -625,7 +491,7 @@ public:
       Array<PrimExpr> new_args = MutateArray(op->args, &lane);
       // normal code path.
       if (op->args.same_as(new_args)) {
-        return tvm::ffi::GetRef<PrimExpr>(op);
+        return GetRef<PrimExpr>(op);
       } else {
         return Call(op->dtype.with_lanes(lane), op->op, new_args);
       }
@@ -633,7 +499,7 @@ public:
   }
   // BufferLoad
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
-    auto load = tvm::ffi::GetRef<BufferLoad>(op);
+    auto load = GetRef<BufferLoad>(op);
 
     auto fmutate = [this](const PrimExpr &index) {
       return this->VisitExpr(index);
@@ -670,7 +536,7 @@ public:
       let_binding_[op->var] = op->var;
       PrimExpr body = this->VisitExpr(op->body);
       if (value.same_as(op->value) && body.same_as(op->body)) {
-        return tvm::ffi::GetRef<PrimExpr>(op);
+        return GetRef<PrimExpr>(op);
       } else {
         return Let(op->var, value, body);
       }
@@ -678,7 +544,7 @@ public:
   }
   // BufferStore
   Stmt VisitStmt_(const BufferStoreNode *op) final {
-    auto store = tvm::ffi::GetRef<BufferStore>(op);
+    auto store = GetRef<BufferStore>(op);
 
     auto fmutate = [this](const PrimExpr &index) {
       return this->VisitExpr(index);
@@ -741,11 +607,11 @@ public:
     ICHECK(!op->extent.dtype().is_scalable_or_fixed_length_vector());
     PrimExpr extent = this->VisitExpr(op->extent);
     if (extent.dtype().is_scalable_or_fixed_length_vector()) {
-      return Scalarize(tvm::ffi::GetRef<Stmt>(op));
+      return Scalarize(GetRef<Stmt>(op));
     }
     Stmt body = this->VisitStmt(op->body);
     if (extent.same_as(op->extent) && body.same_as(op->body)) {
-      return tvm::ffi::GetRef<Stmt>(op);
+      return GetRef<Stmt>(op);
     } else {
       return For(op->loop_var, op->min, extent, op->kind, body,
                  op->thread_binding, op->annotations);
@@ -756,7 +622,7 @@ public:
     ICHECK(!op->condition.dtype().is_scalable_or_fixed_length_vector());
     PrimExpr condition = this->VisitExpr(op->condition);
     if (condition.dtype().is_scalable_or_fixed_length_vector()) {
-      return Scalarize(tvm::ffi::GetRef<Stmt>(op));
+      return Scalarize(GetRef<Stmt>(op));
     }
     Stmt then_case = this->VisitStmt(op->then_case);
     Optional<Stmt> else_case = std::nullopt;
@@ -765,7 +631,7 @@ public:
     }
     if (condition.same_as(op->condition) && then_case.same_as(op->then_case) &&
         else_case.same_as(op->else_case)) {
-      return tvm::ffi::GetRef<Stmt>(op);
+      return GetRef<Stmt>(op);
     } else {
       return IfThenElse(condition, then_case, else_case);
     }
@@ -775,7 +641,7 @@ public:
     LOG(FATAL) << "A while loop inside a vectorized loop not supported.";
   }
   // LetStmt
-  Stmt VisitStmt_(const LetStmtNode *op) final {
+  Stmt VisitStmt_(const BindNode *op) final {
     PrimExpr value = this->VisitExpr(op->value);
     ICHECK(!let_binding_.count(op->var))
         << "SSA violation, a single var is binded twice";
@@ -785,54 +651,40 @@ public:
         op->value.dtype().get_lanes_or_vscale_factor()) {
       Var new_var(op->var->name_hint, value.dtype());
       let_binding_[op->var] = new_var;
-      return LetStmt(new_var, value, this->VisitStmt(op->body));
+      return Bind(new_var, value);
     } else {
       let_binding_[op->var] = op->var;
-      Stmt body = this->VisitStmt(op->body);
-      if (value.same_as(op->value) && body.same_as(op->body)) {
-        return tvm::ffi::GetRef<Stmt>(op);
+      if (value.same_as(op->value)) {
+        return GetRef<Stmt>(op);
       } else {
-        return LetStmt(op->var, value, body);
+        return Bind(op->var, value);
       }
     }
   }
   // Allocate
-  Stmt VisitStmt_(const AllocateNode *op) final {
-    // Mutate the condition
-    PrimExpr condition = this->VisitExpr(op->condition);
-    if (condition.dtype().is_scalable_or_fixed_length_vector()) {
-      LOG(WARNING) << "Cannot handle vector extent in alloc of "
-                   << op->buffer_var->name_hint;
-      return Scalarize(tvm::ffi::GetRef<Stmt>(op));
-    }
-
+  Stmt VisitStmt_(const AllocBufferNode *op) final {
     // Mutate the extents
     Array<PrimExpr> extents;
-    for (const auto &extent : op->extents) {
+    for (const auto &extent : op->buffer->shape) {
       PrimExpr new_ext = this->VisitExpr(extent);
       if (new_ext.dtype().is_scalable_or_fixed_length_vector()) {
         LOG(WARNING) << "Cannot handle vector extent in alloc of "
-                     << op->buffer_var->name_hint;
-        return Scalarize(tvm::ffi::GetRef<Stmt>(op));
+                     << op->buffer->data->name_hint;
+        return Scalarize(GetRef<Stmt>(op));
       }
       extents.push_back(new_ext);
     }
-
-    // TODO(Lunderberg): Move this pass to be prior to
-    // StorageFlatten/FlattenBuffer.  That will allow this pass to be
-    // implemented as adding a new buffer dimension, which is later
-    // flattened.
 
     // Extend the least significant dimension by a factor of
     // var_lanes_.  Typically, this will be a 1-d index into a flat
     // memory space.
     extents.Set(extents.size() - 1, extents[extents.size() - 1] * var_lanes_);
 
-    // Rewrite access to the buffer in the body.
-    Stmt body =
-        VecAllocAccess(op->buffer_var.get(), var_, var_lanes_)(op->body);
-    body = this->VisitStmt(body);
-    return Allocate(op->buffer_var, op->dtype, extents, condition, body);
+    // Create new buffer with extended shape
+    Buffer new_buf(op->buffer->data, op->buffer->dtype, extents,
+                   op->buffer->strides, op->buffer->elem_offset,
+                   op->buffer->data->name_hint, 0, 0, kDefault);
+    return AllocBuffer(new_buf, op->annotations);
   }
 
   // scalarize the statement
@@ -894,7 +746,7 @@ private:
     PrimExpr a = this->VisitExpr(op->a);
     PrimExpr b = this->VisitExpr(op->b);
     if (a.same_as(op->a) && b.same_as(op->b)) {
-      return tvm::ffi::GetRef<PrimExpr>(op);
+      return GetRef<PrimExpr>(op);
     } else {
       int a_lanes = a.dtype().get_lanes_or_vscale_factor();
       int b_lanes = b.dtype().get_lanes_or_vscale_factor();
@@ -910,7 +762,7 @@ private:
     PrimExpr a = this->VisitExpr(op->a);
     PrimExpr b = this->VisitExpr(op->b);
     if (a.same_as(op->a) && b.same_as(op->b)) {
-      return tvm::ffi::GetRef<PrimExpr>(op);
+      return GetRef<PrimExpr>(op);
     } else {
       int a_lanes = a.dtype().get_lanes_or_vscale_factor();
       int b_lanes = b.dtype().get_lanes_or_vscale_factor();

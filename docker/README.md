@@ -1,15 +1,30 @@
-To ease the process of installing all the dependencies, we provide a Dockerfile and a simple guideline to build a Docker image with all of above installed. The Docker image is built on top of Ubuntu 20.04, and it contains all the dependencies required to run the experiments. We only provide the Dockerfile for NVIDIA GPU, and the Dockerfile for AMD GPU will be provided upon request.
+# TileScale containers
+
+Build every image from the repository root. The Dockerfiles copy and install
+the current TileScale checkout, including its pinned submodules.
+
+For NVIDIA GPUs, select a Dockerfile matching the CUDA toolchain you need. B200
+requires CUDA 12.8 or newer:
 
 ```bash
-git clone --recursive https://github.com/tile-ai/tilelang TileLang
-cd TileLang/docker
-# build the image, this may take a while (around 10+ minutes on our test machine)
-# replace the version number cu124 with the one you want to use
-# replace .cu** with .rocm for AMD GPU
-docker build -t tilelang_workspace -f Dockerfile.cu124 .
-# run the container
-# if it's nvidia
-docker run -it --cap-add=SYS_ADMIN --network=host --gpus all --cap-add=SYS_PTRACE --shm-size=4G --security-opt seccomp=unconfined --security-opt apparmor=unconfined --name tilelang_test tilelang_workspace bash
-# if it's amd
-docker run -it --cap-add=SYS_ADMIN --network=host --device=/dev/kfd --device=/dev/dri  --cap-add=SYS_PTRACE --shm-size=4G --security-opt seccomp=unconfined --security-opt apparmor=unconfined --name tilelang_test tilelang_workspace bash
+git clone --recursive https://github.com/tile-ai/tilescale.git
+cd tilescale
+docker build -f docker/Dockerfile.cu128 -t tilescale-cu128 .
+docker run --rm -it --gpus all --network=host --shm-size=32g \
+  --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
+  tilescale-cu128 bash
 ```
+
+For AMD GPUs:
+
+```bash
+docker build -f docker/Dockerfile.rocm -t tilescale-rocm .
+docker run --rm -it --network=host --device=/dev/kfd --device=/dev/dri \
+  --group-add video --shm-size=32g --cap-add=SYS_PTRACE \
+  --security-opt seccomp=unconfined tilescale-rocm
+```
+
+The CUDA images install the `distributed` extra. VMM/fabric and multicast also
+require a compatible NVSwitch system, Fabric Manager, and a configured NVIDIA
+IMEX channel on the host; CUDA IPC remains the fallback when those capabilities
+are unavailable.

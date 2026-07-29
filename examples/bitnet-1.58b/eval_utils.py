@@ -1,3 +1,6 @@
+# Modified from the MIT-licensed 1bitLLM BitNet model repository. See
+# THIRDPARTYNOTICES.txt and LICENSES/1bitLLM-BitNet.txt.
+
 # ruff: noqa
 import torch
 

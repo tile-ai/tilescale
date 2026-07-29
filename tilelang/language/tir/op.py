@@ -4,8 +4,22 @@ import tvm
 from tvm.ir import PrimExpr
 from tvm.ir.base import Span
 from tvm.runtime import const
-from tvm.tir.expr import IntImm, PrimExprWithOp
-import tvm.tir.op as _tvm_op
+from tvm.tirx import Buffer
+from tvm.tirx.expr import IntImm, PrimExprWithOp
+import tvm.tirx.op as _tvm_op
+
+from tilelang.language.dtypes import _is_any_dtype
+from tilelang.utils.deprecated import deprecated_warning
+
+
+def _buffer_data(value):
+    if isinstance(value, Buffer):
+        return value.data
+    return value
+
+
+def _normalize_primexpr_args(args):
+    return tuple(_buffer_data(arg) for arg in args)
 
 
 def call_packed(*args, span=None):
@@ -142,6 +156,7 @@ def call_intrin(dtype, func_name, *args, annotations=None, span=None):
     call : PrimExpr
         The call expression.
     """
+    args = _normalize_primexpr_args(args)
     return _tvm_op.call_intrin(dtype, func_name, *args, annotations=annotations, span=span)
 
 
@@ -167,6 +182,7 @@ def call_pure_extern(dtype, func_name, *args, span=None):
     call : PrimExpr
         The call expression.
     """
+    args = _normalize_primexpr_args(args)
     return _tvm_op.call_pure_extern(dtype, func_name, *args, span=span)
 
 
@@ -192,6 +208,7 @@ def call_extern(dtype, func_name, *args, span=None):
     call : PrimExpr
         The call expression.
     """
+    args = _normalize_primexpr_args(args)
     return _tvm_op.call_extern(dtype, func_name, *args, span=span)
 
 
@@ -673,6 +690,7 @@ def tvm_access_ptr(ptype, data, offset, extent, rw_mask):
     call : PrimExpr
         The call expression.
     """
+    data = _buffer_data(data)
     return _tvm_op.tvm_access_ptr(ptype, data, offset, extent, rw_mask)
 
 
@@ -1137,6 +1155,94 @@ def ptx_wgmma_rs(
     )
 
 
+def ptx_wgmma_sp_ss(
+    dtype,
+    wgmma_prefix,
+    a_is_k_major,
+    b_is_k_major,
+    a_dtype_abbrv,
+    b_dtype_abbrv,
+    accum_dtype_abbrv,
+    A_desc,
+    A_offset,
+    E_data,
+    E_offset,
+    sparse_selector,
+    B_desc,
+    B_offset,
+    C_data,
+    C_offset,
+    scale_out,
+    scale_in_a,
+    scale_in_b,
+):
+    return call_intrin(
+        dtype,
+        _tvm_op.Op.get("tl.ptx_wgmma_sp_ss"),
+        wgmma_prefix,
+        a_is_k_major,
+        b_is_k_major,
+        a_dtype_abbrv,
+        b_dtype_abbrv,
+        accum_dtype_abbrv,
+        A_desc,
+        A_offset,
+        E_data,
+        E_offset,
+        sparse_selector,
+        B_desc,
+        B_offset,
+        C_data,
+        C_offset,
+        scale_out,
+        scale_in_a,
+        scale_in_b,
+    )
+
+
+def ptx_wgmma_sp_rs(
+    dtype,
+    wgmma_prefix,
+    b_is_k_major,
+    a_dtype_abbrv,
+    b_dtype_abbrv,
+    accum_dtype_abbrv,
+    A_buf,
+    A_offset,
+    E_buf,
+    E_offset,
+    sparse_selector,
+    B_desc,
+    B_offset,
+    C_data,
+    C_offset,
+    scale_out,
+    scale_in_a,
+    scale_in_b,
+):
+    return call_intrin(
+        dtype,
+        _tvm_op.Op.get("tl.ptx_wgmma_sp_rs"),
+        wgmma_prefix,
+        b_is_k_major,
+        a_dtype_abbrv,
+        b_dtype_abbrv,
+        accum_dtype_abbrv,
+        A_buf,
+        A_offset,
+        E_buf,
+        E_offset,
+        sparse_selector,
+        B_desc,
+        B_offset,
+        C_data,
+        C_offset,
+        scale_out,
+        scale_in_a,
+        scale_in_b,
+    )
+
+
 def ptx_tcgen05_mma_ss(
     kind_dtype,
     desc_a,
@@ -1152,13 +1258,14 @@ def ptx_tcgen05_mma_ss(
     mask2,
     mask3,
     enable_ws=False,
+    enable_2cta=False,
     ws=None,
     warp_specialized=None,
     variant=None,
 ):
-    """TVM intrinsic for tcgen05.mma shared-memory × shared-memory instructions.
+    """TVM intrinsic for tcgen05.mma shared-memory x shared-memory instructions.
 
-    Expects 13 or 14 positional arguments:
+    Expects 14 or 15 positional arguments:
     (kind_dtype, desc_a, A_offset, desc_b, B_offset, C_ptr, C_offset,
      desc_val, scale_out, mask0, mask1, mask2, mask3[, enable_ws]).
     Aliases: you can also pass `ws` or `warp_specialized` (booleans) instead of `enable_ws`.
@@ -1201,6 +1308,7 @@ def ptx_tcgen05_mma_ss(
         mask2,
         mask3,
         enable_ws,
+        enable_2cta,
     )
 
 
@@ -1218,8 +1326,9 @@ def ptx_tcgen05_mma_ts(
     mask1,
     mask2,
     mask3,
+    enable_2cta=False,
 ):
-    """TVM intrinsic for tcgen05.mma tensor-memory × shared-memory instructions.
+    """TVM intrinsic for tcgen05.mma tensor-memory x shared-memory instructions.
 
     Expects 13 positional arguments:
     (kind_dtype, A_ptr, A_offset, desc_b, B_offset, C_ptr, C_offset,
@@ -1243,6 +1352,59 @@ def ptx_tcgen05_mma_ts(
         mask1,
         mask2,
         mask3,
+        enable_2cta,
+    )
+
+
+def ptx_tcgen05_mma_blockscaled_ss(
+    kind_dtype,
+    desc_a,
+    A_offset,
+    desc_b,
+    B_offset,
+    C_ptr,
+    C_offset,
+    desc_val,
+    scale_out,
+    sfa_ptr,
+    sfa_offset,
+    sfb_ptr,
+    sfb_offset,
+    reserved0=0,
+    reserved1=0,
+    enable_2cta=False,
+):
+    """TVM intrinsic for tcgen05.mma block-scaled (mxf8f6f4.block_scale) instructions.
+
+    Block-scaled TCGEN05 is explicit-async and carries an explicit ``enable_2cta``
+    flag, analogous to the regular SS/TS TCGEN05 intrinsics. There is no
+    fallback path if 2CTA is requested.
+
+    Positional args:
+    kind_dtype, desc_a, A_offset, desc_b, B_offset, C_ptr, C_offset,
+    desc_val, scale_out, sfa_ptr, sfa_offset, sfb_ptr, sfb_offset,
+    reserved0, reserved1, enable_2cta.
+    """
+
+    return call_intrin(
+        "handle",
+        _tvm_op.Op.get("tl.ptx_tcgen05_mma_blockscaled_ss"),
+        kind_dtype,
+        desc_a,
+        A_offset,
+        desc_b,
+        B_offset,
+        C_ptr,
+        C_offset,
+        desc_val,
+        scale_out,
+        sfa_ptr,
+        sfa_offset,
+        sfb_ptr,
+        sfb_offset,
+        reserved0,
+        reserved1,
+        enable_2cta,
     )
 
 
@@ -1305,74 +1467,97 @@ def mma_fill(dtype, local_size, local_ptr, offset):
     return _tvm_op.mma_fill(dtype, local_size, local_ptr, offset)
 
 
-def ptx_ldmatrix(dtype, trans, num, type, local_ptr, local_offset, smem_ptr, smem_offset):
-    """TVM intrinsic for ptx load matrix from shared memory
+def ptx_ldmatrix(trans, num, src_access_ptr, dst_access_ptr):
+    """TileLang intrinsic for ptx load matrix from shared memory
+
+    Uses `tl.ptx_ldmatrix` which expects access pointers created via
+    `T.access_ptr` (i.e. `tl.access_ptr` wrapping a `BufferLoad`).
+
     https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#warp-level-matrix-instructions-ldmatrix
 
     Parameters
     ----------
-    dtype : str
-       The data type of the result.
-
     trans : bool
         The matrix is loaded in column-major format.
 
     num : IntImm
-        The number of matrices.
+        The number of matrices (2 or 4).
 
-    type : Literal[".b16"]
-        The data type of the matrices.
+    src_access_ptr : PrimExpr
+        A `tl.access_ptr` pointing to the source (shared memory) buffer.
 
-    local_ptr : Var
-        The local pointer variable.
-
-    local_offset : Expr
-        The offset of local pointer.
-
-    smem_ptr : Var
-        The shared memory pointer variable.
-
-    smem_offset : Expr
-        The offset of shared memort pointer.
+    dst_access_ptr : PrimExpr
+        A `tl.access_ptr` pointing to the destination (local/register) buffer.
 
     Returns
     -------
     call : PrimExpr
-        The call expression.
+        The call expression (handle-typed).
     """
-    return _tvm_op.ptx_ldmatrix(dtype, trans, num, type, local_ptr, local_offset, smem_ptr, smem_offset)
+    return tvm.tirx.call_intrin(
+        "handle",
+        tvm.tirx.op.Op.get("tl.ptx_ldmatrix"),
+        trans,
+        num,
+        src_access_ptr,
+        dst_access_ptr,
+    )
 
 
-def ptx_cp_async(dtype, shared_ptr, shared_offset, global_ptr, global_offset, bytes):
+def ptx_cp_async(dst_access_ptr, src_access_ptr, num_elems, predicate=None):
     """TVM intrinsic for ptx async copy from global to shared memory using cp.async
     https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async
 
     Parameters
     ----------
-    dtype : str
-       The data type of the result.
+    dst_access_ptr : PrimExpr
+        The destination (shared memory) access pointer created by tvm_access_ptr.
+        Should include pointer, offset, extent, and write access flag (rw_mask=2).
 
-    shared_ptr : Var
-        The shared memory pointer variable.
+    src_access_ptr : PrimExpr
+        The source (global memory) access pointer created by tvm_access_ptr.
+        Should include pointer, offset, extent, and read access flag (rw_mask=1).
 
-    shared_offset : Expr
-        The offset of shared memory pointer.
+    num_elems : int or PrimExpr
+        The number of logical elements to copy.
 
-    global_ptr : Var
-        The global memory pointer variable.
+        For TileLang's ``tl.ptx_cp_async`` frontend op, the final PTX byte width
+        is derived later from ``num_elems * element_bits(access_ptr)`` and must
+        eventually land on a legal ``cp.async`` width of 4, 8, or 16 bytes.
 
-    global_offset : Expr
-        The offset of global memory pointer.
-
-    bytes : int
-        The data size to copy.
+    predicate : PrimExpr, optional
+        Optional predicate condition for conditional cp.async. When provided, the copy
+        will only be performed if the predicate evaluates to true. Otherwise, the
+        destination will be filled with zeros (default behavior of cp.async).
 
     Returns
     -------
     call : PrimExpr
         The call expression.
+
+    Examples
+    --------
+    >>> # Copy 16 uint8 elements (= 16 bytes) from global to shared memory
+    >>> T.ptx_cp_async(
+    ...     T.tvm_access_ptr(T.type_annotation(T.uint8), A_shared.data, 0, 16, 2),  # dst
+    ...     T.tvm_access_ptr(T.type_annotation(T.uint8), B_global.data, 0, 16, 1),  # src
+    ...     16  # num_elems
+    ... )
+    >>>
+    >>> # Predicated cp.async (only copy if condition is true)
+    >>> T.ptx_cp_async(
+    ...     T.tvm_access_ptr(T.type_annotation(T.uint8), A_shared.data, 0, 16, 2),
+    ...     T.tvm_access_ptr(T.type_annotation(T.uint8), B_global.data, 0, 16, 1),
+    ...     16,
+    ...     predicate=guard  # only copy if guard is true
+    ... )
     """
-    return _tvm_op.ptx_cp_async(dtype, shared_ptr, shared_offset, global_ptr, global_offset, bytes)
+    from tvm import tirx
+
+    if predicate is None:
+        return tirx.call_intrin("", tirx.op.Op.get("tl.ptx_cp_async"), dst_access_ptr, src_access_ptr, num_elems)
+    else:
+        return tirx.call_intrin("", tirx.op.Op.get("tl.ptx_cp_async"), dst_access_ptr, src_access_ptr, num_elems, predicate)
 
 
 def ptx_cp_async_bulk(dtype, shared_ptr, shared_offset, global_ptr, global_offset, bytes, barrier_id):
@@ -1726,6 +1911,19 @@ def ptx_init_barrier_thread_count(barrier_id, thread_count):
     return _tvm_op.ptx_init_barrier_thread_count(barrier_id, thread_count)
 
 
+def ptx_fence_barrier_init():
+    """TVM intrinsic for ptx fence barrier initialization.
+
+    Returns
+    -------
+    call : PrimExpr
+        The call expression.
+    """
+    from tvm import tirx
+
+    return tirx.call_intrin("handle", tirx.op.Op.get("tl.ptx_fence_barrier_init"))
+
+
 def ptx_arrive_barrier(barrier_id):
     """TVM intrinsic for ptx barrier arrival using mbarrier.arrive
     https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-arrive
@@ -1933,7 +2131,7 @@ def trace(args, trace_action="tvm.default_trace_action"):
 
     See Also
     --------
-    tvm.tir.call_packed : Creates packed function.
+    tvm.tirx.call_packed : Creates packed function.
     """
     return _tvm_op.trace(args, trace_action)
 
@@ -1992,19 +2190,21 @@ def infinity(dtype: str, span: Span | None = None) -> Any:
     value : tvm.Expr
         The infinity value of dtype.
     """
-    return call_intrin(dtype, _tvm_op.Op.get("tl.infinity"), dtype, span=span)
+    return call_intrin(dtype, _tvm_op.Op.get("tl.infinity"), tvm.tirx.StringImm(str(dtype)), span=span)
 
 
-def reinterpret(dtype, value, span: Span | None = None) -> Any:
-    """infinity value of dtype
+# NOTE(chaofan): Here we use the argument order (value, dtype, ...) instead of (dtype, value, ...) in TVM
+# to be consistent with T.cast.
+def reinterpret(value, dtype, span: Span | None = None) -> Any:
+    """Reinterpret cast a value to dtype.
 
     Parameters
     ----------
-    dtype : str
-        The data type.
-
     value : PrimExpr
         The input value.
+
+    dtype : str
+        The data type.
 
     span : Optional[Span]
         The location of this operator in the source code.
@@ -2014,6 +2214,11 @@ def reinterpret(dtype, value, span: Span | None = None) -> Any:
     value : tvm.Expr
         The reinterpret cast value of dtype.
     """
+
+    # NOTE(chaofan): For compatibility, we allow the old API where dtype comes first
+    if _is_any_dtype(value):
+        deprecated_warning("T.reinterpret(dtype, value)", "reinterpret(value, dtype)")
+        value, dtype = dtype, value
     return _tvm_op.reinterpret(dtype, value, span)
 
 
@@ -2585,13 +2790,18 @@ def bitwise_xor(x, y, span=None):
     return _tvm_op.bitwise_xor(x, y, span)
 
 
-def round(x, span=None):
+def round(x, rounding_mode="ties-to-even", span=None):
     """Round elements of the array to the nearest integer.
 
     Parameters
     ----------
     x : PrimExpr
         Input argument.
+
+    rounding_mode : str
+        Rounding mode to use. Supported values are ``"ties-to-even"`` and
+        ``"ties-away-from-zero"``. ``"ties-to-even"`` is the default and matches
+        the existing TileLang/TVM semantics.
 
     span : Optional[Span]
         The location of this operator in the source code.
@@ -2601,7 +2811,20 @@ def round(x, span=None):
     y : PrimExpr
         The result.
     """
-    return _tvm_op.round(x, span)
+    if rounding_mode is None:
+        rounding_mode = "ties-to-even"
+    elif not isinstance(rounding_mode, str):
+        if span is not None:
+            raise TypeError("T.round received both a positional span and span=.")
+        span = rounding_mode
+        rounding_mode = "ties-to-even"
+
+    if rounding_mode == "ties-to-even":
+        return _tvm_op.round(x, span)
+    if rounding_mode == "ties-away-from-zero":
+        x = tvm.tirx.convert(x)
+        return call_intrin(x.dtype, _tvm_op.Op.get("tl.round_ties_away_from_zero"), x, span=span)
+    raise ValueError(f"Unsupported T.round rounding_mode {rounding_mode!r}; expected 'ties-to-even' or 'ties-away-from-zero'.")
 
 
 def nearbyint(x, span=None):
@@ -2811,7 +3034,7 @@ def pow_of_int(x: PrimExpr, y: int) -> PrimExpr:
     """
     return call_intrin(
         x.dtype,
-        tvm.tir.op.Op.get("tl.pow_of_int"),
+        tvm.tirx.op.Op.get("tl.pow_of_int"),
         x,
         y,
     )
@@ -3260,7 +3483,7 @@ def comm_reducer(fcombine, fidentity, name="reduce"):
         n = te.var("n")
         m = te.var("m")
         mysum = te.comm_reducer(lambda x, y: x+y,
-            lambda t: tvm.tir.const(0, dtype=t), name="mysum")
+            lambda t: tvm.tirx.const(0, dtype=t), name="mysum")
         A = te.placeholder((n, m), name="A")
         k = te.reduce_axis((0, m), name="k")
         B = te.compute((n,), lambda i: mysum(A[i, k], axis=k), name="B")
