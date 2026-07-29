@@ -313,10 +313,16 @@ Fragment MakePacked16BitLayout(const Buffer &local_buf,
   PrimExpr numel = ProductExtent(local_range, 0, local_range.size());
   PrimExpr thread_extent = thread_bounds->extent;
   PrimExpr pair_width = IntImm(DataType::Int(32), 2);
-  PrimExpr replicate_extent =
-      analyzer->Simplify(floordiv(numel + thread_extent * pair_width - 1,
-                                  thread_extent * pair_width) *
-                         pair_width);
+  // Each thread owns whole pairs and every element has exactly one owner, so
+  // the local footprint is pair_width * ceil(numel / (thread_extent *
+  // pair_width)) and the layout is not replicated at all in the common case.
+  // Replication only applies when there are fewer pairs than threads, where the
+  // surplus threads have to duplicate an existing pair to keep the fragment
+  // defined over the whole thread range.
+  PrimExpr pair_count = floordiv(numel, pair_width);
+  PrimExpr replicate_extent = analyzer->Simplify(
+      max(IntImm(DataType::Int(32), 1),
+          floordiv(thread_extent + pair_count - 1, pair_count)));
 
   Array<PrimExpr> logical_indices;
   for (size_t i = 0; i < local_buf->shape.size(); ++i) {

@@ -312,9 +312,13 @@ def _multimem_packed_unbound_thread_range_layout_kernel():
                 {
                     tmp: T.Fragment(
                         (8,),
-                        forward_thread_fn=lambda i, rep: i // 2,
+                        # replicate=1 has no replicate var, so the thread fn
+                        # takes only the logical index.
+                        forward_thread_fn=lambda i: i // 2,
                         forward_index_fn=lambda i: i % 2,
-                        replicate=2,
+                        # 4 threads x 2 local slots covers all 8 elements
+                        # exactly, so canonical pair ownership is unreplicated.
+                        replicate=1,
                     )
                 }
             )
@@ -333,9 +337,13 @@ def _multimem_packed_low_base_alignment_kernel():
                 {
                     tmp: T.Fragment(
                         (8,),
-                        forward_thread_fn=lambda i, rep: i // 2,
+                        # replicate=1 has no replicate var, so the thread fn
+                        # takes only the logical index.
+                        forward_thread_fn=lambda i: i // 2,
                         forward_index_fn=lambda i: i % 2,
-                        replicate=2,
+                        # Canonical (unreplicated) ownership, so this case fails
+                        # on the base alignment rather than on the layout.
+                        replicate=1,
                     )
                 }
             )
