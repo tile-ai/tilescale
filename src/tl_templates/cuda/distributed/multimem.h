@@ -22,6 +22,16 @@ template <class> inline constexpr bool dependent_false_v = false;
 
 enum class ReduceOp { ADD = 0, MIN = 1, MAX = 2 };
 
+// Memory-ordering convention for this header:
+//   * Data movement (LdReduce*, St*, Red*) uses `.relaxed.sys` for every dtype.
+//     Cross-rank ordering comes from the barrier, i.e. the `Signal`/`SignalAdd`
+//     release below paired with the acquire load in the wait path, so the data
+//     instructions themselves only need system-scope coherence.
+//   * Synchronization (Signal, SignalAdd) uses `.release.sys`.
+// Keep new specializations on the same semantics as their f32 counterpart: a
+// per-dtype mismatch here is silent, and the packed 16-bit paths are the ones
+// the multimem all-reduce example exercises by default.
+
 // === Per-instruction primitives (used by MultimemRewriter post-process) ===
 
 // --- V1 scalar forms (used for predicated and unaligned tails) ---
@@ -168,7 +178,8 @@ template <> struct LdReduceV2<ReduceOp::ADD, float> {
 template <> struct LdReduceV2<ReduceOp::ADD, half_t> {
   TL_DEVICE static void run(void *dst, const void *mcast_ptr) {
     uint32_t ret;
-    asm volatile("multimem.ld_reduce.weak.global.add.acc::f32.f16x2 %0, [%1];"
+    asm volatile("multimem.ld_reduce.relaxed.sys.global.add.acc::f32.f16x2 %0, "
+                 "[%1];"
                  : "=r"(ret)
                  : "l"(mcast_ptr)
                  : "memory");
@@ -179,7 +190,8 @@ template <> struct LdReduceV2<ReduceOp::ADD, half_t> {
 template <> struct LdReduceV2<ReduceOp::ADD, bfloat16_t> {
   TL_DEVICE static void run(void *dst, const void *mcast_ptr) {
     uint32_t ret;
-    asm volatile("multimem.ld_reduce.weak.global.add.acc::f32.bf16x2 %0, [%1];"
+    asm volatile("multimem.ld_reduce.relaxed.sys.global.add.acc::f32.bf16x2 "
+                 "%0, [%1];"
                  : "=r"(ret)
                  : "l"(mcast_ptr)
                  : "memory");
@@ -209,7 +221,7 @@ template <> struct StV2<float> {
 template <> struct StV2<half_t> {
   TL_DEVICE static void run(void *mcast_ptr, const void *src) {
     uint32_t val = *reinterpret_cast<const uint32_t *>(src);
-    asm volatile("multimem.st.weak.global.f16x2 [%0], %1;"
+    asm volatile("multimem.st.relaxed.sys.global.f16x2 [%0], %1;"
                  :
                  : "l"(mcast_ptr), "r"(val)
                  : "memory");
@@ -219,7 +231,7 @@ template <> struct StV2<half_t> {
 template <> struct StV2<bfloat16_t> {
   TL_DEVICE static void run(void *mcast_ptr, const void *src) {
     uint32_t val = *reinterpret_cast<const uint32_t *>(src);
-    asm volatile("multimem.st.weak.global.bf16x2 [%0], %1;"
+    asm volatile("multimem.st.relaxed.sys.global.bf16x2 [%0], %1;"
                  :
                  : "l"(mcast_ptr), "r"(val)
                  : "memory");
@@ -251,7 +263,7 @@ template <> struct RedV2<ReduceOp::ADD, float> {
 template <> struct RedV2<ReduceOp::ADD, half_t> {
   TL_DEVICE static void run(void *mcast_ptr, const void *src) {
     uint32_t val = *reinterpret_cast<const uint32_t *>(src);
-    asm volatile("multimem.red.release.sys.global.add.f16x2 [%0], %1;"
+    asm volatile("multimem.red.relaxed.sys.global.add.f16x2 [%0], %1;"
                  :
                  : "l"(mcast_ptr), "r"(val)
                  : "memory");
@@ -261,7 +273,7 @@ template <> struct RedV2<ReduceOp::ADD, half_t> {
 template <> struct RedV2<ReduceOp::ADD, bfloat16_t> {
   TL_DEVICE static void run(void *mcast_ptr, const void *src) {
     uint32_t val = *reinterpret_cast<const uint32_t *>(src);
-    asm volatile("multimem.red.release.sys.global.add.bf16x2 [%0], %1;"
+    asm volatile("multimem.red.relaxed.sys.global.add.bf16x2 [%0], %1;"
                  :
                  : "l"(mcast_ptr), "r"(val)
                  : "memory");

@@ -12,8 +12,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[5]
 _HEADER = _REPO_ROOT / "src/tl_templates/cuda/distributed/multimem.h"
 _CUTLASS_INCLUDE = _REPO_ROOT / "3rdparty/cutlass/include"
 _ACC_F32_INSTRUCTIONS = (
-    "multimem.ld_reduce.weak.global.add.acc::f32.f16x2",
-    "multimem.ld_reduce.weak.global.add.acc::f32.bf16x2",
+    "multimem.ld_reduce.relaxed.sys.global.add.acc::f32.f16x2",
+    "multimem.ld_reduce.relaxed.sys.global.add.acc::f32.bf16x2",
 )
 _BULK_INSTRUCTIONS = (
     "multimem.cp.async.bulk.global.shared::cta.bulk_group",
