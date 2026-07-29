@@ -143,10 +143,10 @@ def multimem_tma_store(src, dst, reduce_op: MultimemReduceOp | None = None):
     return _multimem_impl(src, dst, mode=_MultimemMode.TMA_RED_STORE, reduce_op=reduce_op)
 
 
-def _signal_dtype_tag(addr, *, allow_signed: bool = False) -> str:
+def _signal_dtype_tag(addr, *, op_name: str, allow_signed: bool = False) -> str:
     dtype = getattr(addr, "dtype", None)
     if dtype is None:
-        raise TypeError("multimem_signal requires an address expression with a dtype")
+        raise TypeError(f"{op_name} requires an address expression with a dtype")
     if dtype == "uint32" or dtype == "uint32_t":
         return "uint32_t"
     if dtype == "uint64" or dtype == "uint64_t":
@@ -154,17 +154,19 @@ def _signal_dtype_tag(addr, *, allow_signed: bool = False) -> str:
     if allow_signed and (dtype == "int32" or dtype == "int32_t"):
         return "int32_t"
     supported = "uint32/int32/uint64" if allow_signed else "uint32/uint64"
-    raise TypeError(f"multimem_signal only supports {supported} signal dtypes, got {dtype}")
+    raise TypeError(f"{op_name} only supports {supported} signal dtypes, got {dtype}")
 
 
 def multimem_signal(addr, value: PrimExpr):
-    return tirx.call_extern("handle", f"tl::multimem::Signal<{_signal_dtype_tag(addr)}>::run", address_of(addr), value)
+    tag = _signal_dtype_tag(addr, op_name="multimem_signal")
+    return tirx.call_extern("handle", f"tl::multimem::Signal<{tag}>::run", address_of(addr), value)
 
 
 def multimem_signal_add(addr, value: PrimExpr):
+    tag = _signal_dtype_tag(addr, op_name="multimem_signal_add", allow_signed=True)
     return tirx.call_extern(
         "handle",
-        f"tl::multimem::SignalAdd<{_signal_dtype_tag(addr, allow_signed=True)}>::run",
+        f"tl::multimem::SignalAdd<{tag}>::run",
         address_of(addr),
         value,
     )

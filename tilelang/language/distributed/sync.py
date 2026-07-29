@@ -44,6 +44,8 @@ def _wait(
     scope: WaitScope | str = WaitScope.SYS,
     semantics: WaitSemantics | str = WaitSemantics.ACQUIRE,
 ):
+    if peer is None:
+        peer = -1
     expected = tirx.Cast(value.dtype, expected)
     return tirx.call_intrin(
         "handle",
@@ -150,10 +152,23 @@ def sync_barrier_gpu(barrier: PrimExpr):
 
 
 def barrier_blocks(barrier: PrimExpr):
-    """Barrier all blocks at a system-level barrier with fence."""
+    """Rendezvous all blocks of every rank at a system-level barrier.
+
+    Issues a system-scope release fence before arriving, so writes made before
+    the call are ordered ahead of this rank's arrival. Note that the barrier does
+    not currently emit an acquire fence on exit, so ordering peer writes against
+    loads issued after the call still requires an explicit fence.
+    """
     return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.barrier_blocks"), address_of(barrier), 1)
 
 
 def sync_blocks(barrier: PrimExpr):
-    """Synchronize all blocks at a system-level barrier without fence."""
+    """Rendezvous all blocks without any fence -- a counter rendezvous only.
+
+    This skips the release fence that :func:`barrier_blocks` issues, so it
+    provides no memory ordering in either direction: prior writes are not
+    ordered before arrival, and peer writes are not ordered before subsequent
+    loads. Use it only when the surrounding code already establishes the
+    ordering; otherwise prefer :func:`barrier_blocks`.
+    """
     return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.barrier_blocks"), address_of(barrier), 0)

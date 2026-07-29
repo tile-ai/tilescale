@@ -212,6 +212,31 @@ def test_put_accepts_constant_size():
     assert "tl::cp_warp<128," in source
 
 
+def _peer_none_kernel():
+    @T.prim_func
+    def main(A: T.Tensor((16,), "float32"), B: T.Tensor((16,), "float32"), flag: T.Tensor((1,), "uint32")):
+        with T.Kernel(1, threads=32):
+            v = T.alloc_local((1,), "float32")
+            T.ld(A[0], v[0], src_pe=None)
+            T.st(B[0], v[0], dst_pe=None)
+            T.put_warp(T.address_of(A[0]), T.address_of(B[0]), 64, dst_pe=None)
+            T.get_warp(T.address_of(A[0]), T.address_of(B[0]), 64, src_pe=None)
+            T.put_block(T.address_of(A[0]), T.address_of(B[0]), 64, dst_pe=None)
+            T.get_block(T.address_of(A[0]), T.address_of(B[0]), 64, src_pe=None)
+            T.wait_eq(flag[0], 1, None)
+
+    return main
+
+
+def test_peer_none_means_local():
+    """The signatures advertise ``| None``, so None must behave like the -1 sentinel.
+
+    It previously reached call_intrin unchanged and failed with an opaque error.
+    """
+    source = tilelang.compile(_peer_none_kernel()).get_kernel_source()
+    assert "get_remote_base_ptr" not in source
+
+
 if __name__ == "__main__":
     import tilelang.testing
 
