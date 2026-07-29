@@ -99,11 +99,32 @@ if hasattr(_libcudart, "cudaSetDevice"):
     _libcudart.cudaSetDevice.restype = ctypes.c_int
 
 
+_TRUE_ENV_VALUES = frozenset({"1", "true", "on", "yes", "y"})
+_FALSE_ENV_VALUES = frozenset({"0", "false", "off", "no", "n", ""})
+
+
+def _parse_bool_env(name: str, value: str) -> bool:
+    """Parse a boolean environment variable, refusing values we cannot read.
+
+    An unrecognised value used to fall through to False, so setting
+    TILESCALE_USE_VMM=true to *enable* VMM silently disabled it instead.
+    """
+    normalized = value.strip().lower()
+    if normalized in _TRUE_ENV_VALUES:
+        return True
+    if normalized in _FALSE_ENV_VALUES:
+        return False
+    raise ValueError(
+        f"{name} must be a boolean value "
+        f"({'/'.join(sorted(_TRUE_ENV_VALUES))} or {'/'.join(sorted(v for v in _FALSE_ENV_VALUES if v))}), got {value!r}"
+    )
+
+
 def _resolve_use_vmm(use_vmm: bool | None, is_distributed: bool = False) -> bool:
     """Resolve whether to use VMM based on env var and hardware support."""
     env_val = os.environ.get("TILESCALE_USE_VMM", None)
     if env_val is not None:
-        return env_val == "1"
+        return _parse_bool_env("TILESCALE_USE_VMM", env_val)
     if use_vmm is not None:
         return use_vmm
     return is_distributed and _supports_vmm_fabric()
@@ -146,7 +167,10 @@ class BaseAllocator:
         # 2. num_local_ranks, size: 8 bytes
         # 3. buffer_ptrs, size: 8 bytes * num_local_ranks
         # total size: 16 + 8 * num_local_ranks
+        # Only _init_table fills these in, so keep them defined for the
+        # non-distributed path where `table` is None and there is no table.
         self._table = None
+        self._table_size = 0
         self._buffer_ptrs = None
         self._peer_ptr_values: list[int] = []
         self._device_ids = None
