@@ -545,17 +545,20 @@ struct AtomicAdd {
 
     Stmt tma_reduce;
     if (IsRemotePE(dst_pe)) {
-      Stmt else_case = MakeTMAReduceStmt(
-          desc, shared_tensor, shared_offset, total_elements, global_coords,
-          *inner_box_dim, instruction_dim, op_annotations,
-          PrimExpr(kMaxRemoteTMADescriptors - 1));
-      for (int pe = kMaxRemoteTMADescriptors - 2; pe >= 0; --pe) {
+      // Every peer needs its own compile-time descriptor, so this dispatch
+      // covers at most kMaxRemoteTMADescriptors peers. Guard the last case as
+      // well: an out-of-range peer must not fall through to peer
+      // kMaxRemoteTMADescriptors - 1 and silently reduce into the wrong GPU.
+      Stmt dispatch;
+      for (int pe = kMaxRemoteTMADescriptors - 1; pe >= 0; --pe) {
         Stmt then_case = MakeTMAReduceStmt(
             desc, shared_tensor, shared_offset, total_elements, global_coords,
             *inner_box_dim, instruction_dim, op_annotations, PrimExpr(pe));
-        else_case = IfThenElse(EQ(dst_pe, pe), then_case, else_case);
+        PrimExpr cond = EQ(dst_pe, pe);
+        dispatch = dispatch.defined() ? IfThenElse(cond, then_case, dispatch)
+                                      : IfThenElse(cond, then_case);
       }
-      tma_reduce = else_case;
+      tma_reduce = dispatch;
     } else {
       tma_reduce = MakeTMAReduceStmt(
           desc, shared_tensor, shared_offset, total_elements, global_coords,

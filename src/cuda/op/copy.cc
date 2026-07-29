@@ -619,20 +619,21 @@ Stmt MakeRemoteTmaCopyStmt(const TMADesc &desc, const Buffer &shared_tensor,
                            int eviction_policy,
                            const Map<String, ObjectRef> &ann,
                            PrimExpr remote_pe) {
-  Stmt else_case = MakeTmaCopyStmt(
-      desc, shared_tensor, shared_offset, total_elements, global_coords,
-      inner_box_dim, instruction_dim, is_load, tma_op, barrier_base_id,
-      mbar_handle, eviction_policy, ann,
-      make_const(remote_pe.dtype(), kMaxRemoteTMADescriptors - 1));
-  for (int pe = kMaxRemoteTMADescriptors - 2; pe >= 0; --pe) {
+  // Every peer needs its own compile-time descriptor, so this dispatch covers
+  // at most kMaxRemoteTMADescriptors peers. Guard the last case as well: an
+  // out-of-range peer must not fall through to peer
+  // kMaxRemoteTMADescriptors - 1 and silently access the wrong GPU.
+  Stmt dispatch;
+  for (int pe = kMaxRemoteTMADescriptors - 1; pe >= 0; --pe) {
     Stmt then_case = MakeTmaCopyStmt(
         desc, shared_tensor, shared_offset, total_elements, global_coords,
         inner_box_dim, instruction_dim, is_load, tma_op, barrier_base_id,
         mbar_handle, eviction_policy, ann, make_const(remote_pe.dtype(), pe));
-    else_case = IfThenElse(EQ(remote_pe, make_const(remote_pe.dtype(), pe)),
-                           then_case, else_case);
+    PrimExpr cond = EQ(remote_pe, make_const(remote_pe.dtype(), pe));
+    dispatch = dispatch.defined() ? IfThenElse(cond, then_case, dispatch)
+                                  : IfThenElse(cond, then_case);
   }
-  return else_case;
+  return dispatch;
 }
 
 struct TMAIm2ColDesc {

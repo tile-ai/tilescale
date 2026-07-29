@@ -202,6 +202,12 @@ A non-negative PE remaps the corresponding address by allocator-relative
 offset. A copy cannot make both sides remote in the same operation. Remote TMA
 also requires the normal TMA hardware and lowering constraints.
 
+Remote TMA needs one compile-time descriptor per peer, so the descriptor
+dispatch covers PEs `0` through `7`. A remote TMA copy or TMA reduce whose PE
+falls outside that range issues no operation, which stalls a load waiting on
+its mbarrier. Non-TMA remote paths (`T.ld`, `T.st`, `T.put_*`, `T.get_*`,
+non-TMA `T.copy`) have no such limit.
+
 Scoped scalar operations are:
 
 ```python
