@@ -36,6 +36,14 @@ namespace {
 constexpr int kTileScaleMaxNumGPUs = 32;
 
 inline void EnsureCurrentDeviceContext(int device_id) {
+  // Every per-device cache in this file is a fixed kTileScaleMaxNumGPUs array
+  // indexed by the id cudaGetDevice() reports, so an out-of-range device would
+  // corrupt memory rather than fail. This is the single chokepoint: both the
+  // kernel launch path and BindPrimaryContext go through here before indexing.
+  ICHECK_GE(device_id, 0) << "Invalid CUDA device id " << device_id;
+  ICHECK_LT(device_id, kTileScaleMaxNumGPUs)
+      << "TileScale CUDA runtime supports at most " << kTileScaleMaxNumGPUs
+      << " GPUs per process, got device id " << device_id;
   CUDA_CALL(cudaSetDevice(device_id));
 }
 

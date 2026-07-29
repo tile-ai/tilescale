@@ -72,15 +72,35 @@ bool PutOpNode::is_distributed() const {
            dst_pe.as<IntImmNode>()->value == -1);
 }
 
+// The copy size becomes a C++ template argument (tl::cp_warp<N, ...>), so it
+// has to fold to a compile-time constant. Without this check a runtime size is
+// emitted verbatim and the only diagnostic is an nvcc template error much
+// later.
+static int64_t RequireConstantCopySize(const PrimExpr &copy_size,
+                                       arith::Analyzer *analyzer,
+                                       const char *op_name) {
+  PrimExpr folded =
+      analyzer != nullptr ? analyzer->Simplify(copy_size) : copy_size;
+  const auto *imm = folded.as<IntImmNode>();
+  ICHECK(imm) << op_name
+              << " requires a compile-time constant size, because the size is "
+                 "emitted as a template argument; got "
+              << copy_size;
+  ICHECK_GT(imm->value, 0) << op_name << " size must be positive, got "
+                           << imm->value;
+  return imm->value;
+}
+
 Stmt PutOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  (void)analyzer;
+  int64_t const_copy_size =
+      RequireConstantCopySize(copy_size, analyzer, "T.put_warp/T.put_block");
   Array<PrimExpr> new_args;
   std::stringstream ss;
   if (scope == "warp") {
-    ss << "tl::cp_warp<" << copy_size << ", " << unroll_factor << ", "
+    ss << "tl::cp_warp<" << const_copy_size << ", " << unroll_factor << ", "
        << (enable_aggressive_vectorize ? "true" : "false") << ">";
   } else if (scope == "block") {
-    ss << "tl::cp_block<" << copy_size << ">";
+    ss << "tl::cp_block<" << const_copy_size << ">";
   } else {
     LOG(FATAL) << "Invalid scope: " << scope;
   }
@@ -158,14 +178,15 @@ bool GetOpNode::is_distributed() const {
 }
 
 Stmt GetOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  (void)analyzer;
+  int64_t const_copy_size =
+      RequireConstantCopySize(copy_size, analyzer, "T.get_warp/T.get_block");
   Array<PrimExpr> new_args;
   std::stringstream ss;
   if (scope == "warp") {
-    ss << "tl::cp_warp<" << copy_size << ", " << unroll_factor << ", "
+    ss << "tl::cp_warp<" << const_copy_size << ", " << unroll_factor << ", "
        << (enable_aggressive_vectorize ? "true" : "false") << ">";
   } else if (scope == "block") {
-    ss << "tl::cp_block<" << copy_size << ">";
+    ss << "tl::cp_block<" << const_copy_size << ">";
   } else {
     LOG(FATAL) << "Invalid scope: " << scope;
   }

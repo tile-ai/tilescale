@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 
+import pytest
 import torch
 import torch.distributed as dist
 
@@ -160,6 +161,55 @@ def test_put_get(local_rank: int, num_ranks: int):
 
     allocator.close()
     dist.destroy_process_group()
+
+
+def _dynamic_size_put_kernel():
+    @T.prim_func
+    def main(A: T.Tensor((256,), "float32"), B: T.Tensor((256,), "float32"), n: T.int32):
+        with T.Kernel(1, threads=32):
+            rank = T.alloc_local((1,), "uint64")
+            rank[0] = T.get_rank()
+            T.put_warp(T.address_of(A[0]), T.address_of(B[0]), n, dst_pe=rank[0] ^ 1)
+
+    return main
+
+
+def _dynamic_size_get_kernel():
+    @T.prim_func
+    def main(A: T.Tensor((256,), "float32"), B: T.Tensor((256,), "float32"), n: T.int32):
+        with T.Kernel(1, threads=32):
+            rank = T.alloc_local((1,), "uint64")
+            rank[0] = T.get_rank()
+            T.get_warp(T.address_of(A[0]), T.address_of(B[0]), n, src_pe=rank[0] ^ 1)
+
+    return main
+
+
+def _constant_size_put_kernel():
+    @T.prim_func
+    def main(A: T.Tensor((256,), "float32"), B: T.Tensor((256,), "float32")):
+        with T.Kernel(1, threads=32):
+            rank = T.alloc_local((1,), "uint64")
+            rank[0] = T.get_rank()
+            T.put_warp(T.address_of(A[0]), T.address_of(B[0]), 128, dst_pe=rank[0] ^ 1)
+
+    return main
+
+
+@pytest.mark.parametrize("kernel_factory", [_dynamic_size_put_kernel, _dynamic_size_get_kernel])
+def test_put_get_rejects_dynamic_size(kernel_factory):
+    """The copy size becomes a template argument, so it must be a constant.
+
+    A runtime size used to be emitted verbatim as `tl::cp_warp<size, ...>`, whose
+    only diagnostic was an nvcc template error.
+    """
+    with pytest.raises(Exception, match="compile-time constant size"):
+        tilelang.compile(kernel_factory())
+
+
+def test_put_accepts_constant_size():
+    source = tilelang.compile(_constant_size_put_kernel()).get_kernel_source()
+    assert "tl::cp_warp<128," in source
 
 
 if __name__ == "__main__":
