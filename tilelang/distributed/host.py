@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import os
 import operator
+from dataclasses import dataclass
 from functools import lru_cache
 
 import torch
@@ -21,6 +22,22 @@ except ImportError:
         ) from exc
 
 
+@dataclass
+class NodeTopology:
+    """Multi-node topology information for distributed execution.
+
+    Attributes:
+        node_rank: Rank of this node (0 to num_nodes-1)
+        num_nodes: Total number of nodes in the distributed job
+        local_world_size: Number of GPUs per node
+        node_local_group: NCCL process group containing only ranks on this node
+    """
+    node_rank: int
+    num_nodes: int
+    local_world_size: int
+    node_local_group: dist.ProcessGroup
+
+
 def CUDA_CHECK(err):
     if isinstance(err, cuda.CUresult):
         if err != cuda.CUresult.CUDA_SUCCESS:
@@ -32,11 +49,31 @@ def CUDA_CHECK(err):
         raise RuntimeError(f"Unknown error type: {err}")
 
 
-def init_dist(local_rank: int, num_local_ranks: int, master_port: int | None = None):
-    """Initialize the currently supported single-node NCCL process group.
+def init_dist(
+    local_rank: int,
+    num_local_ranks: int,
+    master_port: int | None = None,
+    return_node_info: bool = False,
+):
+    """Initialize an NCCL process group with single-node or multi-node support.
 
-    Single-node ``torchrun`` variables are accepted. Multi-node groups are
-    rejected until TileScale creates a node-local allocator group.
+    Args:
+        local_rank: Local rank on this node (0 to num_local_ranks-1)
+        num_local_ranks: Number of ranks per node
+        master_port: Optional master port (defaults to TILESCALE_MASTER_PORT or MASTER_PORT)
+        return_node_info: When True, also return the :class:`NodeTopology` describing
+            the multi-node layout. Defaults to False so that existing single-node
+            callers keep the historical three-value return.
+
+    Returns:
+        ``(rank, world_size, global_group)`` by default, or
+        ``(rank, world_size, global_group, node_info)`` when ``return_node_info``
+        is True. ``node_info`` is None for a single-node launch.
+
+    Note:
+        A multi-node launch requires ``return_node_info=True``; the resulting
+        ``node_info`` must be forwarded to :func:`tilelang.get_allocator` so the
+        allocator restricts IPC/VMM handle exchange to node-local peers.
     """
     os.environ.setdefault("NCCL_IB_DISABLE", "1")
     os.environ.setdefault("NCCL_DEBUG", "ERROR")
@@ -44,7 +81,9 @@ def init_dist(local_rank: int, num_local_ranks: int, master_port: int | None = N
     if not 0 <= local_rank < num_local_ranks:
         raise ValueError(f"local_rank must be in [0, {num_local_ranks}), got {local_rank}")
 
+    # Detect topology from environment
     if "LOCAL_WORLD_SIZE" in os.environ:
+        # torchrun style variables
         launcher_local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
         launcher_world_size = int(os.environ.get("WORLD_SIZE", launcher_local_world_size))
         launcher_rank = int(os.environ.get("RANK", local_rank))
@@ -60,24 +99,26 @@ def init_dist(local_rank: int, num_local_ranks: int, master_port: int | None = N
                 "local_rank must match torchrun RANK and LOCAL_RANK for a single-node launch: "
                 f"local_rank={local_rank}, RANK={launcher_rank}, LOCAL_RANK={launcher_local_rank}"
             )
+        global_rank = launcher_rank
+        global_world_size = launcher_world_size
     else:
+        # Manual environment variables (NNODES, NODE_RANK)
         num_nodes = int(os.environ.get("NNODES", "1"))
         node_rank = int(os.environ.get("NODE_RANK", "0"))
-        legacy_world_size = int(os.environ.get("WORLD_SIZE", "1"))
-        legacy_rank = int(os.environ.get("RANK", "0"))
-        if legacy_world_size != 1 or legacy_rank != 0:
-            raise NotImplementedError(
-                "Ambiguous WORLD_SIZE/RANK launcher environment without LOCAL_WORLD_SIZE; "
-                "TileScale supports local spawn or single-node torchrun only."
+        global_rank = int(os.environ.get("RANK", local_rank))
+        global_world_size = int(os.environ.get("WORLD_SIZE", num_local_ranks))
+
+        # Validate consistency
+        if global_world_size != num_nodes * num_local_ranks:
+            raise ValueError(
+                f"Inconsistent configuration: WORLD_SIZE ({global_world_size}) != "
+                f"NNODES ({num_nodes}) * num_local_ranks ({num_local_ranks})"
             )
 
-    if num_nodes != 1 or node_rank != 0:
-        raise NotImplementedError(
-            "TileScale currently supports only single-node process groups; multi-node launch requires a node-local allocator group."
-        )
-
+    # Set device
     torch.cuda.set_device(local_rank)
 
+    # Initialize global process group
     ip = os.getenv("MASTER_ADDR", "127.0.0.1")
     port = master_port if master_port is not None else int(os.getenv("TILESCALE_MASTER_PORT", os.getenv("MASTER_PORT", "8361")))
 
@@ -85,14 +126,51 @@ def init_dist(local_rank: int, num_local_ranks: int, master_port: int | None = N
     params = {
         "backend": "nccl",
         "init_method": f"tcp://{ip}:{port}",
-        "world_size": num_local_ranks,
-        "rank": local_rank,
+        "world_size": global_world_size,
+        "rank": global_rank,
     }
     if "device_id" in sig.parameters:
         params["device_id"] = torch.device(f"cuda:{local_rank}")
+    # Opt-in shorter group timeout. NCCL's 10-minute default means a mismatched
+    # or stuck setup collective busy-waits at 100% GPU utilisation and gets
+    # killed by the launcher's outer timeout before the watchdog ever reports,
+    # which leaves no diagnostic at all. Unset -> unchanged default behaviour.
+    _pg_timeout = os.getenv("TL_PG_TIMEOUT_SEC")
+    if _pg_timeout and "timeout" in sig.parameters:
+        import datetime
+
+        params["timeout"] = datetime.timedelta(seconds=int(_pg_timeout))
     dist.init_process_group(**params)
 
-    return dist.get_rank(), dist.get_world_size(), dist.group.WORLD
+    if num_nodes == 1:
+        if return_node_info:
+            return dist.get_rank(), dist.get_world_size(), dist.group.WORLD, None
+        return dist.get_rank(), dist.get_world_size(), dist.group.WORLD
+
+    if not return_node_info:
+        raise ValueError(
+            f"a multi-node launch was detected (num_nodes={num_nodes}), which requires "
+            "init_dist(..., return_node_info=True) so the node-local topology can be "
+            "forwarded to the allocator via get_allocator(node_info=...)"
+        )
+
+    # Every rank must build the same subgroups in the same order: dist.new_group
+    # is collective over the default group, so ranks cannot create only their own.
+    node_local_group = None
+    for node in range(num_nodes):
+        group = dist.new_group(
+            ranks=[node * num_local_ranks + i for i in range(num_local_ranks)])
+        if node == node_rank:
+            node_local_group = group
+
+    node_info = NodeTopology(
+        node_rank=node_rank,
+        num_nodes=num_nodes,
+        local_world_size=num_local_ranks,
+        node_local_group=node_local_group,
+    )
+
+    return global_rank, global_world_size, dist.group.WORLD, node_info
 
 
 @lru_cache

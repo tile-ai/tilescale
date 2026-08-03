@@ -119,6 +119,15 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
         "-I" + TILELANG_TEMPLATE_PATH,
         "-I" + CUTLASS_INCLUDE_DIR,
     ]
+    # Inter-node (GIN) device path. codegen emits the nccl_gin.h include guarded
+    # by TL_ENABLE_NCCL_GIN, so the define and the include dir have to travel
+    # together -- with only one of them the header's body vanishes and a kernel
+    # calling tl::gin:: fails with "must be a class or namespace name".
+    from tilelang.env import NCCL_INCLUDE_DIR
+
+    if NCCL_INCLUDE_DIR:
+        options += ["-I" + NCCL_INCLUDE_DIR, "-DTL_ENABLE_NCCL_GIN=1"]
+
     # Merge extra device compiler flags from pass config, if provided
     extra_flags = cfg.get(PassConfigKey.TL_DEVICE_COMPILE_FLAGS, None)
     if extra_flags:

@@ -509,6 +509,22 @@ static bool can_create_multicast_object(int device_count) {
 
 // ---------- VMM malloc/free ----------
 
+// Fabric handles are what the intra-node peer-mapping path needs, but creating
+// one requires an IMEX channel: without /dev/nvidia-caps-imex-channels,
+// cuMemCreate(FABRIC) fails with CUDA_ERROR_NOT_PERMITTED even though the device
+// reports CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED. A POSIX-FD handle
+// type still yields the driver-level (VMM) allocation that
+// ncclCommWindowRegister requires, so GIN works there while cross-process peer
+// mapping does not. Probed once: the answer cannot change within a process.
+static CUmemAllocationHandleType vmm_handle_type(CUdevice device) {
+  static const CUmemAllocationHandleType cached = [device] {
+    return can_create_fabric_allocation(device)
+               ? CU_MEM_HANDLE_TYPE_FABRIC
+               : CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+  }();
+  return cached;
+}
+
 static int64_t vmm_malloc_impl(int64_t size_raw) {
   const size_t requested_size = checked_positive_size(size_raw, "size");
 
@@ -518,7 +534,7 @@ static int64_t vmm_malloc_impl(int64_t size_raw) {
   CUmemAllocationProp prop = {};
   prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
   prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-  prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
+  prop.requestedHandleTypes = vmm_handle_type(device);
   prop.location.id = device;
 
   size_t granularity = 0;
@@ -683,6 +699,46 @@ static bool supports_vmm_fabric_impl() {
       return false;
   }
   return true;
+}
+
+// Whether a VMM (driver-level) allocation can be created at all, by any handle
+// type. This is a weaker question than supports_vmm_fabric: NCCL window
+// registration for GIN needs only a VMM-backed arena, while mapping a peer's
+// arena into this process needs an *exportable* fabric handle. A node without an
+// IMEX channel answers true here and false there.
+static bool supports_vmm_impl() {
+  if (!SharedMemoryDriverAPI::Get()->HasVMM()) {
+    return false;
+  }
+
+  int device_count = 0;
+  cudaError_t err = cudaGetDeviceCount(&device_count);
+  if (err != cudaSuccess || device_count == 0)
+    return false;
+
+  CUdevice device;
+  if (cuCtxGetDevice(&device) != CUDA_SUCCESS)
+    return false;
+
+  CUmemAllocationProp prop = {};
+  prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+  prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+  prop.requestedHandleTypes = vmm_handle_type(device);
+  prop.location.id = device;
+
+  size_t granularity = 0;
+  if (cuMemGetAllocationGranularity(&granularity, &prop,
+                                    CU_MEM_ALLOC_GRANULARITY_MINIMUM) !=
+          CUDA_SUCCESS ||
+      granularity == 0) {
+    return false;
+  }
+
+  CUmemGenericAllocationHandle handle;
+  if (cuMemCreate(&handle, granularity, &prop, 0) != CUDA_SUCCESS) {
+    return false;
+  }
+  return cuMemRelease(handle) == CUDA_SUCCESS;
 }
 
 static bool supports_multicast_impl() {
@@ -986,6 +1042,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                         sync_ipc_handles_impl);
 
   // Support detection
+  refl::GlobalDef().def("tl.shared_memory.supports_vmm",
+                        supports_vmm_impl);
   refl::GlobalDef().def("tl.shared_memory.supports_vmm_fabric",
                         supports_vmm_fabric_impl);
   refl::GlobalDef().def("tl.shared_memory.supports_multicast",

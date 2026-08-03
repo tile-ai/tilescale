@@ -226,6 +226,7 @@ if not env.is_light_import():
         group=None,
         use_vmm: bool | None = None,
         mcast_size: int | None = None,
+        node_info=None,
     ):
         """Create a distributed allocator without importing its CUDA helpers eagerly."""
         from .distributed.allocator import get_allocator as _get_allocator
@@ -239,6 +240,7 @@ if not env.is_light_import():
             group=group,
             use_vmm=use_vmm,
             mcast_size=mcast_size,
+            node_info=node_info,
         )
 
 

@@ -51,6 +51,7 @@ _open_ipc_handle = _get_required_global_func("tl.shared_memory.open_ipc_handle")
 _close_ipc_handle = _get_required_global_func("tl.shared_memory.close_ipc_handle")
 _sync_ipc_handles_raw = _get_required_global_func("tl.shared_memory.sync_ipc_handles")
 
+_supports_vmm = _get_capability_global_func("tl.shared_memory.supports_vmm")
 _supports_vmm_fabric = _get_capability_global_func("tl.shared_memory.supports_vmm_fabric")
 _supports_multicast = _get_capability_global_func("tl.shared_memory.supports_multicast")
 
@@ -285,6 +286,7 @@ __all__ = [
     "_close_ipc_handle",
     "_sync_ipc_handles",
     "create_host_device_tensor",
+    "_supports_vmm",
     "_supports_vmm_fabric",
     "_vmm_malloc",
     "_vmm_free",
