@@ -305,6 +305,9 @@ class Environment:
     # External library include paths
     CUTLASS_INCLUDE_DIR = EnvVar("TL_CUTLASS_PATH", None)
     COMPOSABLE_KERNEL_INCLUDE_DIR = EnvVar("TL_COMPOSABLE_KERNEL_PATH", None)
+    # NCCL headers, needed at JIT time by the inter-node (GIN) device path.
+    # Autodetected below when unset; set to "" to force GIN off.
+    NCCL_INCLUDE_DIR = EnvVar("TL_NCCL_PATH", None)
 
     # TVM integration
     TVM_PYTHON_PATH = EnvVar("TVM_IMPORT_PYTHON_PATH", None)
@@ -511,7 +514,31 @@ if os.environ.get("TL_TEMPLATE_PATH", None) is None:
     else:
         logger.warning(TL_TEMPLATE_NOT_FOUND_MESSAGE)
 
+# Initialize NCCL include path for the inter-node (GIN) device path.
+#
+# Only a GIN-capable tree counts: nccl_device/gin.h first ships in NCCL 2.28.7,
+# and many environments pin an older wheel whose nccl.h alone would pass. When
+# nothing suitable is found this stays None and the GIN header is never included,
+# leaving intra-node kernels unaffected.
+if os.environ.get("TL_NCCL_PATH", None) is None:
+    _nccl_inc_candidates = []
+    try:
+        import sysconfig as _sysconfig
+
+        _nccl_inc_candidates.append(
+            os.path.join(_sysconfig.get_paths()["purelib"], "nvidia", "nccl", "include")
+        )
+    except Exception:
+        pass
+    if env.CUDA_HOME:
+        _nccl_inc_candidates.append(os.path.join(env.CUDA_HOME, "include"))
+    for _cand in _nccl_inc_candidates:
+        if os.path.exists(os.path.join(_cand, "nccl_device", "gin.h")):
+            os.environ["TL_NCCL_PATH"] = env.NCCL_INCLUDE_DIR = _cand
+            break
+
 # Export static variables after initialization.
+NCCL_INCLUDE_DIR = env.NCCL_INCLUDE_DIR
 CUTLASS_INCLUDE_DIR = env.CUTLASS_INCLUDE_DIR
 COMPOSABLE_KERNEL_INCLUDE_DIR = env.COMPOSABLE_KERNEL_INCLUDE_DIR
 TILELANG_TEMPLATE_PATH = env.TILELANG_TEMPLATE_PATH

@@ -112,6 +112,12 @@ class LibraryGenerator:
             command += [
                 "-I" + CUTLASS_INCLUDE_DIR,
             ]
+            # Inter-node (GIN) device path. Codegen only emits the nccl_gin.h
+            # include when TL_ENABLE_NCCL_GIN is defined, so pass both together.
+            from tilelang.env import NCCL_INCLUDE_DIR
+
+            if NCCL_INCLUDE_DIR:
+                command += ["-I" + NCCL_INCLUDE_DIR, "-DTL_ENABLE_NCCL_GIN=1"]
 
         elif is_hip_target(target):
             from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR, TILELANG_HIP_SAVE_TEMP_FILES

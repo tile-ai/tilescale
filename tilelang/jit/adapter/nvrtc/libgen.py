@@ -222,6 +222,15 @@ class NVRTCLibraryGenerator(LibraryGenerator):
             if __CUDACC_VER_MAJOR__ < 13:
                 options += [f"-I{arch_include}/cuda/std"]
 
+            # This path builds its own option list rather than going through
+            # default_compile_options, so the GIN include and define have to be
+            # added here too. Without them nccl_gin.h compiles to nothing and a
+            # kernel calling tl::gin:: fails with "must be a class or namespace".
+            from tilelang.env import NCCL_INCLUDE_DIR
+
+            if NCCL_INCLUDE_DIR:
+                options += [f"-I{NCCL_INCLUDE_DIR}", "-DTL_ENABLE_NCCL_GIN=1"]
+
             if self.compile_flags:
                 options += [item for flag in self.compile_flags for item in flag.split() if item not in options]
 
