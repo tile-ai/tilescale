@@ -2,7 +2,7 @@
 # Sweep the inter-node GIN collectives over chunk count and GIN context policy.
 #
 # Usage: sweep_internode.sh <r0_node> <r0_gpu> <r1_node> <r1_gpu>
-#   e.g. sweep_internode.sh node076 0 node074 5
+#   e.g. sweep_internode.sh <node> 0 <node> 5
 #
 # Env knobs:
 #   NUMEL       elements in the gathered/full buffer (default 8388608)
@@ -27,7 +27,7 @@ if [[ $# -lt 4 ]]; then
 fi
 
 R0_NODE=$1; R0_GPU=$2; R1_NODE=$3; R1_GPU=$4
-EXDIR=/tilert/wt/tilescale_workspace/tilescale/examples/distributed/internode
+EXDIR=<workspace>
 
 NUMEL=${NUMEL:-8388608}
 CHUNKS=${CHUNKS:-"1 2 4 8 16 32"}

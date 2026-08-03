@@ -2,9 +2,9 @@
 # Launch an inter-node collective example across two nodes, one GPU each.
 #
 # Usage: run_internode.sh <rank0_node> <rank0_gpu> <rank1_node> <rank1_gpu> <script> [extra args...]
-#   e.g. run_internode.sh node076 0 node074 4 example_internode_allgather.py --numel 4194304
+#   e.g. run_internode.sh <node> 0 <node> 4 example_internode_allgather.py --numel 4194304
 #
-# Run this from node071, which is the only node reachable directly from a laptop;
+# Run this from <node>, which is the only node reachable directly from a laptop;
 # it ssh's to both target nodes. Rank 0 also hosts the rendezvous, so its internal
 # 10.27.28.x address is what both ranks must use -- the externally routable name
 # is not on the RoCE fabric.
@@ -20,17 +20,17 @@ R0_NODE=$1; R0_GPU=$2; R1_NODE=$3; R1_GPU=$4; SCRIPT=$5
 shift 5
 EXTRA=("$@")
 
-WORKSPACE=/tilert/wt/tilescale_workspace/tilescale
+WORKSPACE=<workspace>
 EXDIR=${WORKSPACE}/examples/distributed/internode
 MASTER_PORT=${MASTER_PORT:-29576}
 
-# Only node071 has the original conda env; the other nodes use a copy, so the
+# Only <node> has the original conda env; the other nodes use a copy, so the
 # NCCL path differs per node and has to be probed rather than assumed.
 pick_python() {
-  if [[ $1 == node071 ]]; then
-    echo /root/tilert/mlx/miniconda3/envs/wt-tl/bin/python
+  if [[ $1 == <node> ]]; then
+    echo <private-path>
   else
-    echo /tilert/wt/tilescale_workspace/tools/wt-tl-env/bin/python
+    echo <workspace>
   fi
 }
 pick_nccl_dir() {
@@ -42,10 +42,10 @@ pick_nccl_dir() {
 # addresses are listed here and getent is only a fallback for nodes not listed.
 internal_ip() {
   case $1 in
-    node071) echo 10.27.28.73 ;;
-    node073) echo 10.27.28.105 ;;
-    node074) echo 10.27.28.113 ;;
-    node076) echo 10.27.28.115 ;;
+    <node>) echo <node-ip> ;;
+    <node>) echo <node-ip> ;;
+    <node>) echo <node-ip> ;;
+    <node>) echo <node-ip> ;;
     *) getent hosts "$1-internal" | awk '{print $1}' ;;
   esac
 }
@@ -56,9 +56,9 @@ if [[ -z ${MASTER_ADDR} ]]; then
   exit 1
 fi
 
-# NOTE: this script must run ON node071 (see header). From node071 a plain
-# `ssh node074 "<cmd>"` works. It fails only when invoked from a laptop whose
-# ssh config sets RemoteCommand for node073/node074 ("Cannot execute
+# NOTE: this script must run ON <node> (see header). From <node> a plain
+# `ssh <node> "<cmd>"` works. It fails only when invoked from a laptop whose
+# ssh config sets RemoteCommand for <node>/<node> ("Cannot execute
 # command-line and remote command", exit 255) -- that is a client-config
 # artifact, not something to work around here.
 # Forward any NCCL_*/TILESCALE_*/TILELANG_* set in this shell to both ranks, so

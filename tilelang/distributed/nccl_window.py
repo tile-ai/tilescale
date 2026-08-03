@@ -51,7 +51,7 @@ NCCL_WIN_REQUIRED_ALIGNMENT = 4096
 # Encoded as NCCL_VERSION(x, y, z) = x * 10000 + y * 100 + z.
 _MIN_DEVICE_API_VERSION = 2 * 10000 + 28 * 100 + 7
 
-# sizeof(ncclDevComm), measured from the 2.28.9 headers on node071. The struct is
+# sizeof(ncclDevComm), measured from the 2.28.9 headers on <node>. The struct is
 # opaque here: kernels only ever receive a pointer to it, so its size and 8-byte
 # alignment are all the host side needs. Over-allocating a page is deliberate --
 # a later NCCL may grow the struct, and a short buffer would be a silent
@@ -74,7 +74,7 @@ class _DevCommRequirements(ctypes.Structure):
     """Mirror of ``struct ncclDevCommRequirements`` from nccl_device/core.h.
 
     Field order and types are taken from the 2.28.9 header; the layout was
-    verified against ``offsetof``/``sizeof`` on node071 (56 bytes, 8-byte
+    verified against ``offsetof``/``sizeof`` on <node> (56 bytes, 8-byte
     aligned, ``bool`` members padded to the following 4-byte field). ctypes
     reproduces that natural layout, so no explicit padding is declared.
     """
@@ -325,7 +325,7 @@ def create_dev_comm(
     requirements, and a mismatch hangs rather than erroring.
 
     ``ncclDevCommCreate`` writes the devcomm into caller-provided **host**
-    storage. Measured on node071 with NCCL 2.28.9: passing a ``cudaMalloc``
+    storage. Measured on <node> with NCCL 2.28.9: passing a ``cudaMalloc``
     pointer segfaults inside the call, while a host struct succeeds. NCCL's own
     examples then pass the result to kernels by value in a ``__grid_constant__``
     parameter, so the struct is trivially copyable.

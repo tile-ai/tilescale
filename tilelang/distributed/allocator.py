@@ -496,7 +496,7 @@ class BaseAllocator:
         def check_support():
             if not _win.supports_device_api():
                 raise RuntimeError(_win.unavailable_reason())
-            # Measured on node071 with NCCL 2.28.9: ncclCommWindowRegister
+            # Measured on <node> with NCCL 2.28.9: ncclCommWindowRegister
             # rejects a plain cudaMalloc pointer with "invalid argument" under
             # both NCCL_WIN_COLL_SYMMETRIC and flags=0, while a VMM-mapped arena
             # registers cleanly. The NIC needs the driver-level allocation that

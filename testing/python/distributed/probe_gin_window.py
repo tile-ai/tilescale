@@ -12,7 +12,7 @@ It answers three questions, in order of risk:
 3. Can a GIN devcomm be created on a communicator that a window is then
    registered on, in the order the allocator uses?
 
-Measured on node071 with NCCL 2.28.9 (single node, 2 GPUs) on 2026-07-31:
+Measured on <node> with NCCL 2.28.9 (single node, 2 GPUs) on 2026-07-31:
 
     ncclMemAlloc    COLL_SYMMETRIC  rc=0   registers
     ncclMemAlloc    flags=0         rc=0   registers
@@ -44,7 +44,7 @@ diagnosis: ``Communicator does not support symmetric memory!``
 
 Launch (per node, NNODES=2, 1 rank per node is enough to cross the network):
 
-    NCCL_IB_DISABLE=0 MASTER_ADDR=10.27.28.73 MASTER_PORT=29511 \
+    NCCL_IB_DISABLE=0 MASTER_ADDR=<node-ip> MASTER_PORT=29511 \
     WORLD_SIZE=2 LOCAL_WORLD_SIZE=1 NNODES=2 NODE_RANK=<0|1> RANK=<0|1> \
     python testing/python/distributed/probe_gin_window.py
 
