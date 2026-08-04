@@ -13,9 +13,15 @@ by the owning rank. Rank ``(node, l)`` wants the sum over all 16 ranks of segmen
 
 which is exactly two phases:
 
-* ``intra`` -- **intra-node reduce-scatter over NVLink.** Each rank pulls, from every
-  local sibling, the part of that sibling's input belonging to *our* rail index ``l``,
-  and sums it. We end holding a partial sum for segment ``(n, l)`` for every ``n``.
+* ``intra`` -- **intra-node reduce-scatter over NVLink.** We end holding a partial sum
+  for segment ``(n, l)`` for every ``n``. Two implementations, ``--intra multimem|pull``:
+
+  - ``multimem`` (default when the hardware allows it) issues one
+    ``multimem.ld_reduce`` against the multicast VA. The **NVSwitch does the fan-in**,
+    so the rank reads ``nodes * shard`` bytes -- one eighth of what it needs to sum --
+    and no staging buffer exists at all.
+  - ``pull`` copies every sibling's slice into a ``scratch`` slot with ``T.get_block``
+    and sums the slots. Portable, and the only option without multicast.
 * ``rail`` -- **rail-aligned inter-node exchange.** Segment ``(n, l)``'s partial goes
   to rank ``(n, l)``, our rail partner on node ``n``; we receive ``nodes`` partials
   for our own segment and sum them.
@@ -64,6 +70,8 @@ Requires real intra-node peer pointers, so it does **not** work under
 
 # NOTE: no `from __future__ import annotations` here -- see the allgather example.
 import argparse
+import functools
+import os
 
 import torch
 import torch.distributed as dist
@@ -84,11 +92,73 @@ from internode_common import (
 )
 
 
-def rs2d_intra_kernel(
+def rs2d_intra_mc_kernel(
+    shard_numel: int, threads: int, world_size: int, local_world_size: int,
+    dtype: str, slots: str, tiles_per_cta: int = 1,
+):
+    """Intra-node reduce-scatter in one instruction per tile, reduced by the NVSwitch.
+
+    ``multimem.ld_reduce`` against the multicast VA returns the sum over every device
+    bound to the multicast object -- all ``local_world_size`` ranks of this node -- so
+    the rank reads only the ``nodes * shard`` bytes it keeps rather than pulling and
+    staging all ``lws`` contributions. No ``scratch`` buffer exists on this path.
+
+    ``inp_mc`` must come from ``ctx.mcast_tensor``; ``partial`` must come from
+    ``ctx.tensor``, because the rail phase's GIN put reads it and only the arena is a
+    registered window.
+
+    ``block_N`` is forced to ``2 * threads`` and is not tunable. bf16 multimem lowers
+    to packed x2 instructions, so the accumulator's fragment layout must be exactly
+    one contiguous pair per thread. Any other tile size lets the consuming ``T.copy``
+    infer a wider vectorisation and layout inference fails outright with "requires the
+    local fragment layout to preserve canonical pair ownership".
+
+    That fixes each thread at *one* 4-byte packed load per tile, so a one-tile CTA
+    spends most of its life on indexing and launch overhead. ``tiles_per_cta`` loops
+    over contiguous tiles instead, which is the only way to give a thread more than
+    4 bytes of work when the tile width is pinned by the layout rule.
+    """
+    nodes = world_size // local_world_size
+    node_slots = nodes - 1 if slots == "remote" else 1
+    block_N = 2 * threads
+    tiles = shard_numel // block_N
+    ctas = tiles // tiles_per_cta
+
+    @T.prim_func
+    def main(
+        inp_mc: T.Tensor((world_size * shard_numel,), dtype),
+        partial: T.Tensor((nodes * shard_numel,), dtype),
+        rank: T.int32,
+    ):
+        with T.Kernel(node_slots * ctas, threads=threads) as bx:
+            c = bx % ctas
+            k = bx // ctas
+            local_rank = rank % local_world_size
+            node = rank // local_world_size
+            n = (node + k + 1) % nodes if slots == "remote" else node
+            src_base = (n * local_world_size + local_rank) * shard_numel
+            dst_base = n * shard_numel
+            acc = T.alloc_fragment((block_N,), dtype)
+            for j in T.serial(tiles_per_cta):
+                off = (c * tiles_per_cta + j) * block_N
+                T.multimem_ld_reduce(
+                    inp_mc[src_base + off:src_base + off + block_N],
+                    acc,
+                    reduce_op=T.MultimemReduceOp.ADD,
+                )
+                T.copy(acc, partial[dst_base + off:dst_base + off + block_N])
+
+    return main
+
+
+def rs2d_intra_pull_kernel(
     shard_numel: int, chunks: int, threads: int, world_size: int, local_world_size: int,
     dtype: str, slots: str,
 ):
     """Intra-node reduce-scatter: pull every sibling's slice for our rail index, sum it.
+
+    The portable fallback for ``rs2d_intra_mc_kernel``: without multicast the rank has
+    to move every sibling's bytes itself.
 
     ``slots="remote"`` handles the node slots whose partials get sent over the fabric;
     ``slots="own"`` handles the slot we keep, which no peer waits for and so can run
@@ -229,13 +299,37 @@ def main() -> int:
     parser.add_argument("--intra-chunks", type=int, default=1024,
                         help="chunking of the intra-node phase; sets its grid to "
                              "nodes*intra_chunks/groups and is independent of --chunks")
+    parser.add_argument("--intra", choices=("multimem", "pull", "auto"), default="auto",
+                        help="intra-node reduce: NVSwitch multimem.ld_reduce, the "
+                             "portable get_block+sum pull, or multimem when available")
+    parser.add_argument("--mc-threads", type=int, default=512,
+                        help="threads per CTA on the multimem path; the tile is "
+                             "2*threads, fixed by the packed-x2 fragment layout")
+    parser.add_argument("--mc-tiles", type=int, default=8,
+                        help="contiguous tiles each multimem CTA loops over; the tile "
+                             "width is pinned, so this is the only work-per-thread knob")
     parser.add_argument("--no-overlap", action="store_true",
                         help="reduce our own node's slot before the fabric transfer "
                              "instead of concurrently with it")
     args = parser.parse_args()
 
     prepare_env()
-    ctx = Context()
+    # The multicast buffer has to be sized before the allocator is built, so the
+    # input length is needed up front -- hence parsing numel/world_size here rather
+    # than after Context.
+    world = int(os.environ.get("WORLD_SIZE", torch.cuda.device_count()))
+    itemsize = torch.empty((), dtype=TORCH_DTYPES[args.dtype]).element_size()
+    intra_mode = args.intra
+    if intra_mode == "auto":
+        intra_mode = "multimem" if Context.supports_multicast() else "pull"
+    mcast_bytes = args.numel * itemsize if intra_mode == "multimem" else 0
+    ctx = Context(mcast_bytes=mcast_bytes)
+    if intra_mode == "multimem":
+        unit = 2 * args.mc_threads * args.mc_tiles
+        if (args.numel // world) % unit:
+            raise SystemExit(
+                f"shard {args.numel // world} must be a multiple of "
+                f"2*--mc-threads*--mc-tiles = {unit}")
 
     lws = ctx.local_world_size
     if ctx.world_size % lws:
@@ -264,13 +358,21 @@ def main() -> int:
     ctx.log(
         f"reduce_scatter_2d: world={ctx.world_size} nodes={nodes} local={lws} "
         f"numel={args.numel} shard={shard_numel} chunks={args.chunks} "
-        f"intra_chunks={args.intra_chunks} overlap={not args.no_overlap} "
+        f"intra={intra_mode} intra_chunks={args.intra_chunks} "
+        f"mc_threads={args.mc_threads} mc_tiles={args.mc_tiles} "
+        f"overlap={not args.no_overlap} "
         f"contexts={args.gin_contexts} dtype={args.dtype}"
     )
 
-    intra_args = (shard_numel, args.intra_chunks, args.threads, ctx.world_size, lws, tl_dtype)
-    intra_remote = ctx.compile(rs2d_intra_kernel(*intra_args, slots="remote"))
-    intra_own = ctx.compile(rs2d_intra_kernel(*intra_args, slots="own"))
+    if intra_mode == "multimem":
+        intra_args = (shard_numel, args.mc_threads, ctx.world_size, lws, tl_dtype)
+        builder = functools.partial(rs2d_intra_mc_kernel, tiles_per_cta=args.mc_tiles)
+    else:
+        intra_args = (shard_numel, args.intra_chunks, args.threads, ctx.world_size, lws,
+                      tl_dtype)
+        builder = rs2d_intra_pull_kernel
+    intra_remote = ctx.compile(builder(*intra_args, slots="remote"))
+    intra_own = ctx.compile(builder(*intra_args, slots="own"))
     rail_args = (shard_numel, args.chunks, args.threads, ctx.world_size, lws, tl_dtype)
     put = ctx.compile(
         rs2d_put_kernel(*rail_args),
@@ -283,8 +385,15 @@ def main() -> int:
         gin_contexts=args.gin_contexts,
     )
 
-    inp = ctx.tensor((args.numel,), torch_dtype)
-    scratch = ctx.tensor((args.numel,), torch_dtype)
+    if intra_mode == "multimem":
+        # inp_arg is the multicast VA the kernel reads; inp is this rank's own view,
+        # which is what gets filled and what torch reduces for the reference.
+        inp_arg, inp = ctx.mcast_tensor((args.numel,), torch_dtype)
+        scratch = None
+    else:
+        inp = ctx.tensor((args.numel,), torch_dtype)
+        inp_arg = inp
+        scratch = ctx.tensor((args.numel,), torch_dtype)
     partial = ctx.tensor((nodes * shard_numel,), torch_dtype)
     railbuf = ctx.tensor((nodes * shard_numel,), torch_dtype)
     out = ctx.tensor((shard_numel,), torch_dtype)
@@ -295,20 +404,27 @@ def main() -> int:
         .to(torch_dtype)
     )
     for t in (scratch, partial, railbuf, out):
-        t.zero_()
+        if t is not None:
+            t.zero_()
 
     per_launch = (nodes - 1) * args.chunks
     target = [0]
     side = torch.cuda.Stream()
     ready = torch.cuda.Event()
 
+    def run_intra(kernel):
+        if intra_mode == "multimem":
+            kernel(inp_arg, partial, ctx.rank)
+        else:
+            kernel(inp, scratch, partial, ctx.rank)
+
     def launch():
         target[0] += per_launch
         main_stream = torch.cuda.current_stream()
         # The other nodes' slots are what the fabric transfer needs, so they go first.
-        intra_remote(inp, scratch, partial, ctx.rank)
+        run_intra(intra_remote)
         if args.no_overlap:
-            intra_own(inp, scratch, partial, ctx.rank)
+            run_intra(intra_own)
             put(partial, railbuf, ctx.rank)
         else:
             ready.record(main_stream)
@@ -317,7 +433,7 @@ def main() -> int:
                 put(partial, railbuf, ctx.rank)
             # Nothing on the network waits for our own slot, so it reduces while the
             # message is in flight.
-            intra_own(inp, scratch, partial, ctx.rank)
+            run_intra(intra_own)
             main_stream.wait_stream(side)
         reduce_(partial, railbuf, out, ctx.rank, target[0])
 

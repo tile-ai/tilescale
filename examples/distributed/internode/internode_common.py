@@ -252,7 +252,7 @@ TL_DTYPES = {"fp32": "float32", "bf16": "bfloat16", "fp16": "float16"}
 class Context:
     """Process group, allocator and topology for one rank."""
 
-    def __init__(self, arena_bytes: int = 1 << 30):
+    def __init__(self, arena_bytes: int = 1 << 30, mcast_bytes: int = 0):
         from tilelang.distributed.host import init_dist
 
         self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -273,6 +273,9 @@ class Context:
             f"allocator: enter bytes={arena_bytes} nodes={self.num_nodes} "
             f"world={self.world_size} (devcomm + window register)"
         )
+        # A non-zero mcast_bytes adds an NVSwitch multicast buffer, which is a
+        # *separate* allocation from the arena: only the arena is a GIN window, so
+        # anything a GIN put reads must still come from ctx.tensor().
         self.allocator = tilelang.get_allocator(
             size=arena_bytes,
             device="cuda",
@@ -281,6 +284,7 @@ class Context:
             num_local_ranks=self.local_world_size,
             group=self.group,
             node_info=self.node_info,
+            **({"mcast_size": mcast_bytes} if mcast_bytes else {}),
         )
         self.trace("allocator: done (arena window live)")
 
@@ -291,6 +295,32 @@ class Context:
     def tensor(self, shape, dtype: torch.dtype):
         """Allocate from the arena. Required: only the arena is a GIN window."""
         return tilelang.tensor(shape, dtype, allocator=self.allocator)
+
+    def mcast_tensor(self, shape, dtype: torch.dtype):
+        """Allocate from the multicast buffer; needs ``mcast_bytes`` at construction.
+
+        Returns ``(mc, local)``. Pass ``mc`` to a kernel using ``T.multimem_*`` -- it
+        is the multicast VA, so one instruction reaches every local rank and the
+        NVSwitch does the fan-in or fan-out. Write payload through ``local``, which
+        is this rank's own physical view, and read it back the same way.
+        """
+        return self.allocator._allocate_mcast_tensor(tuple(shape), dtype)
+
+    @staticmethod
+    def supports_multicast() -> bool:
+        """Whether an NVSwitch multicast object can be created on this device.
+
+        The probe calls ``cuCtxGetDevice``, so it reports False with no current
+        context -- and this is normally called *before* ``Context()`` exists, to size
+        the multicast buffer. Establishing the context first is therefore part of the
+        check, not incidental to it: without the touch below the answer is a silent
+        False on hardware that fully supports multicast.
+        """
+        from tilelang.distributed.shared_memory import _supports_multicast
+
+        torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", 0)))
+        torch.zeros(1, device="cuda")
+        return bool(_supports_multicast())
 
     def log(self, msg: str) -> None:
         if self.is_leader:

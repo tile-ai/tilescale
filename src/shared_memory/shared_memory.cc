@@ -483,10 +483,23 @@ static bool can_create_fabric_allocation(CUdevice device) {
   return cuMemRelease(handle) == CUDA_SUCCESS;
 }
 
+// Multicast objects can be shared either as fabric handles (needs an IMEX
+// channel) or as POSIX file descriptors (node-local, needs none). Prefer fabric
+// when it works, since it carries no pid/fd plumbing; fall back to FD otherwise.
+// Measured on <node>: fabric create fails CUDA_ERROR_NOT_PERMITTED without IMEX
+// while the FD path creates, exports and imports cleanly.
+static bool supports_vmm_fabric_impl();  // defined with the other probes below
+
+static CUmemAllocationHandleType multicast_handle_type() {
+  return supports_vmm_fabric_impl() ? CU_MEM_HANDLE_TYPE_FABRIC
+                                    : CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+}
+
 static bool can_create_multicast_object(int device_count) {
+  const CUmemAllocationHandleType handle_type = multicast_handle_type();
   CUmulticastObjectProp prop = {};
   prop.numDevices = static_cast<unsigned int>(device_count);
-  prop.handleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
+  prop.handleTypes = handle_type;
 
   size_t granularity = 0;
   CUresult result = cuMulticastGetGranularity(
@@ -504,6 +517,18 @@ static bool can_create_multicast_object(int device_count) {
   }
 
   bool ok = false;
+  if (handle_type == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR) {
+    // A descriptor is only meaningful in this process, so re-importing it here
+    // is the whole check; peers get it via pidfd_getfd.
+    int fd = -1;
+    result = cuMemExportToShareableHandle(&fd, mc_handle, handle_type, 0);
+    if (result == CUDA_SUCCESS) {
+      ok = true;
+      close(fd);
+    }
+    cuMemRelease(mc_handle);
+    return ok;
+  }
   CUmemFabricHandle fabric_handle;
   result = cuMemExportToShareableHandle(&fabric_handle, mc_handle,
                                         CU_MEM_HANDLE_TYPE_FABRIC, 0);
@@ -852,7 +877,9 @@ static bool supports_multicast_impl() {
     return false;
   }
 
-  if (!supports_vmm_fabric_impl()) {
+  // Multicast needs VMM, but *not* fabric handles: the FD route below covers a
+  // cluster with no IMEX channel, which is where this used to give up.
+  if (!supports_vmm_impl()) {
     return false;
   }
 
@@ -881,17 +908,19 @@ static bool supports_multicast_impl() {
 }
 
 // ---------- Multicast (NVSwitch) ----------
-// Multi-process multi-GPU with fabric handles (same as vmm_malloc).
-// Each process manages one GPU. MC handle shared via fabric export/import.
+// Multi-process multi-GPU. Each process manages one GPU. The MC handle is shared
+// either by fabric export/import or, with no IMEX channel, by exporting a POSIX
+// fd and duplicating it into peers with pidfd_getfd -- see create_vmm_fd_handle
+// for why that beats an SCM_RIGHTS rendezvous.
 
-// Create multicast object with FABRIC handle type, returns handle as int64.
+// Create multicast object, returns handle as int64.
 static int64_t mc_create_impl(int64_t size_raw, int64_t num_devices) {
   const size_t requested_size = checked_positive_size(size_raw, "size");
   const int device_count = checked_device_count(num_devices, "num_devices");
 
   CUmulticastObjectProp prop = {};
   prop.numDevices = static_cast<unsigned int>(device_count);
-  prop.handleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
+  prop.handleTypes = multicast_handle_type();
 
   size_t granularity = 0;
   SM_CU_CHECK(cuMulticastGetGranularity(&granularity, &prop,
@@ -938,6 +967,69 @@ static int64_t mc_import_handle_impl(ffi::Bytes handle_bytes) {
   handle_guard.Disarm();
 
   return result;
+}
+
+// Export the multicast handle as (pid, fd) for peers to steal with pidfd_getfd.
+// Unlike the VMM arena there is no size to carry: importing an MC object yields a
+// handle, and the size comes from the caller's own aligned request.
+static ffi::Bytes mc_export_fd_handle_impl(int64_t mc_handle_val) {
+  CUmemGenericAllocationHandle mc_handle =
+      checked_handle(mc_handle_val, "mc_handle");
+
+  int fd = -1;
+  SM_CU_CHECK(cuMemExportToShareableHandle(
+      &fd, mc_handle, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0));
+
+  // Left open for the process lifetime: peers may import at any point before the
+  // multicast object is torn down.
+  const int64_t pid = static_cast<int64_t>(getpid());
+  std::string raw(sizeof(int64_t) + sizeof(int), '\0');
+  std::memcpy(&raw[0], &pid, sizeof(int64_t));
+  std::memcpy(&raw[sizeof(int64_t)], &fd, sizeof(int));
+  return ffi::Bytes(raw);
+}
+
+static int64_t mc_open_fd_handle_impl(ffi::Bytes handle_bytes) {
+  check_exact_bytes(handle_bytes, sizeof(int64_t) + sizeof(int), "handle_bytes");
+  int64_t peer_pid = 0;
+  int peer_fd = -1;
+  std::memcpy(&peer_pid, handle_bytes.data(), sizeof(int64_t));
+  std::memcpy(&peer_fd, handle_bytes.data() + sizeof(int64_t), sizeof(int));
+
+  const int pidfd = static_cast<int>(
+      syscall(SYS_pidfd_open, static_cast<pid_t>(peer_pid), 0u));
+  if (pidfd < 0) {
+    TVM_FFI_THROW(InternalError)
+        << "pidfd_open(" << peer_pid << ") failed: " << std::strerror(errno)
+        << ". Sharing a multicast object needs either an IMEX channel (for "
+           "fabric handles) or ptrace-level access to sibling ranks.";
+  }
+  const int local_fd =
+      static_cast<int>(syscall(SYS_pidfd_getfd, pidfd, peer_fd, 0u));
+  const int getfd_errno = errno;
+  close(pidfd);
+  if (local_fd < 0) {
+    TVM_FFI_THROW(InternalError)
+        << "pidfd_getfd(pid=" << peer_pid << ", fd=" << peer_fd
+        << ") failed: " << std::strerror(getfd_errno);
+  }
+
+  CUmemGenericAllocationHandle mc_handle;
+  const CUresult import_rc = cuMemImportFromShareableHandle(
+      &mc_handle, reinterpret_cast<void *>(static_cast<uintptr_t>(local_fd)),
+      CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR);
+  close(local_fd);
+  SM_CU_CHECK(import_rc);
+  ScopedGenericAllocationHandle handle_guard(mc_handle);
+  const int64_t result = checked_output_handle(mc_handle, "mc_open_fd_handle");
+  handle_guard.Disarm();
+  return result;
+}
+
+// Report which sharing route the multicast path will take, so the allocator can
+// pick the matching export/import pair without duplicating the probe.
+static bool multicast_uses_fd_impl() {
+  return multicast_handle_type() == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
 }
 
 // Add a device to the multicast object
@@ -1165,6 +1257,12 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                         mc_export_handle_impl);
   refl::GlobalDef().def("tl.shared_memory.mc_import_handle",
                         mc_import_handle_impl);
+  refl::GlobalDef().def("tl.shared_memory.mc_export_fd_handle",
+                        mc_export_fd_handle_impl);
+  refl::GlobalDef().def("tl.shared_memory.mc_open_fd_handle",
+                        mc_open_fd_handle_impl);
+  refl::GlobalDef().def("tl.shared_memory.multicast_uses_fd",
+                        multicast_uses_fd_impl);
   refl::GlobalDef().def("tl.shared_memory.mc_add_device", mc_add_device_impl);
   refl::GlobalDef().def("tl.shared_memory.mc_bind_mem", mc_bind_mem_impl);
   refl::GlobalDef().def("tl.shared_memory.mc_map", mc_map_impl);

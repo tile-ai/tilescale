@@ -26,6 +26,9 @@ from tilelang.distributed.shared_memory import (
     _create_vmm_fd_handle,
     _open_vmm_fd_handle,
     _supports_multicast,
+    _mc_export_fd_handle,
+    _mc_open_fd_handle,
+    _multicast_uses_fd,
     _mc_create,
     _mc_export_handle,
     _mc_import_handle,
@@ -592,11 +595,17 @@ class BaseAllocator:
         self._collective_stage("allocate multicast physical storage", allocate_physical_storage)
 
         # Rank 0 creates MC object, exports fabric handle; broadcast to all
+        # Fabric handles need an IMEX channel; without one the multicast object is
+        # shared as a POSIX fd instead. The C++ side picks the route, so ask it
+        # rather than re-probing here and risking the two disagreeing.
+        mcast_uses_fd = bool(_multicast_uses_fd())
+
         def create_and_export():
             if self._local_rank != 0:
                 return None
             self._mcast_handle = _mc_create(aligned, num_devices)
-            return bytes(_mc_export_handle(self._mcast_handle))
+            export = _mc_export_fd_handle if mcast_uses_fd else _mc_export_handle
+            return bytes(export(self._mcast_handle))
 
         mcast_fabric_bytes = self._collective_stage("create multicast object", create_and_export)
 
@@ -614,7 +623,8 @@ class BaseAllocator:
         # Non-rank-0 import the MC handle
         def import_handle():
             if self._local_rank != 0:
-                self._mcast_handle = _mc_import_handle(mcast_fabric_bytes)
+                open_handle = _mc_open_fd_handle if mcast_uses_fd else _mc_import_handle
+                self._mcast_handle = open_handle(mcast_fabric_bytes)
 
         self._collective_stage("import multicast object", import_handle)
 
