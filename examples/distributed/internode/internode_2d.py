@@ -58,9 +58,14 @@ import functools
 import torch
 import torch.distributed as dist
 
+import tilelang
 import tilelang.language as T
 
 from internode_common import SIGNAL_DATA, fp32_sum
+
+# Smallest per-group slice worth pipelining; below this the extra launches cost more than
+# the overlap saves. See _Base.__init__ for the measurement.
+MIN_GROUP_BYTES = 1_500_000
 
 
 # --------------------------------------------------------------------- fabric hop
@@ -488,6 +493,34 @@ def pull_reduce_kernel(
 # ------------------------------------------------------------------ host drivers
 
 
+def workable_chunks(shard_numel, threads, world_size, local_world_size, dtype,
+                    chunks, gin_contexts, log=None):
+    """Largest chunk count <= ``chunks`` whose put size actually lowers.
+
+    ``put_signal`` fails with "Can't fetch the lanes of a scalable vector at a compile
+    time" for a non-contiguous set of transfer sizes, characterised in
+    debug_put_size_lowering.py. Which sizes those are depends on ``numel``, so perfectly
+    ordinary buffer lengths are otherwise unusable: 240 MB works at ``--chunks 8`` while
+    120 MB does not, because its 491520-element put lands in the bad set.
+
+    Halving the count doubles the put size and moves off the bad value -- and larger puts
+    are what RDMA wants anyway. Probed with a plain ``tilelang.compile`` rather than
+    ``ctx.compile``: the latter is collective, and a rank raising inside it while its peers
+    proceed would hang instead of failing.
+    """
+    while True:
+        try:
+            tilelang.compile(rail_put_kernel(shard_numel, chunks, threads, world_size,
+                                             local_world_size, dtype, wait=True))
+            return chunks
+        except Exception as exc:  # noqa: BLE001 - only this lowering failure is retried
+            if "lanes of a scalable" not in str(exc) or chunks <= gin_contexts:
+                raise
+            chunks //= 2
+            if log:
+                log(f"  put size did not lower; retrying with --chunks {chunks}")
+
+
 def nodes_of(ctx) -> int:
     return ctx.world_size // ctx.local_world_size
 
@@ -514,9 +547,11 @@ class _Base:
         self.torch_dtype, self.tl_dtype = torch_dtype, tl_dtype
         if self.nodes < 2:
             raise SystemExit("the 2D collectives need >= 2 nodes")
-        if args.chunks % args.gin_contexts:
+        self.chunks = workable_chunks(shard_numel, args.threads, ctx.world_size, self.lws,
+                                      tl_dtype, args.chunks, args.gin_contexts, ctx.log)
+        if self.chunks % args.gin_contexts:
             raise SystemExit(
-                f"--chunks {args.chunks} must be a multiple of --gin-contexts "
+                f"--chunks {self.chunks} must be a multiple of --gin-contexts "
                 f"{args.gin_contexts}: wait_signal divides the target by the granted "
                 f"context count and would round it down")
         if intra == "multimem":
@@ -529,8 +564,31 @@ class _Base:
             raise SystemExit(
                 f"shard {shard_numel} must be a multiple of --intra-chunks "
                 f"{args.intra_chunks}")
+        # Cap the pipeline depth by *slice size*, not just by the divisibility rules.
+        # More groups hide more of the NVLink phases, but each group costs a put, a wait, a
+        # sum and a publish launch -- roughly 6 launches -- and once a slice is small those
+        # launches dominate. Measured: allreduce with 8 groups is 0.95 ms at a 15.7 MB
+        # shard (1.96 MB per slice) and 0.61 ms at a 3.1 MB shard, where the fabric alone
+        # needs only 0.13 -- i.e. 0.5 ms of pure overhead, and 0.50x torch.
+        want = args.rail_groups
+        shard_bytes = shard_numel * torch.empty((), dtype=torch_dtype).element_size()
+        reason = ""
+        while want > 1 and shard_bytes // want < MIN_GROUP_BYTES:
+            want //= 2
+            reason = (f"a {shard_bytes // args.rail_groups / 1e6:.2f} MB slice is too small "
+                      f"to pay for its launches")
+        # A group's grid must be a whole number of chunks and a multiple of the context
+        # count, so a chunk count reduced by workable_chunks() caps the depth too.
+        while want > 1 and (self.chunks % want
+                            or (self.chunks // want) % args.gin_contexts):
+            want //= 2
+            reason = reason or (f"--chunks {self.chunks} cannot be split {args.rail_groups} "
+                                f"ways at {args.gin_contexts} contexts")
+        if want != args.rail_groups:
+            ctx.log(f"  rail-groups {args.rail_groups} -> {want}: {reason}")
+        self.rail_groups = want
         # Only rail peers signal us.
-        self.per_launch = (self.nodes - 1) * args.chunks
+        self.per_launch = (self.nodes - 1) * self.chunks
         self._target = 0
         self.side = torch.cuda.Stream()
 
@@ -561,11 +619,11 @@ class _Base:
         self._target += self.per_launch
         return self._target
 
-    def _rail_args(self, group=0):
+    def _rail_args(self, group=0):  # noqa: D401
         # Each pipelined group needs its own signal: arrivals are cumulative and a wait
         # does not consume them, so a shared signal would let group 0's wait be satisfied
         # by group 1's bytes. 32 signals are provisioned.
-        return (self.shard_numel, self.args.chunks, self.args.threads,
+        return (self.shard_numel, self.chunks, self.args.threads,
                 self.ctx.world_size, self.lws, self.tl_dtype, self.signal_id + group)
 
     def _mc_args(self):
@@ -613,12 +671,12 @@ class Allgather2D(_Base):
         # flight. Both nodes issue groups in order on one stream, and a put from sender
         # CTA b signals through context b % contexts, so per-QP ordering makes the groups
         # arrive in order -- which is what lets an early group be published early.
-        self.groups = args.rail_groups if use_mc else 1
-        per_group = args.chunks // self.groups
+        self.groups = self.rail_groups if use_mc else 1
+        per_group = self.chunks // self.groups
         if self.groups > 1:
-            if args.chunks % self.groups or per_group % args.gin_contexts:
+            if self.chunks % self.groups or per_group % args.gin_contexts:
                 raise SystemExit(
-                    f"--chunks {args.chunks} must divide by --rail-groups {self.groups} "
+                    f"--chunks {self.chunks} must divide by --rail-groups {self.groups} "
                     f"into a multiple of --gin-contexts {args.gin_contexts}; got "
                     f"{per_group} chunks per group")
             self.rail_puts = [
@@ -647,17 +705,23 @@ class Allgather2D(_Base):
         if use_mc:
             mc = functools.partial(mc_bcast_kernel, *self._mc_args(),
                                    tiles_per_cta=args.mc_tiles)
-            self.pub_own_k = ctx.compile(mc(slots="own"))
             span = self.shard_numel // self.groups
             self.group_numel = span
             # One kernel per group: the slice offset must be compile-time, see
-            # mc_bcast_kernel.
+            # mc_bcast_kernel. Our own shard is sliced too, so a fused producer can publish
+            # group g while group g's fabric hop is in flight instead of publishing the
+            # whole shard between the two hops.
+            self.pub_own_k = ctx.compile(mc(slots="own"))
+            self.pub_own_ks = [
+                ctx.compile(mc(slots="own", span_numel=span, elem_lo=g * span))
+                for g in range(self.groups)
+            ] if self.groups > 1 else [self.pub_own_k]
             self.pub_remote_ks = [
                 ctx.compile(mc(slots="remote", span_numel=span, elem_lo=g * span))
                 for g in range(self.groups)
             ]
         else:
-            build = functools.partial(pull_bcast_kernel, *self._pull_args(args.chunks))
+            build = functools.partial(pull_bcast_kernel, *self._pull_args(self.chunks))
             self.pub_own_k = ctx.compile(build(slots="own"))
             self.pub_remote_ks = [ctx.compile(build(slots="remote"))]
 
@@ -725,7 +789,19 @@ class Allgather2D(_Base):
 
     def _issue_all(self):
         for g in range(self.groups):
-            self.rail_puts[g](self.shard, self.inbox, self.ctx.rank, self._targets[g])
+            self.issue_group(g, self._targets[g])
+
+    def bump_groups(self):
+        """Reserve this launch's signal targets without issuing anything yet."""
+        self._targets = [self._bump_group(g) for g in range(self.groups)]
+        return self._targets
+
+    def issue_group(self, group, target):
+        """Start group `group`'s fabric put. Its input slice must already be final."""
+        self.rail_puts[group](self.shard, self.inbox, self.ctx.rank, target)
+
+    def wait_group(self, group, target):
+        self.rail_waits[group](self.inbox, target)
 
     def consume_groups(self):
         """Publish each group over NVLink as soon as that group has landed.
@@ -748,9 +824,16 @@ class Allgather2D(_Base):
         self._gtargets[group] += self.per_group_signals
         return self._gtargets[group]
 
-    def publish_own(self):
-        """Broadcast our own shard to every local rank. Ordered against nothing."""
-        self.pub_own_k(self.shard, self.out_mc, self.ctx.rank)
+    def publish_own(self, group=None):
+        """Broadcast our own shard to every local rank. Ordered against nothing.
+
+        ``group=None`` publishes the whole shard in one launch, which is what the plain
+        path wants. A group index publishes just that slice, for the fused allreduce.
+        """
+        if group is None:
+            self.pub_own_k(self.shard, self.out_mc, self.ctx.rank)
+        else:
+            self.pub_own_ks[group](self.shard, self.out_mc, self.ctx.rank)
 
     def publish_remote(self, group=0):
         """Broadcast what arrived over the fabric. Needs that group's wait to have run."""
@@ -840,11 +923,11 @@ class ReduceScatter2D(_Base):
         self.red_own = ctx.compile(build(slots="own"))
         # Grouped fabric hop, same idea as Allgather2D: group g's arithmetic runs while
         # group g+1 is still crossing the fabric. Per-put size is unchanged.
-        self.groups = args.rail_groups
-        per_group = args.chunks // self.groups
-        if args.chunks % self.groups or per_group % args.gin_contexts:
+        self.groups = self.rail_groups
+        per_group = self.chunks // self.groups
+        if self.chunks % self.groups or per_group % args.gin_contexts:
             raise SystemExit(
-                f"--chunks {args.chunks} must divide by --rail-groups {self.groups} into a "
+                f"--chunks {self.chunks} must divide by --rail-groups {self.groups} into a "
                 f"multiple of --gin-contexts {args.gin_contexts}; got {per_group}")
         span = self.shard_numel // self.groups
         self.put_k, self.wait_k, self.sum_k = [], [], []
@@ -894,7 +977,13 @@ class ReduceScatter2D(_Base):
             ("red_own", lambda: self._reduce(self.red_own), shard_bytes * self.lws),
         ]
 
-    def launch(self):
+    def start(self):
+        """Reduce over NVLink and get the fabric moving; return the per-group targets.
+
+        Split out of ``launch`` so a consumer can interleave work with the per-group
+        finishes -- the fused allreduce starts the allgather's hop for group g the moment
+        this rank's group g is summed, instead of after every group.
+        """
         ctx, args = self.ctx, self.args
         main_stream = torch.cuda.current_stream()
         targets = []
@@ -903,7 +992,6 @@ class ReduceScatter2D(_Base):
             targets.append(self._gtargets[g])
         issue = lambda: [self.put_k[g](self.partial, self.inbox, ctx.rank, targets[g])
                          for g in range(self.groups)]
-        # The other nodes' slots are what the fabric hop needs, so they go first.
         self._reduce(self.red_remote)
         if args.no_overlap:
             self._reduce(self.red_own)
@@ -917,9 +1005,16 @@ class ReduceScatter2D(_Base):
             # Nothing on the network waits for our own slot, so it reduces in flight.
             self._reduce(self.red_own)
             main_stream.wait_stream(self.side)
-        for g in range(self.groups):
-            self.wait_k[g](self.inbox, targets[g])
-            self.sum_k[g](self.partial, self.inbox, self.out, ctx.rank)
+        return targets
+
+    def finish_group(self, group, target):
+        """Wait for group `group`'s arrivals and sum it into ``out``."""
+        self.wait_k[group](self.inbox, target)
+        self.sum_k[group](self.partial, self.inbox, self.out, self.ctx.rank)
+
+    def launch(self):
+        for g, target in enumerate(self.start()):
+            self.finish_group(g, target)
 
 
 class Allreduce2D(_Base):
@@ -959,10 +1054,10 @@ class Allreduce2D(_Base):
         self.numel = numel
         vec = self.nodes * self.shard_numel
         shard = self.shard_numel
-        cps = args.chunks // self.nodes  # chunks per node slot
-        if args.chunks % self.nodes or cps % args.gin_contexts:
+        cps = self.chunks // self.nodes  # chunks per node slot
+        if self.chunks % self.nodes or cps % args.gin_contexts:
             raise SystemExit(
-                f"--chunks {args.chunks} must split into {self.nodes} slots of a multiple "
+                f"--chunks {self.chunks} must split into {self.nodes} slots of a multiple "
                 f"of --gin-contexts {args.gin_contexts}; got {cps} per slot")
 
         mc = functools.partial(mc_reduce_kernel, *self._mc_args(),
@@ -975,7 +1070,7 @@ class Allreduce2D(_Base):
         # slicing covers it. The offsets have to be compile-time (multimem needs a
         # provably in-bounds region), so this is one kernel per absolute slot and the host
         # picks which to call -- our own node index is known there.
-        rail = (vec, args.chunks, args.threads, ctx.world_size, self.lws, tl_dtype)
+        rail = (vec, self.chunks, args.threads, ctx.world_size, self.lws, tl_dtype)
         self.put_k, self.wait_k, self.sum_k, self.pub_k = [], [], [], []
         for m in range(self.nodes):
             self.put_k.append(ctx.compile(
@@ -1047,6 +1142,33 @@ def report_phases(ctx, coll, args):
             mb = coll.shard_numel * coll.out.element_size() / 1e6
             ctx.log(f"  {name:12s} {ms:7.3f} ms   {mb / ms:6.1f} GB/s per NIC "
                     f"(isolated; overstates -- see phases())")
+
+
+def fused_allreduce_launch(rs, ag, ctx):
+    """Reduce-scatter and allgather with their fabric hops overlapped.
+
+    Composed serially the two halves add up exactly -- 0.550 + 0.500 ms -- because the
+    allgather cannot start until the reduce-scatter has produced the shard it broadcasts.
+    But that is only true *per group*: the allgather's hop for group g needs nothing but
+    the reduce-scatter's sum for group g. So push each group across the fabric as soon as
+    it is summed, and the second hop overlaps the first's remaining groups instead of
+    following all of them.
+
+    The two halves must already hold disjoint signal ranges; see the example.
+    """
+    rs_targets = rs.start()
+    ag_targets = ag.bump_groups()
+    for g, target in enumerate(rs_targets):
+        rs.finish_group(g, target)
+        # out slice g is final, and ag.shard *is* rs.out, so this group can fly now --
+        # and publishing our own copy of that slice needs no network at all, so it runs
+        # while the slice is crossing the fabric rather than between the two hops.
+        ag.issue_group(g, ag_targets[g])
+        ag.publish_own(g)
+    for g, target in enumerate(ag_targets):
+        ag.wait_group(g, target)
+        ag.publish_remote(g)
+    dist.barrier(ctx.group)
 
 
 def add_2d_args(parser):

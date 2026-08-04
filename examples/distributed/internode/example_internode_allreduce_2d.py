@@ -37,6 +37,7 @@ from internode_2d import (
     Allreduce2D,
     ReduceScatter2D,
     add_2d_args,
+    fused_allreduce_launch,
     pick_intra,
 )
 from internode_common import (
@@ -56,10 +57,16 @@ def main() -> int:
     # composed wins on measurement: 1.086 ms against merged's 1.296. The single hop saves
     # a serialisation but the NVLink publish cost is identical, and with only `nodes` slots
     # the merged pipeline is too coarse-grained to make up the difference.
-    parser.add_argument("--algo", choices=("merged", "composed"), default="composed",
+    parser.add_argument("--algo", choices=("fused", "merged", "composed"), default="fused",
                         help="merged: one fabric hop carrying every node partial. "
                              "composed: reduce-scatter then allgather, which is simpler "
                              "and works without multicast, but the halves cannot overlap")
+    # Allreduce wants a finer pipeline than the one-hop collectives: it has two fabric
+    # hops to overlap, so 8 groups beats 2 (0.95 ms vs 1.02). Each group's grid must be a
+    # multiple of the GIN context count, and 8 groups of chunks=8 leaves one chunk per
+    # group, hence one context. Allgather goes the other way -- it prefers 2 groups on 4
+    # contexts (0.500 ms vs 0.561 at 8/1) -- so these defaults are per example, not global.
+    parser.set_defaults(rail_groups=8, gin_contexts=1)
     args = parser.parse_args()
 
     prepare_env()
@@ -70,6 +77,8 @@ def main() -> int:
     itemsize = torch.empty((), dtype=TORCH_DTYPES[args.dtype]).element_size()
     intra = pick_intra(args.intra)
     if args.algo == "merged" and intra != "multimem":
+        args.algo = "composed"
+    if args.algo == "fused" and intra != "multimem":
         args.algo = "composed"
     # Both algorithms want two multicast buffers of `numel`: one reduced through the
     # switch, one broadcast out of it.
@@ -99,9 +108,13 @@ def main() -> int:
                          signal_id=SIGNAL_DATA + rs.signals_used, shard=rs.out)
         inp, out = rs.inp, ag.out
 
-        def launch():
-            rs.launch()
-            ag.launch()
+        if args.algo == "fused":
+            def launch():
+                fused_allreduce_launch(rs, ag, ctx)
+        else:
+            def launch():
+                rs.launch()
+                ag.launch()
     # Small magnitudes: a bf16 sum over 16 ranks of arange values would land outside any
     # sensible tolerance.
     inp.copy_(
