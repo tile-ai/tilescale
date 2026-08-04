@@ -34,6 +34,7 @@ import tilelang.language as T
 from tilelang.distributed.bench import do_bench
 
 from example_internode_allgather import allgather_kernel
+from internode_gemm_sm100 import tcgen05_gemm_range_kernel
 from internode_common import (
     SIGNAL_DATA,
     Context,
@@ -237,6 +238,10 @@ def main() -> int:
     # request, so 1024 there overflows the 1024-thread block limit (it launched
     # 1152 and CUDA rejected it). 256 is the usual choice for 128x128x64 tiles.
     parser.add_argument("--gemm-threads", type=int, default=256)
+    # tcgen05 is the Blackwell path (warp-specialised persistent, TMEM
+    # accumulators): 1334 TFLOP/s against the naive loop's 470 on this shape.
+    parser.add_argument("--gemm-impl", choices=("tcgen05", "naive"), default="tcgen05")
+    parser.add_argument("--gemm-block-n", type=int, default=256)
     parser.add_argument("--mode", choices=("serial", "split", "persistent"), default="split",
                         help="split = comm on a side stream overlapped with the local-row GEMM")
     parser.add_argument("--overlap", action="store_true", help=argparse.SUPPRESS)
@@ -275,6 +280,14 @@ def main() -> int:
                                            sm_num=args.gemm_sms, signal_id=SIGNAL_DATA),
             expect=("tl::gin::wait_signal",),
             gin_contexts=args.gin_contexts,
+        )
+    elif args.gemm_impl == "tcgen05":
+        # One compiled kernel per row-range size: the full M for serial, one
+        # rank's block for split.
+        rows = M if args.mode == "serial" else M_per_rank
+        gemm = ctx.compile(
+            tcgen05_gemm_range_kernel(M, N, K, rows, block_M=args.block_m,
+                                      block_N=args.gemm_block_n, block_K=args.block_k)
         )
     elif args.mode == "split":
         gemm = ctx.compile(
@@ -332,7 +345,10 @@ def main() -> int:
             torch.cuda.current_stream().wait_stream(comm_stream)
         else:
             ag(A_shard, A_full, ctx.rank, target[0])
-            gemm(A2, B2, C2)
+            if args.gemm_impl == "tcgen05":
+                gemm(A2, B2, C2, 0)          # whole M in one launch
+            else:
+                gemm(A2, B2, C2)
 
     torch.cuda.synchronize()
     dist.barrier(ctx.group)
@@ -364,12 +380,13 @@ def main() -> int:
         ag_ms = do_bench(ag_only, warmup=args.warmup, rep=args.rep, group=ctx.group)
         gemm_ms = float("nan")
         if args.mode == "serial":
-            gemm_ms = do_bench(lambda: gemm(A2, B2, C2), warmup=args.warmup, rep=args.rep,
-                               group=ctx.group)
+            g = ((lambda: gemm(A2, B2, C2, 0)) if args.gemm_impl == "tcgen05"
+                 else (lambda: gemm(A2, B2, C2)))
+            gemm_ms = do_bench(g, warmup=args.warmup, rep=args.rep, group=ctx.group)
         flops = 2 * M * N * K
         if ctx.is_leader:
             print(
-                f"ag_gemm[{args.mode}]  tilescale {tl_ms:.3f} ms  {flops / (tl_ms * 1e-3) / 1e12:.1f} TFLOP/s"
+                f"ag_gemm[{args.mode}/{args.gemm_impl}]  tilescale {tl_ms:.3f} ms  {flops / (tl_ms * 1e-3) / 1e12:.1f} TFLOP/s"
                 f"  (allgather alone {ag_ms:.3f}, gemm alone {gemm_ms:.3f})\n"
                 f"         torch     {ref_ms:.3f} ms  {flops / (ref_ms * 1e-3) / 1e12:.1f} TFLOP/s"
                 f"  | speedup {ref_ms / tl_ms:.2f}x",

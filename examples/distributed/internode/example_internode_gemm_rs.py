@@ -38,6 +38,7 @@ import torch.distributed as dist
 from tilelang.distributed.bench import do_bench
 
 from example_internode_ag_gemm import gemm_range_kernel
+from internode_gemm_sm100 import tcgen05_gemm_range_kernel
 from example_internode_reduce_scatter import reduce_scatter_kernel
 from internode_common import (
     SIGNAL_DATA,
@@ -60,6 +61,8 @@ def main() -> int:
     parser.add_argument("--block-n", type=int, default=128)
     parser.add_argument("--block-k", type=int, default=64)
     parser.add_argument("--gemm-threads", type=int, default=256)
+    parser.add_argument("--gemm-impl", choices=("tcgen05", "naive"), default="tcgen05")
+    parser.add_argument("--gemm-block-n", type=int, default=256)
     # serial only. See the module docstring: the naive split is incorrect.
     parser.add_argument("--mode", choices=("serial",), default="serial")
     args = parser.parse_args()
@@ -82,10 +85,16 @@ def main() -> int:
         f"contexts={args.gin_contexts} dtype={args.dtype}"
     )
 
-    gemm = ctx.compile(
-        gemm_range_kernel(M, N, K_per_rank, M_per_rank, args.block_m, args.block_n,
-                          args.block_k, args.gemm_threads, tl_dtype)
-    )
+    if args.gemm_impl == "tcgen05":
+        gemm = ctx.compile(
+            tcgen05_gemm_range_kernel(M, N, K_per_rank, M_per_rank, block_M=args.block_m,
+                                      block_N=args.gemm_block_n, block_K=args.block_k)
+        )
+    else:
+        gemm = ctx.compile(
+            gemm_range_kernel(M, N, K_per_rank, M_per_rank, args.block_m, args.block_n,
+                              args.block_k, args.gemm_threads, tl_dtype)
+        )
     rs = ctx.compile(
         reduce_scatter_kernel(shard_numel, args.chunks, args.threads, ctx.world_size, tl_dtype,
                               signal_id=SIGNAL_DATA),
@@ -144,7 +153,7 @@ def main() -> int:
         flops = 2 * M * N * K_per_rank
         if ctx.is_leader:
             print(
-                f"gemm_rs[{args.mode}]  tilescale {tl_ms:.3f} ms  "
+                f"gemm_rs[{args.gemm_impl}]  tilescale {tl_ms:.3f} ms  "
                 f"{flops / (tl_ms * 1e-3) / 1e12:.1f} TFLOP/s\n"
                 f"          torch     {ref_ms:.3f} ms  {flops / (ref_ms * 1e-3) / 1e12:.1f} "
                 f"TFLOP/s  | speedup {ref_ms / tl_ms:.2f}x",
