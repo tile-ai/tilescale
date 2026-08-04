@@ -5,27 +5,43 @@ replicated. The flat version of this (``example_internode_ag_gemm.py``) is built
 flat allgather and so inherits its collapse at 16 GPUs; this one uses ``Allgather2D``
 and the tcgen05 GEMM.
 
-Two modes:
+Three modes:
 
-* ``serial`` -- allgather, then one GEMM over all ``M`` rows.
-* ``overlap`` -- the rows this rank *owns* need no communication, so their GEMM runs on
-  the main stream while the collective runs on a side stream. The remaining rows are
-  then two row ranges either side of ours, so this costs three GEMM launches instead of
-  one; whether that pays depends on how comm-bound the shape is.
+* ``serial`` -- allgather, then one GEMM over all ``M`` rows. Forfeits the point of
+  fusing, and is here as the reference.
+* ``overlap`` -- GEMM this rank's own row block during the collective, then the other
+  fifteen after. Hides only 1/16 of the compute, so it is worth ~3%.
+* ``pipeline`` -- GEMM a whole *node's* row blocks as soon as that node's rows are
+  complete. Since global rank is ``node * lws + local`` and the row block index is the
+  global rank, a node's rows are **contiguous**, so this is one GEMM launch per node
+  rather than per rank. Our own node's rows are complete after the intra-node broadcast
+  alone -- they never touch the fabric -- so half the GEMM (at 2 nodes) runs while the
+  fabric hop is still in flight.
 
-Why overlap is worth re-testing here even though it stopped paying before
-------------------------------------------------------------------------
-With the flat allgather and a *slow* GEMM, split-launch overlap took the fused kernel
-from 1.362 to 1.110 ms. Once the GEMM became tcgen05-fast the comm dominated so
-completely (0.725 ms of allgather against 0.188 ms of GEMM) that overlap bought
-nothing -- 0.915 against 0.906 serial.
+What is being hidden, and why this arrangement rather than an in-kernel wait
+---------------------------------------------------------------------------
+Unfused torch is ``all_gather`` then ``matmul``, strictly serial: 0.204 + 0.170 ms at the
+default shape. Serial fusion only inherits the collective's advantage (0.156 + 0.183 =
+0.339, about 1.10x). The prize is overlap: with the fabric hop hidden under compute the
+floor is ``max(comm, gemm)``, and cuBLAS being 8% faster than our GEMM in isolation stops
+mattering because that GEMM is covering the network.
 
-The 2D collective changes that balance again: the allgather is now ~3x faster, so the
-GEMM is a much larger fraction of the total and there is real work to hide behind. The
-mode is a flag rather than a decision because the crossover moves with the shape.
+``pipeline`` gets at that with nothing but stream and event ordering over the collective's
+existing steps, plus one extra barrier -- so it reuses only kernels that are already
+verified, and its correctness rests on the barriers rather than on new signalling.
+**It is nonetheless unverified on hardware**: every kernel it needs lowers, but the
+cluster has had no two free nodes (and latterly no free node) since it was written. Deliberately **not** an in-kernel signal wait:
+that deadlocked before, because a 2048-CTA GEMM grid fills every SM with CTAs waiting on
+a signal and the comm kernel never gets scheduled. Capping the GEMM at 132 persistent CTAs
+fixed the hang and was *slower than serial*. Doing it properly needs an SM partition like
+Triton-distributed's ``num_sync_sms``/``num_p2p_sms``, which is not something to tune
+blind.
 
-Note ``T.Kernel`` grids and warp specialisation: the GEMM wants ``--gemm-threads 256``,
-not the collective's 1024, or the launch exceeds the block limit.
+Multimem only: on the pull path ``publish_own`` reads siblings' shards rather than writing
+to them, so the ordering is different. Falls back to ``overlap`` there.
+
+Note the GEMM wants 256 threads, not the collective's 1024, or warp specialisation
+overflows the block limit.
 """
 
 # NOTE: no `from __future__ import annotations` here -- see internode_2d.
@@ -56,7 +72,12 @@ def main() -> int:
     parser.add_argument("--block-m", type=int, default=128)
     parser.add_argument("--block-k", type=int, default=64)
     parser.add_argument("--gemm-block-n", type=int, default=256)
-    parser.add_argument("--mode", choices=("serial", "overlap"), default="serial")
+    # serial is the default because it is the mode that has actually been verified on
+    # hardware. pipeline is implemented and every kernel it needs lowers at both 16-GPU
+    # and proxy shapes, but no node has been free long enough to run it -- flip the
+    # default once run_2d_proxy.sh confirms it.
+    parser.add_argument("--mode", choices=("serial", "overlap", "pipeline"),
+                        default="serial")
     args = parser.parse_args()
 
     prepare_env()
@@ -74,21 +95,34 @@ def main() -> int:
                   mcast_bytes=M * K * itemsize if intra == "multimem" else 0)
 
     torch_dtype, tl_dtype = TORCH_DTYPES[args.dtype], TL_DTYPES[args.dtype]
+    ag = Allgather2D(ctx, M * K, torch_dtype, tl_dtype, args, intra=intra)
+    lws = ctx.local_world_size
+    nodes = ctx.world_size // lws
+    mode = args.mode
+    if mode == "pipeline" and intra != "multimem":
+        ctx.log("  note: --mode pipeline needs multimem; falling back to overlap")
+        mode = "overlap"
+
     ctx.log(
         f"ag_gemm_2d: world={ctx.world_size} M={M} (per-rank {M_per_rank}) N={N} K={K} "
-        f"mode={args.mode} intra={intra} chunks={args.chunks} dtype={args.dtype}"
+        f"mode={mode} intra={intra} chunks={args.chunks} dtype={args.dtype}"
     )
 
-    ag = Allgather2D(ctx, M * K, torch_dtype, tl_dtype, args, intra=intra)
-
-    gemm_full = ctx.compile(
-        tcgen05_gemm_range_kernel(M, N, K, M, block_M=args.block_m,
-                                  block_N=args.gemm_block_n, block_K=args.block_k)
-    )
-    gemm_block = None
-    if args.mode == "overlap":
+    gemm_full = gemm_block = gemm_node = None
+    if mode == "serial":
+        gemm_full = ctx.compile(
+            tcgen05_gemm_range_kernel(M, N, K, M, block_M=args.block_m,
+                                      block_N=args.gemm_block_n, block_K=args.block_k)
+        )
+    elif mode == "overlap":
         gemm_block = ctx.compile(
             tcgen05_gemm_range_kernel(M, N, K, M_per_rank, block_M=args.block_m,
+                                      block_N=args.gemm_block_n, block_K=args.block_k)
+        )
+    else:
+        # One node's worth of rows, which is contiguous -- see Allgather2D.rows_of_node.
+        gemm_node = ctx.compile(
+            tcgen05_gemm_range_kernel(M, N, K, lws * M_per_rank, block_M=args.block_m,
                                       block_N=args.gemm_block_n, block_K=args.block_k)
         )
 
@@ -101,24 +135,42 @@ def main() -> int:
     C.zero_()
 
     gemm_stream = torch.cuda.Stream()
+    comm_stream = torch.cuda.Stream()
+
+    my_node = ctx.rank // lws
 
     def launch():
-        if args.mode == "serial":
+        main_stream = torch.cuda.current_stream()
+        if mode == "serial":
             ag.launch()
             gemm_full(A_full, B, C, 0)
             return
-        # Our own rows are already local, so their GEMM does not wait for anything.
-        main_stream = torch.cuda.current_stream()
-        gemm_stream.wait_stream(main_stream)
-        with torch.cuda.stream(gemm_stream):
-            gemm_block(A_full, B, C, ctx.rank * M_per_rank)
-        ag.launch()
-        main_stream.wait_stream(gemm_stream)
-        # Everything except our own block, one launch per peer row block. The
-        # per-rank kernel is reused, so m_offset is all that changes.
-        for peer in range(ctx.world_size):
-            if peer != ctx.rank:
-                gemm_block(A_full, B, C, peer * M_per_rank)
+        if mode == "overlap":
+            # Our own rows are already local, so their GEMM waits on nothing.
+            gemm_stream.wait_stream(main_stream)
+            with torch.cuda.stream(gemm_stream):
+                gemm_block(A_full, B, C, ctx.rank * M_per_rank)
+            ag.launch()
+            main_stream.wait_stream(gemm_stream)
+            for peer in range(ctx.world_size):
+                if peer != ctx.rank:
+                    gemm_block(A_full, B, C, peer * M_per_rank)
+            return
+        # pipeline: the fabric hop runs on its own stream while we finish and then
+        # consume our own node's rows, which never cross the fabric.
+        ag.rail_hop(stream=comm_stream)
+        ag.publish_own()
+        # Our node's rows are complete once every sibling has published. This barrier is
+        # ordered after publish_own on the main stream, so it does not wait for the
+        # fabric hop -- that is still in flight on comm_stream.
+        dist.barrier(ctx.group)
+        gemm_node(A_full, B, C, ag.rows_of_node(my_node, M_per_rank))
+        main_stream.wait_stream(comm_stream)
+        ag.publish_remote()
+        dist.barrier(ctx.group)
+        for n in range(nodes):
+            if n != my_node:
+                gemm_node(A_full, B, C, ag.rows_of_node(n, M_per_rank))
 
     torch.cuda.synchronize()
     dist.barrier(ctx.group)

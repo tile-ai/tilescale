@@ -498,6 +498,41 @@ class Allgather2D(_Base):
              shard_bytes * (self.lws - 1) * (self.nodes - 1)),
         ]
 
+    # --- steps, exposed so a fused kernel can interleave compute between them ---
+    #
+    # launch() below is the plain path. A consumer that wants to compute on the rows it
+    # already has, while the fabric hop is still running, needs the steps separately:
+    # see example_internode_ag_gemm_2d.py --mode pipeline. Multimem only, because on the
+    # pull path publish_own reads siblings' *shards* and publish_remote reads their
+    # *out*, so neither is a pure local write and the staging is different.
+
+    def rail_hop(self, stream=None):
+        """Issue the fabric put and wait for the arrivals. Blocks `stream`, not the CPU."""
+        target = self._bump()
+        if stream is None:
+            self.rail(self.shard, self.inbox, self.ctx.rank, target)
+            return
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            self.rail(self.shard, self.inbox, self.ctx.rank, target)
+
+    def publish_own(self):
+        """Broadcast our own shard to every local rank. Ordered against nothing."""
+        self.pub_own(self.shard, self.out_mc, self.ctx.rank)
+
+    def publish_remote(self):
+        """Broadcast what arrived over the fabric. Needs rail_hop to have completed."""
+        self.pub_remote(self.inbox, self.out_mc, self.ctx.rank)
+
+    def rows_of_node(self, node, rows_per_rank):
+        """First output row belonging to `node`.
+
+        Global rank is ``node * lws + local``, and row block index is global rank, so a
+        node's row blocks are *contiguous* -- which is why the pipelined GEMM needs one
+        launch per node rather than one per rank.
+        """
+        return node * self.lws * rows_per_rank
+
     def launch(self):
         ctx, args = self.ctx, self.args
         target = self._bump()
