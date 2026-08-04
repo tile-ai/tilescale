@@ -571,9 +571,15 @@ class Allgather2D(_Base):
 class ReduceScatter2D(_Base):
     """Sum of every rank's ``.inp``, restricted to this rank's shard, into ``.out``.
 
-    Needs **no barrier**: the intra phase reads siblings' *input* buffers, which the
-    collective never writes, and the rail phase sends only bytes this rank produced,
-    with the GIN signal proving arrival. Stream order is sufficient.
+    Needs **no barrier** *provided the input is not written in the same iteration*: the
+    intra phase reads siblings' input buffers, which the collective itself never writes,
+    and the rail phase sends only bytes this rank produced, with the GIN signal proving
+    arrival. Stream order is then sufficient.
+
+    A caller that **produces** ``inp`` each iteration -- a fused GEMM, say -- breaks that
+    precondition and must fence between producing and launching, because the reduce reads
+    every local rank's copy and stream order says nothing about a sibling's producer. See
+    example_internode_gemm_rs_2d.py, which mismatched 11 of 16 ranks without it.
 
     Overlap runs along the node axis -- reduce the other nodes' slots, start their
     transfer, then reduce our own slot, which nothing on the network waits for. That is

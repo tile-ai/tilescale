@@ -86,6 +86,17 @@ def main() -> int:
 
     def launch():
         gemm(A, B, partial, 0)
+        # The GEMM *produces* the collective's input, and the reduce reads every local
+        # rank's copy of it through the multicast VA. Stream order only sequences our own
+        # GEMM before our own reduce -- it says nothing about a sibling's GEMM, so
+        # without this fence we reduce whatever a slower sibling has written so far.
+        #
+        # ReduceScatter2D advertises "no barrier needed", and that is true when the input
+        # is filled once before the loop, as in the standalone example. A producer inside
+        # the loop breaks that precondition. It passed on the 8-GPU single-node proxy --
+        # where ranks stay tightly synchronised -- and mismatched on 11 of 16 ranks
+        # across two nodes, which is exactly the shape of a skew-dependent race.
+        dist.barrier(ctx.group)
         rs.launch()
 
     torch.cuda.synchronize()
