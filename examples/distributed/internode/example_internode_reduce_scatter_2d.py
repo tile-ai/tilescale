@@ -305,7 +305,7 @@ def main() -> int:
     parser.add_argument("--mc-threads", type=int, default=512,
                         help="threads per CTA on the multimem path; the tile is "
                              "2*threads, fixed by the packed-x2 fragment layout")
-    parser.add_argument("--mc-tiles", type=int, default=8,
+    parser.add_argument("--mc-tiles", type=int, default=32,
                         help="contiguous tiles each multimem CTA loops over; the tile "
                              "width is pinned, so this is the only work-per-thread knob")
     parser.add_argument("--no-overlap", action="store_true",
