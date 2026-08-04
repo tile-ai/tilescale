@@ -69,9 +69,16 @@ from internode_common import SIGNAL_DATA, fp32_sum
 def rail_put_kernel(
     shard_numel: int, chunks: int, threads: int, world_size: int, local_world_size: int,
     dtype: str, signal_id: int = SIGNAL_DATA, src_per_node: bool = False,
-    wait: bool = False,
+    wait: bool = False, chunk_lo: int = 0, chunk_count: int = 0,
 ):
     """Rail-aligned put of one shard to the same local index on every other node.
+
+    ``chunk_lo``/``chunk_count`` restrict the launch to a slice of the shard, for the
+    pipelined path: the grid becomes ``chunk_count`` CTAs covering chunks
+    ``[chunk_lo, chunk_lo + chunk_count)``. **The per-put size is unchanged** -- only the
+    number of concurrent puts drops -- which is the whole point. An earlier attempt at
+    pipelining split the shard into more, smaller messages and came out 4x slower,
+    because RDMA is bandwidth-bound only once messages are large.
 
     The inbox is indexed by *sender node*, which keeps slots disjoint with no rotation
     arithmetic: only rank ``(n, l)`` ever writes our slot ``n``.
@@ -87,6 +94,7 @@ def rail_put_kernel(
     nodes = world_size // local_world_size
     chunk_numel = shard_numel // chunks
     src_slots = nodes if src_per_node else 1
+    grid = chunk_count or chunks
 
     @T.prim_func
     def main(
@@ -95,8 +103,8 @@ def rail_put_kernel(
         rank: T.int32,
         signal_target: T.int32,
     ):
-        with T.Kernel(chunks, threads=threads) as bx:
-            base = bx * chunk_numel
+        with T.Kernel(grid, threads=threads) as bx:
+            base = (chunk_lo + bx) * chunk_numel
             local_rank = rank % local_world_size
             node = rank // local_world_size
             for step in range(nodes - 1):
@@ -113,6 +121,40 @@ def rail_put_kernel(
             if wait:
                 T.nccl_gin.wait_signal(least=signal_target, signal_id=signal_id,
                                        scope="block")
+
+    return main
+
+
+def rail_wait_kernel(
+    shard_numel: int, chunks: int, threads: int, world_size: int, local_world_size: int,
+    dtype: str, signal_id: int = SIGNAL_DATA, chunk_count: int = 0,
+):
+    """Wait for one group's rail arrivals, nothing else.
+
+    Separate from the put so a group's puts can be issued and the CTAs retire, leaving
+    the RDMA in flight while the previous group's data is published over NVLink.
+
+    The grid must match the *sender's* chunk count. ``wait_signal`` divides the target by
+    the granted GIN context count, and a put issued from sender CTA ``b`` increments the
+    receiver's signal through context ``b % contexts`` -- so a wait grid wider than the
+    sender's would park CTAs on contexts nothing ever signals, and a narrower one would
+    round the target down. Hence ``chunks % gin_contexts == 0`` per group, checked host
+    side.
+    """
+    nodes = world_size // local_world_size
+    grid = chunk_count or chunks
+
+    @T.prim_func
+    def main(
+        inbox: T.Tensor((nodes * shard_numel,), dtype),
+        signal_target: T.int32,
+    ):
+        with T.Kernel(grid, threads=threads) as bx:
+            T.nccl_gin.wait_signal(least=signal_target, signal_id=signal_id, scope="block")
+            # Keep `inbox` in the signature: the wait is what makes it readable, so the
+            # dependency is real even though this kernel does not touch the bytes.
+            if bx >= grid:
+                inbox[0] = inbox[0]
 
     return main
 
@@ -149,23 +191,115 @@ def rail_sum_kernel(
     return main
 
 
+def rs_sum_kernel(
+    shard_numel: int, chunks: int, threads: int, world_size: int, local_world_size: int,
+    dtype: str, elem_lo: int = 0, span_numel: int = 0,
+):
+    """Reduce-scatter tail for one group: our own partial plus this group's arrivals.
+
+    Like ``allreduce_sum_kernel`` it reads ``partial`` as a term instead of copying it into
+    the inbox first, which saves writing and re-reading a shard of HBM, and it carries no
+    ``wait_signal`` so its grid is free of the sender's chunk count.
+    """
+    nodes = world_size // local_world_size
+    span = span_numel or shard_numel
+    chunk_numel = span // chunks
+
+    @T.prim_func
+    def main(
+        partial: T.Tensor((nodes * shard_numel,), dtype),
+        inbox: T.Tensor((nodes * shard_numel,), dtype),
+        out: T.Tensor((shard_numel,), dtype),
+        rank: T.int32,
+    ):
+        with T.Kernel(chunks, threads=threads) as bx:
+            base = elem_lo + bx * chunk_numel
+            node = rank // local_world_size
+            for i in T.Parallel(chunk_numel):
+                out[base + i] = T.cast(
+                    T.cast(partial[node * shard_numel + base + i], "float32") + fp32_sum(
+                        nodes - 1,
+                        lambda k: T.cast(
+                            inbox[((node + k + 1) % nodes) * shard_numel + base + i],
+                            "float32"),
+                    ),
+                    dtype,
+                )
+
+    return main
+
+
+def allreduce_sum_kernel(
+    vec_numel: int, shard_numel: int, chunks: int, threads: int, world_size: int,
+    local_world_size: int, dtype: str, slot: int,
+):
+    """Sum one node slot of the merged allreduce: our own partial plus the arrivals.
+
+    Two things this deliberately does not do.
+
+    It does **not** copy our own partial into the inbox first, as the two-hop tail did --
+    it just reads ``partial`` as one more term. That saves writing and re-reading a whole
+    shard of HBM per slot.
+
+    It does **not** wait on the signal; ``rail_wait_kernel`` does that separately. Folding
+    the wait in would tie this grid to the sender's chunk count, and the first version did
+    exactly that: 4 CTAs for a whole shard of copy-and-sum, which made the merged
+    allreduce *slower* than composing the two halves (1.559 ms against 1.086). The wait
+    needs a narrow grid matched to the sender's contexts; the arithmetic wants a wide one.
+    """
+    nodes = world_size // local_world_size
+    lo = slot * shard_numel
+    chunk_numel = shard_numel // chunks
+
+    @T.prim_func
+    def main(
+        partial: T.Tensor((vec_numel,), dtype),
+        inbox: T.Tensor((nodes * vec_numel,), dtype),
+        reduced: T.Tensor((vec_numel,), dtype),
+        rank: T.int32,
+    ):
+        with T.Kernel(chunks, threads=threads) as bx:
+            base = lo + bx * chunk_numel
+            node = rank // local_world_size
+            for i in T.Parallel(chunk_numel):
+                reduced[base + i] = T.cast(
+                    T.cast(partial[base + i], "float32") + fp32_sum(
+                        nodes - 1,
+                        lambda k: T.cast(
+                            inbox[((node + k + 1) % nodes) * vec_numel + base + i],
+                            "float32"),
+                    ),
+                    dtype,
+                )
+
+    return main
+
+
 # ------------------------------------------------------- intra-node via NVSwitch
 
 
 def mc_bcast_kernel(
     shard_numel: int, threads: int, world_size: int, local_world_size: int, dtype: str,
-    slots: str, tiles_per_cta: int = 32,
+    slots: str, tiles_per_cta: int = 32, span_numel: int = 0, elem_lo: int = 0,
+    node_slot: int = -1,
 ):
     """Publish the shards we own into every local rank's slot with one ``multimem.st``.
+
+    ``span_numel``/``elem_lo`` publish only that slice of each shard, for the pipelined
+    path. Both are **compile-time**: multimem lowering has to prove the multicast region
+    is in bounds, and a runtime offset defeats that with "multimem packed multicast region
+    must be provably in bounds or use a tile-aligned all-or-none dynamic partition". So a
+    group gets its own compiled kernel rather than an offset argument.
 
     ``slots="own"`` publishes our own shard, which exists before the collective starts
     and so is ordered against nothing. ``slots="remote"`` publishes what arrived over
     the fabric. See trap 2 in the module docstring for why the tile width is fixed.
     """
     nodes = world_size // local_world_size
-    groups = 1 if slots == "own" else nodes - 1
+    groups = 1 if node_slot >= 0 else {"own": 1, "remote": nodes - 1}.get(slots, nodes)
     block_N = 2 * threads
-    ctas = (shard_numel // block_N) // tiles_per_cta
+    span = span_numel or shard_numel
+    ctas = (span // block_N) // tiles_per_cta
 
     @T.prim_func
     def main(
@@ -178,9 +312,16 @@ def mc_bcast_kernel(
             k = bx // ctas
             local_rank = rank % local_world_size
             node = rank // local_world_size
-            n = node if slots == "own" else (node + k + 1) % nodes
-            src_base = 0 if slots == "own" else n * shard_numel
-            dst_base = (n * local_world_size + local_rank) * shard_numel
+            if node_slot >= 0:
+                n = node_slot  # one absolute slot: the per-slot allreduce pipeline
+            elif slots == "own":
+                n = node
+            elif slots == "remote":
+                n = (node + k + 1) % nodes
+            else:
+                n = k  # "all": every node slot, for the merged allreduce
+            src_base = (0 if slots == "own" else n * shard_numel) + elem_lo
+            dst_base = (n * local_world_size + local_rank) * shard_numel + elem_lo
             buf = T.alloc_fragment((block_N,), dtype)
             for j in T.serial(tiles_per_cta):
                 off = (c * tiles_per_cta + j) * block_N
@@ -347,6 +488,10 @@ def pull_reduce_kernel(
 # ------------------------------------------------------------------ host drivers
 
 
+def nodes_of(ctx) -> int:
+    return ctx.world_size // ctx.local_world_size
+
+
 def pick_intra(mode: str) -> str:
     """Resolve ``auto`` against the hardware. See Context.supports_multicast."""
     from internode_common import Context
@@ -401,13 +546,27 @@ class _Base:
         """
         raise NotImplementedError
 
+    @property
+    def signals_used(self) -> int:
+        """How many consecutive GIN signals this collective occupies, from signal_id.
+
+        One per pipelined group. A composition must space its halves by this much:
+        arrivals are cumulative and a wait does not consume them, so an overlapping range
+        lets one half's wait be satisfied by the other half's bytes -- which corrupted
+        exactly the second half of the allreduce output before this existed.
+        """
+        return getattr(self, "groups", 1)
+
     def _bump(self):
         self._target += self.per_launch
         return self._target
 
-    def _rail_args(self):
+    def _rail_args(self, group=0):
+        # Each pipelined group needs its own signal: arrivals are cumulative and a wait
+        # does not consume them, so a shared signal would let group 0's wait be satisfied
+        # by group 1's bytes. 32 signals are provisioned.
         return (self.shard_numel, self.args.chunks, self.args.threads,
-                self.ctx.world_size, self.lws, self.tl_dtype, self.signal_id)
+                self.ctx.world_size, self.lws, self.tl_dtype, self.signal_id + group)
 
     def _mc_args(self):
         return (self.shard_numel, self.args.mc_threads, self.ctx.world_size, self.lws,
@@ -446,20 +605,61 @@ class Allgather2D(_Base):
         self.numel = numel
         use_mc = intra == "multimem"
 
-        # The put and the wait are one kernel here: with nothing else to overlap, a
-        # separate wait launch is pure latency.
-        self.rail = ctx.compile(
-            rail_put_kernel(*self._rail_args(), wait=True),
-            expect=("tl::gin::put_signal_addr", "tl::gin::wait_signal"),
-            gin_contexts=args.gin_contexts,
-        )
+        # --- fabric hop ---
+        # G == 1: put and wait are one kernel; with nothing to overlap, a separate wait
+        # launch is pure latency.
+        # G > 1: one put kernel and one wait kernel per group, each on its own signal, so
+        # group g's arrival can be published over NVLink while group g+1 is still in
+        # flight. Both nodes issue groups in order on one stream, and a put from sender
+        # CTA b signals through context b % contexts, so per-QP ordering makes the groups
+        # arrive in order -- which is what lets an early group be published early.
+        self.groups = args.rail_groups if use_mc else 1
+        per_group = args.chunks // self.groups
+        if self.groups > 1:
+            if args.chunks % self.groups or per_group % args.gin_contexts:
+                raise SystemExit(
+                    f"--chunks {args.chunks} must divide by --rail-groups {self.groups} "
+                    f"into a multiple of --gin-contexts {args.gin_contexts}; got "
+                    f"{per_group} chunks per group")
+            self.rail_puts = [
+                ctx.compile(
+                    rail_put_kernel(*self._rail_args(g), chunk_lo=g * per_group,
+                                    chunk_count=per_group),
+                    expect=("tl::gin::put_signal_addr",), gin_contexts=args.gin_contexts,
+                )
+                for g in range(self.groups)
+            ]
+            self.rail_waits = [
+                ctx.compile(
+                    rail_wait_kernel(*self._rail_args(g), chunk_count=per_group),
+                    expect=("tl::gin::wait_signal",), gin_contexts=args.gin_contexts,
+                )
+                for g in range(self.groups)
+            ]
+        else:
+            self.rail = ctx.compile(
+                rail_put_kernel(*self._rail_args(), wait=True),
+                expect=("tl::gin::put_signal_addr", "tl::gin::wait_signal"),
+                gin_contexts=args.gin_contexts,
+            )
+        self.per_group_signals = (nodes_of(ctx) - 1) * per_group
+
         if use_mc:
-            build = functools.partial(mc_bcast_kernel, *self._mc_args(),
-                                      tiles_per_cta=args.mc_tiles)
+            mc = functools.partial(mc_bcast_kernel, *self._mc_args(),
+                                   tiles_per_cta=args.mc_tiles)
+            self.pub_own_k = ctx.compile(mc(slots="own"))
+            span = self.shard_numel // self.groups
+            self.group_numel = span
+            # One kernel per group: the slice offset must be compile-time, see
+            # mc_bcast_kernel.
+            self.pub_remote_ks = [
+                ctx.compile(mc(slots="remote", span_numel=span, elem_lo=g * span))
+                for g in range(self.groups)
+            ]
         else:
             build = functools.partial(pull_bcast_kernel, *self._pull_args(args.chunks))
-        self.pub_own = ctx.compile(build(slots="own"))
-        self.pub_remote = ctx.compile(build(slots="remote"))
+            self.pub_own_k = ctx.compile(build(slots="own"))
+            self.pub_remote_ks = [ctx.compile(build(slots="remote"))]
 
         # `shard` lets a caller feed an existing arena tensor straight in -- allreduce
         # passes the reduce-scatter's output, which avoids a full-shard copy between
@@ -480,21 +680,18 @@ class Allgather2D(_Base):
 
     def phases(self):
         shard_bytes = self.shard_numel * self.shard.element_size()
-        rail = lambda: self.rail(self.shard, self.inbox, self.ctx.rank, self._bump())
         if self._use_mc:
             return [
-                ("rail_nic", rail, 0),
-                ("pub_own", lambda: self.pub_own(self.shard, self.out_mc, self.ctx.rank),
-                 shard_bytes * self.lws),
-                ("pub_remote",
-                 lambda: self.pub_remote(self.inbox, self.out_mc, self.ctx.rank),
+                ("rail_nic", lambda: self.rail_hop(), 0),
+                ("pub_own", self.publish_own, shard_bytes * self.lws),
+                ("pub_remote", lambda: [self.publish_remote(g) for g in range(self.groups)],
                  shard_bytes * self.lws * (self.nodes - 1)),
             ]
         return [
             ("rail_nic", lambda: self.rail(self.shard, self.out, self.ctx.rank, self._bump()), 0),
-            ("pull_own", lambda: self.pub_own(self.shard, self.out, self.ctx.rank),
+            ("pull_own", lambda: self.pub_own_k(self.shard, self.out, self.ctx.rank),
              shard_bytes * (self.lws - 1)),
-            ("pull_remote", lambda: self.pub_remote(self.shard, self.out, self.ctx.rank),
+            ("pull_remote", lambda: self.pub_remote_ks[0](self.shard, self.out, self.ctx.rank),
              shard_bytes * (self.lws - 1) * (self.nodes - 1)),
         ]
 
@@ -507,22 +704,57 @@ class Allgather2D(_Base):
     # *out*, so neither is a pure local write and the staging is different.
 
     def rail_hop(self, stream=None):
-        """Issue the fabric put and wait for the arrivals. Blocks `stream`, not the CPU."""
-        target = self._bump()
+        """Start the fabric hop.
+
+        With one group this also waits, since there is nothing to overlap. With several,
+        it only *issues* every group's puts -- in group order on one stream, so per-QP
+        ordering makes them arrive in order -- and the waits are left to
+        ``consume_groups``, which interleaves them with the NVLink publishes.
+        """
+        self._targets = [self._bump_group(g) for g in range(self.groups)]
+        run = self._issue_all if self.groups > 1 else self._rail_one
         if stream is None:
-            self.rail(self.shard, self.inbox, self.ctx.rank, target)
+            run()
             return
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
-            self.rail(self.shard, self.inbox, self.ctx.rank, target)
+            run()
+
+    def _rail_one(self):
+        self.rail(self.shard, self.inbox, self.ctx.rank, self._targets[0])
+
+    def _issue_all(self):
+        for g in range(self.groups):
+            self.rail_puts[g](self.shard, self.inbox, self.ctx.rank, self._targets[g])
+
+    def consume_groups(self):
+        """Publish each group over NVLink as soon as that group has landed.
+
+        This is where the pipelining pays: group g's ~0.1 ms of multicast broadcast runs
+        while group g+1 is still crossing the fabric, instead of the whole broadcast
+        sitting after the whole hop.
+        """
+        if self.groups == 1:
+            self.publish_remote()
+            return
+        for g in range(self.groups):
+            self.rail_waits[g](self.inbox, self._targets[g])
+            self.publish_remote(g)
+
+    def _bump_group(self, group):
+        # Each group has its own signal, so each needs its own running target.
+        if not hasattr(self, "_gtargets"):
+            self._gtargets = [0] * self.groups
+        self._gtargets[group] += self.per_group_signals
+        return self._gtargets[group]
 
     def publish_own(self):
         """Broadcast our own shard to every local rank. Ordered against nothing."""
-        self.pub_own(self.shard, self.out_mc, self.ctx.rank)
+        self.pub_own_k(self.shard, self.out_mc, self.ctx.rank)
 
-    def publish_remote(self):
-        """Broadcast what arrived over the fabric. Needs rail_hop to have completed."""
-        self.pub_remote(self.inbox, self.out_mc, self.ctx.rank)
+    def publish_remote(self, group=0):
+        """Broadcast what arrived over the fabric. Needs that group's wait to have run."""
+        self.pub_remote_ks[group](self.inbox, self.out_mc, self.ctx.rank)
 
     def rows_of_node(self, node, rows_per_rank):
         """First output row belonging to `node`.
@@ -535,37 +767,39 @@ class Allgather2D(_Base):
 
     def launch(self):
         ctx, args = self.ctx, self.args
-        target = self._bump()
         main_stream = torch.cuda.current_stream()
         if self._use_mc:
             if args.no_overlap:
-                self.rail(self.shard, self.inbox, ctx.rank, target)
-                self.pub_own(self.shard, self.out_mc, ctx.rank)
+                self.rail_hop()
+                self.publish_own()
             else:
+                # Our own shard exists already, so publishing it races the fabric rather
+                # than waiting behind it.
                 self.side.wait_stream(main_stream)
                 with torch.cuda.stream(self.side):
-                    self.pub_own(self.shard, self.out_mc, ctx.rank)
-                self.rail(self.shard, self.inbox, ctx.rank, target)
+                    self.publish_own()
+                self.rail_hop()
                 main_stream.wait_stream(self.side)
-            self.pub_remote(self.inbox, self.out_mc, ctx.rank)
+            self.consume_groups()
             # We published into every sibling and they into us, so the output is
             # complete only once they have all finished.
             dist.barrier(ctx.group)
         else:
             # The pull path needs its own slot present in `out`, and the rail kernel
             # writes the sender's global-rank slot, so route it straight there.
+            target = self._bump()
             if args.no_overlap:
                 self.rail(self.shard, self.out, ctx.rank, target)
                 dist.barrier(ctx.group)
-                self.pub_own(self.shard, self.out, ctx.rank)
+                self.pub_own_k(self.shard, self.out, ctx.rank)
             else:
                 self.side.wait_stream(main_stream)
                 with torch.cuda.stream(self.side):
-                    self.pub_own(self.shard, self.out, ctx.rank)
+                    self.pub_own_k(self.shard, self.out, ctx.rank)
                 self.rail(self.shard, self.out, ctx.rank, target)
                 main_stream.wait_stream(self.side)
                 dist.barrier(ctx.group)
-            self.pub_remote(self.shard, self.out, ctx.rank)
+            self.pub_remote_ks[0](self.shard, self.out, ctx.rank)
 
 
 class ReduceScatter2D(_Base):
@@ -604,16 +838,30 @@ class ReduceScatter2D(_Base):
             build = functools.partial(pull_reduce_kernel, *self._pull_args(args.intra_chunks))
         self.red_remote = ctx.compile(build(slots="remote"))
         self.red_own = ctx.compile(build(slots="own"))
-        self.put = ctx.compile(
-            rail_put_kernel(*self._rail_args(), src_per_node=True),
-            expect=("tl::gin::put_signal_addr",),
-            gin_contexts=args.gin_contexts,
-        )
-        self.tail = ctx.compile(
-            rail_sum_kernel(*self._rail_args()),
-            expect=("tl::gin::wait_signal",),
-            gin_contexts=args.gin_contexts,
-        )
+        # Grouped fabric hop, same idea as Allgather2D: group g's arithmetic runs while
+        # group g+1 is still crossing the fabric. Per-put size is unchanged.
+        self.groups = args.rail_groups
+        per_group = args.chunks // self.groups
+        if args.chunks % self.groups or per_group % args.gin_contexts:
+            raise SystemExit(
+                f"--chunks {args.chunks} must divide by --rail-groups {self.groups} into a "
+                f"multiple of --gin-contexts {args.gin_contexts}; got {per_group}")
+        span = self.shard_numel // self.groups
+        self.put_k, self.wait_k, self.sum_k = [], [], []
+        for g in range(self.groups):
+            self.put_k.append(ctx.compile(
+                rail_put_kernel(*self._rail_args(g), src_per_node=True,
+                                chunk_lo=g * per_group, chunk_count=per_group),
+                expect=("tl::gin::put_signal_addr",), gin_contexts=args.gin_contexts))
+            self.wait_k.append(ctx.compile(
+                rail_wait_kernel(*self._rail_args(g), chunk_count=per_group),
+                expect=("tl::gin::wait_signal",), gin_contexts=args.gin_contexts))
+            self.sum_k.append(ctx.compile(
+                rs_sum_kernel(self.shard_numel, args.intra_chunks // self.groups,
+                              args.threads, ctx.world_size, self.lws, tl_dtype,
+                              elem_lo=g * span, span_numel=span)))
+        self.per_group_signals = (self.nodes - 1) * per_group
+        self._gtargets = [0] * self.groups
 
         if use_mc:
             self.inp_mc, self.inp = ctx.mcast_tensor((numel,), torch_dtype)
@@ -639,10 +887,8 @@ class ReduceScatter2D(_Base):
     def phases(self):
         shard_bytes = self.shard_numel * self.out.element_size()
         return [
-            ("rail_put", lambda: self.put(self.partial, self.inbox, self.ctx.rank,
-                                          self._bump()), 0),
-            ("rail_sum", lambda: self.tail(self.partial, self.inbox, self.out,
-                                           self.ctx.rank, self._target), 0),
+            ("rail_put", lambda: self.put_k[0](self.partial, self.inbox, self.ctx.rank,
+                                               self._bump()), 0),
             ("red_remote", lambda: self._reduce(self.red_remote),
              shard_bytes * self.lws * (self.nodes - 1)),
             ("red_own", lambda: self._reduce(self.red_own), shard_bytes * self.lws),
@@ -650,22 +896,140 @@ class ReduceScatter2D(_Base):
 
     def launch(self):
         ctx, args = self.ctx, self.args
-        target = self._bump()
         main_stream = torch.cuda.current_stream()
+        targets = []
+        for g in range(self.groups):
+            self._gtargets[g] += self.per_group_signals
+            targets.append(self._gtargets[g])
+        issue = lambda: [self.put_k[g](self.partial, self.inbox, ctx.rank, targets[g])
+                         for g in range(self.groups)]
         # The other nodes' slots are what the fabric hop needs, so they go first.
         self._reduce(self.red_remote)
         if args.no_overlap:
             self._reduce(self.red_own)
-            self.put(self.partial, self.inbox, ctx.rank, target)
+            issue()
         else:
             ready = torch.cuda.Event()
             ready.record(main_stream)
             self.side.wait_event(ready)
             with torch.cuda.stream(self.side):
-                self.put(self.partial, self.inbox, ctx.rank, target)
+                issue()
+            # Nothing on the network waits for our own slot, so it reduces in flight.
             self._reduce(self.red_own)
             main_stream.wait_stream(self.side)
-        self.tail(self.partial, self.inbox, self.out, ctx.rank, target)
+        for g in range(self.groups):
+            self.wait_k[g](self.inbox, targets[g])
+            self.sum_k[g](self.partial, self.inbox, self.out, ctx.rank)
+
+
+class Allreduce2D(_Base):
+    """Sum of every rank's ``.inp``, on every rank, into ``.out`` -- in one fabric hop.
+
+    Composing ReduceScatter2D with Allgather2D is correct and simple, and it measured
+    1.088 ms against torch's 0.949 (0.87x). The two halves do not overlap at all -- the
+    total is exactly their sum -- because the allgather cannot start until the
+    reduce-scatter has produced the shard it broadcasts.
+
+    So merge them. The insight is that the rail peer can send its partials for **every**
+    node slot rather than only the one this rank owns, which lets this rank finish all
+    slots locally and removes the second hop entirely:
+
+    1. ``mc_reduce`` -- NVSwitch-reduce over local ranks, giving this rank a partial for
+       each of the ``nodes`` slots at its own rail index.
+    2. ``rail`` -- one hop, carrying that whole ``nodes * shard`` vector.
+    3. ``tail`` -- add our own vector, wait, sum the ``nodes`` arrivals: now every slot at
+       our rail index holds the global sum.
+    4. ``mc_bcast(slots="all")`` -- publish all of them to every local rank.
+
+    Fabric bytes are identical to the two-hop version, and the floor is the same: a 2-node
+    allreduce must move the node-sum each way, ``N/lws`` per rank, so 31.4 MB at 47.6 GB/s
+    = 0.66 ms at this size. What the merge buys is one serialisation instead of two, one
+    barrier instead of three, and far fewer launches.
+    """
+
+    def __init__(self, ctx, numel, torch_dtype, tl_dtype, args, intra="auto",
+                 signal_id=SIGNAL_DATA):
+        intra = pick_intra(intra)
+        if intra != "multimem":
+            raise SystemExit("the merged allreduce needs multimem; use --algo composed")
+        if numel % ctx.world_size:
+            raise SystemExit(f"numel {numel} must be divisible by {ctx.world_size}")
+        super().__init__(ctx, numel // ctx.world_size, torch_dtype, tl_dtype, args, intra,
+                         signal_id)
+        self.numel = numel
+        vec = self.nodes * self.shard_numel
+        shard = self.shard_numel
+        cps = args.chunks // self.nodes  # chunks per node slot
+        if args.chunks % self.nodes or cps % args.gin_contexts:
+            raise SystemExit(
+                f"--chunks {args.chunks} must split into {self.nodes} slots of a multiple "
+                f"of --gin-contexts {args.gin_contexts}; got {cps} per slot")
+
+        mc = functools.partial(mc_reduce_kernel, *self._mc_args(),
+                               tiles_per_cta=args.mc_tiles)
+        self.red_remote = ctx.compile(mc(slots="remote"))
+        self.red_own = ctx.compile(mc(slots="own"))
+
+        # One put / tail / publish per node slot, each on its own signal. Slot m occupies
+        # a contiguous chunk range of the vector, so the existing chunk_lo/chunk_count
+        # slicing covers it. The offsets have to be compile-time (multimem needs a
+        # provably in-bounds region), so this is one kernel per absolute slot and the host
+        # picks which to call -- our own node index is known there.
+        rail = (vec, args.chunks, args.threads, ctx.world_size, self.lws, tl_dtype)
+        self.put_k, self.wait_k, self.sum_k, self.pub_k = [], [], [], []
+        for m in range(self.nodes):
+            self.put_k.append(ctx.compile(
+                rail_put_kernel(*rail, signal_id + m, chunk_lo=m * cps, chunk_count=cps),
+                expect=("tl::gin::put_signal_addr",), gin_contexts=args.gin_contexts))
+            self.wait_k.append(ctx.compile(
+                rail_wait_kernel(*rail, signal_id + m, chunk_count=cps),
+                expect=("tl::gin::wait_signal",), gin_contexts=args.gin_contexts))
+            self.sum_k.append(ctx.compile(
+                allreduce_sum_kernel(vec, shard, args.intra_chunks, args.threads,
+                                     ctx.world_size, self.lws, tl_dtype, m)))
+            self.pub_k.append(ctx.compile(
+                mc_bcast_kernel(*self._mc_args(), slots="all",
+                                tiles_per_cta=args.mc_tiles, node_slot=m)))
+
+        self.inp_mc, self.inp = ctx.mcast_tensor((numel,), torch_dtype)
+        self.out_mc, self.out = ctx.mcast_tensor((numel,), torch_dtype)
+        self.partial = ctx.tensor((vec,), torch_dtype)
+        self.inbox = ctx.tensor((self.nodes * vec,), torch_dtype)
+        self.reduced = ctx.tensor((vec,), torch_dtype)
+        for t in (self.partial, self.inbox, self.reduced, self.out):
+            t.zero_()
+        self.per_slot_signals = (self.nodes - 1) * cps
+        self._stargets = [0] * self.nodes
+        self.my_node = ctx.rank // self.lws
+        # Send the slots we can send first, then ours: red_own is still writing our own
+        # slot while the first put is in flight, and sending it early was a real race --
+        # it corrupted exactly the second half of the output.
+        self.slot_order = [m for m in range(self.nodes) if m != self.my_node] + [self.my_node]
+
+    def launch(self):
+        ctx = self.ctx
+        main_stream = torch.cuda.current_stream()
+        targets = []
+        for m in range(self.nodes):
+            self._stargets[m] += self.per_slot_signals
+            targets.append(self._stargets[m])
+
+        # Reduce the slots the fabric needs first, so the hop starts as early as possible.
+        self.red_remote(self.inp_mc, self.partial, ctx.rank)
+        for m in self.slot_order[:-1]:
+            self.put_k[m](self.partial, self.inbox, ctx.rank, targets[m])
+        # Our own slot: only now may it be sent.
+        self.red_own(self.inp_mc, self.partial, ctx.rank)
+        self.put_k[self.my_node](self.partial, self.inbox, ctx.rank, targets[self.my_node])
+
+        # Per-slot pipeline: sum and publish each slot as its arrival lands, in the order
+        # they were sent, so slot A's NVLink publish overlaps slot B's transfer.
+        for m in self.slot_order:
+            self.wait_k[m](self.inbox, targets[m])
+            self.sum_k[m](self.partial, self.inbox, self.reduced, ctx.rank)
+            self.pub_k[m](self.reduced, self.out_mc, ctx.rank)
+        # We published into every sibling and they into us.
+        dist.barrier(ctx.group)
 
 
 def report_phases(ctx, coll, args):
@@ -699,6 +1063,14 @@ def add_2d_args(parser):
     parser.add_argument("--intra-chunks", type=int, default=1024,
                         help="chunking of the pull path's intra phase; sets its grid, "
                              "and is independent of --chunks because it carries no signal")
+    # 2 measured best on allgather: 472.8 GB/s against 395.2 unsplit (1.53x torch vs
+    # 1.28x). 4 needs --gin-contexts 2 to keep a group's grid a multiple of the context
+    # count, and losing contexts costs more than the extra group gains (434.0). Raising
+    # --chunks to 16 to keep 4 groups at 4 contexts hits the put-size lowering bug.
+    parser.add_argument("--rail-groups", type=int, default=2,
+                        help="split the fabric hop into this many groups so each group's "
+                             "NVLink publish overlaps the next group's transfer; the "
+                             "per-put size is unchanged, only per-group parallelism drops")
     parser.add_argument("--no-overlap", action="store_true",
                         help="run the phases serially, to show what the overlap buys")
     # add_common_args defaults --chunks to 64, which suits the flat collectives. The

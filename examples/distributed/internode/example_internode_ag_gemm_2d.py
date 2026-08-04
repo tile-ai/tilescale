@@ -166,7 +166,7 @@ def main() -> int:
         dist.barrier(ctx.group)
         gemm_node(A_full, B, C, ag.rows_of_node(my_node, M_per_rank))
         main_stream.wait_stream(comm_stream)
-        ag.publish_remote()
+        ag.consume_groups()
         dist.barrier(ctx.group)
         for n in range(nodes):
             if n != my_node:
