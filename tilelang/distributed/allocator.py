@@ -4,6 +4,7 @@ import ctypes
 import ctypes.util
 import contextlib
 import os
+import time
 import operator
 import threading
 import warnings
@@ -450,16 +451,22 @@ class BaseAllocator:
         group_size = dist.get_world_size(group)
         local_exception = None
         result = None
+        _trace = os.environ.get("TL_STAGE_TRACE")
+        _t0 = time.perf_counter() if _trace else 0.0
         try:
             result = operation()
         except Exception as exc:  # noqa: BLE001 - propagated with rank context
             local_exception = exc
+        _t1 = time.perf_counter() if _trace else 0.0
 
         local_status = None
         if local_exception is not None:
             local_status = f"{type(local_exception).__name__}: {local_exception}"
         statuses = [None] * group_size
         dist.all_gather_object(statuses, local_status, group=group)
+        if _trace:
+            print(f"[alloc r{dist.get_rank()}] {_t1 - _t0:6.3f}s work "
+                  f"{time.perf_counter() - _t1:6.3f}s sync  {stage}", flush=True)
         failures = [f"rank {rank}: {status}" for rank, status in enumerate(statuses) if status is not None]
         if failures:
             error = RuntimeError(f"distributed allocator stage '{stage}' failed ({'; '.join(failures)})")

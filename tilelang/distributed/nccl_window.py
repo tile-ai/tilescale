@@ -65,9 +65,14 @@ DEV_COMM_STORAGE_BYTES = 4096
 # (blockIdx.x % count) so concurrent CTAs do not serialize on one channel.
 # Signals and counters are guaranteed to start at id 0, so a kernel can address
 # signal i directly for i < GIN_SIGNAL_COUNT.
-GIN_CONTEXT_COUNT = 8
-GIN_SIGNAL_COUNT = 32
-GIN_COUNTER_COUNT = 32
+# These are what ncclDevCommCreate is asked for, and that call dominates start-up:
+# measured 6.2 s of a 12 s allocator on 16 ranks over two nodes. Each context is a QP per
+# peer, so asking for fewer is the main lever on bootstrap latency -- hence the overrides.
+# Note the count is a *hint*: 8 requested yields 4 here, which is why the device divides
+# wait targets by its own context_span() rather than trusting the request.
+GIN_CONTEXT_COUNT = int(os.environ.get("TILESCALE_GIN_CONTEXTS", "8"))
+GIN_SIGNAL_COUNT = int(os.environ.get("TILESCALE_GIN_SIGNALS", "32"))
+GIN_COUNTER_COUNT = int(os.environ.get("TILESCALE_GIN_COUNTERS", "32"))
 
 
 class _DevCommRequirements(ctypes.Structure):

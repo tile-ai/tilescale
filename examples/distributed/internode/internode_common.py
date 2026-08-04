@@ -253,7 +253,11 @@ class Context:
     """Process group, allocator and topology for one rank."""
 
     def __init__(self, arena_bytes: int = 1 << 30, mcast_bytes: int = 0):
+        import time
+
         from tilelang.distributed.host import init_dist
+
+        self._t0 = time.perf_counter()
 
         self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
         self.local_world_size = int(
@@ -263,7 +267,8 @@ class Context:
         # (which creates the GIN devcomm and registers the arena window) and
         # compile are all collective; without markers they are one opaque block.
         if os.environ.get("TL_STAGE_TRACE"):
-            print(f"[rank?] init_dist: enter local_rank={self.local_rank}", flush=True)
+            print(f"[rank?] +  0.00s init_dist: enter local_rank={self.local_rank}",
+                  flush=True)
         self.rank, self.world_size, self.group, self.node_info = init_dist(
             self.local_rank, self.local_world_size, return_node_info=True
         )
@@ -335,7 +340,10 @@ class Context:
         undiagnosable. Enabled by TL_STAGE_TRACE=1 to keep normal runs quiet.
         """
         if os.environ.get("TL_STAGE_TRACE"):
-            print(f"[rank{self.rank}] {msg}", flush=True)
+            import time
+
+            dt = time.perf_counter() - getattr(self, "_t0", time.perf_counter())
+            print(f"[rank{getattr(self, 'rank', '?')}] +{dt:6.2f}s {msg}", flush=True)
 
     def compile(self, func, *, expect: tuple[str, ...] = (), gin_contexts: int | None = None,
                 wait_ctx0: bool = False):
