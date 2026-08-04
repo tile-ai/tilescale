@@ -409,6 +409,33 @@ def check(ctx: Context, got: torch.Tensor, want: torch.Tensor, name: str) -> int
     return failures
 
 
+def bench_vs_torch(ctx: Context, args, name: str, launch, run_ref, moved: int,
+                   tflops: float = 0.0) -> None:
+    """Time ours against torch, with torch measured *both* before and after.
+
+    On a shared cluster torch's NCCL reading is cold on its first use and drifts with
+    other tenants' traffic on the same NICs -- by more than the effect being measured.
+    The first configuration of a batched sweep reads 131-186 GB/s where every later one
+    reads ~309. So both readings are printed: if they disagree, discard the ratio.
+    """
+    from tilelang.distributed.bench import do_bench
+
+    dist.barrier(ctx.group)
+    pre_ms = do_bench(run_ref, warmup=args.warmup, rep=args.rep, group=ctx.group)
+    tl_ms = do_bench(launch, warmup=args.warmup, rep=args.rep, group=ctx.group)
+    post_ms = do_bench(run_ref, warmup=args.warmup, rep=args.rep, group=ctx.group)
+    ref_ms = min(pre_ms, post_ms)
+    if tflops:
+        ctx.log(
+            f"{name:16s} tilescale {tl_ms:8.3f} ms {tflops / (tl_ms * 1e-3):7.1f} TF"
+            f" | torch {ref_ms:8.3f} ms {tflops / (ref_ms * 1e-3):7.1f} TF"
+            f" | speedup {ref_ms / tl_ms:6.2f}x"
+        )
+    else:
+        report(ctx, name, tl_ms, ref_ms, moved)
+    ctx.log(f"  torch reps: {pre_ms:.3f} / {post_ms:.3f} ms (drift shows contention)")
+
+
 def report(ctx: Context, name: str, tl_ms: float, ref_ms: float, moved_bytes: int) -> None:
     """Print both timings plus the bus bandwidth each implies.
 
