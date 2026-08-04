@@ -16,6 +16,18 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cerrno>
+#include <sys/syscall.h>
+#include <unistd.h>
+
+// Older glibc does not wrap these, and there is no libc entry point for either,
+// so they are always called through syscall().
+#ifndef SYS_pidfd_open
+#define SYS_pidfd_open 434
+#endif
+#ifndef SYS_pidfd_getfd
+#define SYS_pidfd_getfd 438
+#endif
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -638,6 +650,100 @@ static int64_t open_vmm_handle_impl(ffi::Bytes handle_bytes) {
 
 static void close_vmm_handle_impl(int64_t ptr_val) { vmm_free_impl(ptr_val); }
 
+// ---------- VMM handle export/import over a POSIX file descriptor ----------
+//
+// The fabric path above needs an IMEX channel. Without one the arena is still a
+// VMM allocation -- so GIN windows register fine -- but it is created with
+// CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR and cannot be exported as a fabric
+// handle, which leaves intra-node peer mapping dead. That is fatal for any
+// hierarchical collective: without peer pointers the intra-node half of a 2D
+// algorithm has to fall back to the NIC.
+//
+// A POSIX-FD handle is an ordinary file descriptor, meaningful only inside the
+// owning process, so it has to be duplicated into the importer. The usual way is
+// SCM_RIGHTS over a unix socket, which needs a rendezvous directory and a
+// connect/accept dance between every pair of ranks. pidfd_getfd does the same job
+// in two syscalls with no rendezvous: publish (pid, fd) through the process group
+// that already exists, then steal the descriptor directly. It needs ptrace-level
+// access to the peer, which holds for ranks of one job under one user.
+static ffi::Bytes create_vmm_fd_handle_impl(int64_t ptr_val) {
+  void *ptr = reinterpret_cast<void *>(checked_address(ptr_val, "ptr"));
+  CUmemGenericAllocationHandle handle;
+  SM_CU_CHECK(cuMemRetainAllocationHandle(&handle, ptr));
+  ScopedGenericAllocationHandle handle_guard(handle);
+
+  size_t size = 0;
+  SM_CU_CHECK(cuMemGetAddressRange_v2(NULL, &size, (CUdeviceptr)ptr));
+
+  int fd = -1;
+  SM_CU_CHECK(cuMemExportToShareableHandle(
+      &fd, handle, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0));
+  SM_CU_CHECK(cuMemRelease(handle));
+  handle_guard.Disarm();
+
+  // The fd stays open for the process lifetime: peers may import at any point
+  // before the arena is torn down, and closing it here would invalidate them.
+  const int64_t pid = static_cast<int64_t>(getpid());
+  std::string raw(sizeof(size_t) + sizeof(int64_t) + sizeof(int), '\0');
+  std::memcpy(&raw[0], &size, sizeof(size_t));
+  std::memcpy(&raw[sizeof(size_t)], &pid, sizeof(int64_t));
+  std::memcpy(&raw[sizeof(size_t) + sizeof(int64_t)], &fd, sizeof(int));
+  return ffi::Bytes(raw);
+}
+
+static int64_t open_vmm_fd_handle_impl(ffi::Bytes handle_bytes) {
+  check_exact_bytes(handle_bytes,
+                    sizeof(size_t) + sizeof(int64_t) + sizeof(int),
+                    "handle_bytes");
+  const char *data = handle_bytes.data();
+  size_t size = 0;
+  int64_t peer_pid = 0;
+  int peer_fd = -1;
+  std::memcpy(&size, data, sizeof(size_t));
+  std::memcpy(&peer_pid, data + sizeof(size_t), sizeof(int64_t));
+  std::memcpy(&peer_fd, data + sizeof(size_t) + sizeof(int64_t), sizeof(int));
+  size = checked_serialized_size(size, "serialized allocation size");
+
+  const int pidfd = static_cast<int>(
+      syscall(SYS_pidfd_open, static_cast<pid_t>(peer_pid), 0u));
+  if (pidfd < 0) {
+    TVM_FFI_THROW(InternalError)
+        << "pidfd_open(" << peer_pid << ") failed: " << std::strerror(errno)
+        << ". Intra-node VMM sharing needs either an IMEX channel (for fabric "
+           "handles) or ptrace-level access to sibling ranks.";
+  }
+  const int local_fd =
+      static_cast<int>(syscall(SYS_pidfd_getfd, pidfd, peer_fd, 0u));
+  const int getfd_errno = errno;
+  close(pidfd);
+  if (local_fd < 0) {
+    TVM_FFI_THROW(InternalError)
+        << "pidfd_getfd(pid=" << peer_pid << ", fd=" << peer_fd
+        << ") failed: " << std::strerror(getfd_errno);
+  }
+
+  CUmemGenericAllocationHandle alloc_handle;
+  const CUresult import_rc = cuMemImportFromShareableHandle(
+      &alloc_handle, reinterpret_cast<void *>(static_cast<uintptr_t>(local_fd)),
+      CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR);
+  // CUDA duplicates what it needs; the stolen descriptor is ours to release.
+  close(local_fd);
+  SM_CU_CHECK(import_rc);
+  ScopedGenericAllocationHandle handle_guard(alloc_handle);
+
+  CUdeviceptr ptr = 0;
+  SM_CU_CHECK(cuMemAddressReserve(&ptr, size, 0, 0, 0));
+  ScopedVirtualAddress address_guard(ptr, size);
+  SM_CU_CHECK(cuMemMap(ptr, size, 0, alloc_handle, 0));
+  address_guard.MarkMapped();
+  cu_mem_set_access_all(reinterpret_cast<void *>((uintptr_t)ptr), size);
+  SM_CU_CHECK(cuMemRelease(alloc_handle));
+  handle_guard.Disarm();
+  const int64_t result = checked_output_address(ptr, "open_vmm_fd_handle");
+  address_guard.Disarm();
+  return result;
+}
+
 // ---------- IPC handle ----------
 
 static ffi::Bytes create_ipc_handle_impl(int64_t ptr_val) {
@@ -1030,6 +1136,10 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                         close_vmm_handle_impl);
   refl::GlobalDef().def("tl.shared_memory.sync_vmm_handles",
                         sync_vmm_handles_impl);
+  refl::GlobalDef().def("tl.shared_memory.create_vmm_fd_handle",
+                        create_vmm_fd_handle_impl);
+  refl::GlobalDef().def("tl.shared_memory.open_vmm_fd_handle",
+                        open_vmm_fd_handle_impl);
 
   // IPC
   refl::GlobalDef().def("tl.shared_memory.create_ipc_handle",

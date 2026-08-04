@@ -23,6 +23,8 @@ from tilelang.distributed.shared_memory import (
     _close_vmm_handle,
     _supports_vmm,
     _supports_vmm_fabric,
+    _create_vmm_fd_handle,
+    _open_vmm_fd_handle,
     _supports_multicast,
     _mc_create,
     _mc_export_handle,
@@ -864,10 +866,29 @@ class BaseAllocator:
         # with a POSIX-FD handle type (the fallback when no IMEX channel exists)
         # cannot be exported as a fabric handle. Skipping keeps a GIN-only run
         # working on nodes where intra-node peer mapping is unavailable.
-        skip_peer_handles = self._group_size == 1
+        #
+        # TILESCALE_SKIP_PEER_IPC=1 extends that to multi-rank nodes, for kernels
+        # that reach every peer through GIN and never dereference a peer pointer.
+        # The cost is real: peer base pointers stay zero, so every intra-node
+        # primitive that resolves a peer address (push/pull, remote TMA, the
+        # multimem paths) is unusable, which rules out any hierarchical
+        # collective. Prefer the POSIX-FD path below.
+        skip_peer_handles = (
+            self._group_size == 1 or os.environ.get("TILESCALE_SKIP_PEER_IPC") == "1"
+        )
+
+        # Which VMM export to use for intra-node mapping. Fabric handles need an
+        # IMEX channel; where there is none the arena is created with a POSIX-FD
+        # handle type, which cannot be exported as fabric at all
+        # (cuMemExportToShareableHandle -> "invalid argument"). The FD path shares
+        # that same allocation by publishing (pid, fd) and having peers duplicate
+        # the descriptor with pidfd_getfd, so 8 ranks per node work without IMEX.
+        use_fd_export = self._use_vmm and not _supports_vmm_fabric()
 
         def create_handle():
             if self._use_vmm:
+                if use_fd_export:
+                    return _create_vmm_fd_handle(self._base_ptr.value)
                 return _create_vmm_handle(self._base_ptr.value)
             return _create_ipc_handle(self._base_ptr.value)
 
@@ -896,7 +917,10 @@ class BaseAllocator:
                 elif skip_peer_handles:
                     continue
                 elif self._use_vmm:
-                    self._peer_ptr_values[peer_rank] = _open_vmm_handle(handle)
+                    self._peer_ptr_values[peer_rank] = (
+                        _open_vmm_fd_handle(handle) if use_fd_export
+                        else _open_vmm_handle(handle)
+                    )
                 else:
                     self._peer_ptr_values[peer_rank] = _open_ipc_handle(handle)
 

@@ -45,6 +45,11 @@ _create_vmm_handle = _get_required_global_func("tl.shared_memory.create_vmm_hand
 _open_vmm_handle = _get_required_global_func("tl.shared_memory.open_vmm_handle")
 _close_vmm_handle = _get_required_global_func("tl.shared_memory.close_vmm_handle")
 _sync_vmm_handles_raw = _get_required_global_func("tl.shared_memory.sync_vmm_handles")
+# POSIX-FD export/import, for nodes with no IMEX channel where a fabric handle
+# cannot be created. Capability-style lookup so an older native library still
+# imports.
+_create_vmm_fd_handle = _get_required_global_func("tl.shared_memory.create_vmm_fd_handle")
+_open_vmm_fd_handle = _get_required_global_func("tl.shared_memory.open_vmm_fd_handle")
 
 _create_ipc_handle = _get_required_global_func("tl.shared_memory.create_ipc_handle")
 _open_ipc_handle = _get_required_global_func("tl.shared_memory.open_ipc_handle")
@@ -291,6 +296,8 @@ __all__ = [
     "_vmm_malloc",
     "_vmm_free",
     "_create_vmm_handle",
+    "_create_vmm_fd_handle",
+    "_open_vmm_fd_handle",
     "_open_vmm_handle",
     "_close_vmm_handle",
     "_sync_vmm_handles",

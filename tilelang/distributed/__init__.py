@@ -23,6 +23,8 @@ _EXPORTS = {
     "_sync_ipc_handles": (".shared_memory", "_sync_ipc_handles"),
     "_supports_vmm": (".shared_memory", "_supports_vmm"),
     "_supports_vmm_fabric": (".shared_memory", "_supports_vmm_fabric"),
+    "_create_vmm_fd_handle": (".shared_memory", "_create_vmm_fd_handle"),
+    "_open_vmm_fd_handle": (".shared_memory", "_open_vmm_fd_handle"),
     "_vmm_malloc": (".shared_memory", "_vmm_malloc"),
     "_vmm_free": (".shared_memory", "_vmm_free"),
     "_create_vmm_handle": (".shared_memory", "_create_vmm_handle"),
