@@ -33,29 +33,18 @@ those two legs are almost perfectly balanced at 8 GPUs against 8 400-Gbps NICs. 
 remaining gap is that the second intra-node phase cannot start until the fabric hop
 has landed; see ``Allgather2D`` for what overlaps and what does not.
 
-Four traps worth knowing before editing any of this
----------------------------------------------------
-1. **``src_pe``/``dst_pe`` are GLOBAL ranks.** ``get_remote_base_ptr`` returns 0 for a
-   peer it considers inter-node, so a *local* rank yields a null base and faults --
-   but only on nodes other than node 0, where the two numberings coincide.
-2. **A multimem tile is exactly ``2 * threads`` wide, and that is not tunable.** bf16
-   lowers to packed x2, so the staging fragment must be one contiguous pair per
-   thread; any other width lets the paired ``T.copy`` infer a wider vectorisation and
-   layout inference fails with "requires the local fragment layout to preserve
-   canonical pair ownership". Work per thread therefore has to come from
-   ``tiles_per_cta``, and it matters a lot: 1 tile gives 317 GB/s, 32 gives ~400.
-3. **Never wait on a signal from inside a large-grid kernel.** The tempting fused shape --
-   some CTAs of a GEMM grid issue the puts while the rest wait on the signal -- deadlocks
-   as soon as the grid stops being co-resident: a waiting CTA occupies an SM, and if the
-   CTAs that would issue the puts are still queued behind it, nothing progresses. A GEMM
-   grid is far larger than what fits at once, so that is the default rather than the
-   exception. Capping the grid at one CTA per SM fixes the hang and measured *slower* than
-   not overlapping at all. Overlap with separate streams instead (which is what
-   ``Allgather2D``'s side stream and the fused examples' ``--mode`` flags do), or with a
-   device-side signal in a small-grid kernel like ``rail_wait_kernel``.
-4. **``wait_signal`` divides the grid-wide target by the granted GIN context count**,
-   so a rail grid smaller than that count rounds the target down -- to 0 in the worst
-   case, which turns the wait into a silent no-op. Keep ``chunks % gin_contexts == 0``.
+Traps
+-----
+``docs/distributed_api_reference.md`` documents the ones that belong to the APIs
+themselves: peer arguments are global ranks, GIN signals are cumulative and
+per-context, a multimem region must be one contiguous pair per thread with a
+compile-time offset, and waiting on a signal inside a large-grid kernel
+deadlocks. The one specific to this module:
+
+**Keep the per-put size constant when splitting the fabric hop.** ``--rail-groups``
+divides the hop into groups that each keep the same message size and simply use
+fewer concurrent CTAs. Splitting the payload into more, smaller messages instead
+measured 4x slower, because RDMA is bandwidth-bound only once messages are large.
 """
 
 # NOTE: no `from __future__ import annotations` here. T.prim_func resolves parameter
@@ -115,14 +104,11 @@ def rail_put_kernel(
 ):
     """Rail-aligned put of one shard to the same local index on every other node.
 
-    ``chunk_lo``/``chunk_count`` restrict the launch to a slice of the shard, for the
-    pipelined path: the grid becomes ``chunk_count`` CTAs covering chunks
-    ``[chunk_lo, chunk_lo + chunk_count)``. **The per-put size is unchanged** -- only the
-    number of concurrent puts drops -- which is the whole point. An earlier attempt at
-    pipelining split the shard into more, smaller messages and came out 4x slower,
-    because RDMA is bandwidth-bound only once messages are large.
+    ``chunk_lo``/``chunk_count`` restrict the launch to chunks
+    ``[chunk_lo, chunk_lo + chunk_count)``, keeping the per-put size and dropping only the
+    number of concurrent puts -- see the module docstring on why that distinction matters.
 
-    The inbox is indexed by *sender node*, which keeps slots disjoint with no rotation
+    The inbox is indexed by *sender node*, so slots stay disjoint with no rotation
     arithmetic: only rank ``(n, l)`` ever writes our slot ``n``.
 
     ``src_per_node`` selects what is sent. Allgather sends the same shard to every rail
@@ -173,15 +159,11 @@ def rail_wait_kernel(
 ):
     """Wait for one group's rail arrivals, nothing else.
 
-    Separate from the put so a group's puts can be issued and the CTAs retire, leaving
-    the RDMA in flight while the previous group's data is published over NVLink.
+    Separate from the put so a group's puts can be issued and its CTAs retire, leaving the
+    RDMA in flight while the previous group is published over NVLink.
 
-    The grid must match the *sender's* chunk count. ``wait_signal`` divides the target by
-    the granted GIN context count, and a put issued from sender CTA ``b`` increments the
-    receiver's signal through context ``b % contexts`` -- so a wait grid wider than the
-    sender's would park CTAs on contexts nothing ever signals, and a narrower one would
-    round the target down. Hence ``chunks % gin_contexts == 0`` per group, checked host
-    side.
+    The grid must match the *sender's* chunk count, for the per-context signal reason in
+    the API reference; hence ``chunks % gin_contexts == 0`` per group, checked host side.
     """
     nodes = world_size // local_world_size
     grid = chunk_count or chunks
@@ -296,10 +278,8 @@ def mc_bcast_kernel(
     """Publish the shards we own into every local rank's slot with one ``multimem.st``.
 
     ``span_numel``/``elem_lo`` publish only that slice of each shard, for the pipelined
-    path. Both are **compile-time**: multimem lowering has to prove the multicast region
-    is in bounds, and a runtime offset defeats that with "multimem packed multicast region
-    must be provably in bounds or use a tile-aligned all-or-none dynamic partition". So a
-    group gets its own compiled kernel rather than an offset argument.
+    path. Both are compile-time because the multicast region must be provably in bounds,
+    so a group gets its own compiled kernel rather than an offset argument.
 
     ``slots="own"`` publishes our own shard, which exists before the collective starts
     and so is ordered against nothing. ``slots="remote"`` publishes what arrived over
@@ -510,22 +490,16 @@ def workable_chunks(shard_numel, threads, world_size, local_world_size, dtype,
                     chunks, gin_contexts, log=None):
     """Largest chunk count <= ``chunks`` whose put size actually lowers.
 
-    ``put_signal`` fails with "Can't fetch the lanes of a scalable vector at a compile
-    time" for a non-contiguous set of transfer sizes, characterised in
-    debug_put_size_lowering.py. Which sizes those are depends on ``numel``, so perfectly
-    ordinary buffer lengths are otherwise unusable: 240 MB works at ``--chunks 8`` while
-    120 MB does not, because its 491520-element put lands in the bad set.
+    Some ``put_signal`` sizes fail to lower (see the API reference); which ones depends on
+    ``numel``, so ordinary buffer lengths are otherwise unusable -- 240 MB works at
+    ``--chunks 8`` while 120 MB does not, its 491520-element put landing in the bad set.
+    Halving the count doubles the put size and moves off it, and larger puts suit RDMA
+    anyway.
 
-    Halving the count doubles the put size and moves off the bad value -- and larger puts
-    are what RDMA wants anyway.
-
-    Probed with a plain ``tilelang.compile`` rather than ``ctx.compile``. Not because a
-    collective compile cannot report a failure -- ``_maybe_compile_once`` does ship the
-    root's traceback through its ``all_gather_object``, so a root lowering failure fails
-    cleanly on every rank. The reason is that each node runs a different interpreter and
-    NCCL (see run_internode.sh), so "every rank rejects the same size" is an assumption
-    about two toolchains rather than a guarantee; probing locally keeps the retry loop from
-    depending on it.
+    Probed with a plain ``tilelang.compile``, not ``ctx.compile``: each node runs a
+    different interpreter and NCCL, so "every rank rejects the same size" is an assumption
+    about two toolchains rather than a guarantee, and probing locally keeps the retry loop
+    from depending on it.
     """
     while True:
         try:

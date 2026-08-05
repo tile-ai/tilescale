@@ -9,46 +9,31 @@ is the multicast allocation -- so there is no copy between compute and communica
 That is the one integration detail worth noting: ``ReduceScatter2D.inp`` is this rank's
 own view of that buffer, and it is a perfectly ordinary tensor to write into.
 
-``--mode pipeline``: overlap by node slot, the way triton-dist swizzles tiles
----------------------------------------------------------------------------
+``--mode pipeline``: overlap by node slot, adapted from triton-dist's tile swizzle
+--------------------------------------------------------------------------------
 The dependency runs the wrong way for the trick AG-GEMM uses -- here the GEMM *produces*
 what is sent -- but it can still be split. Output row block *g* belongs to global rank *g*,
-and the ranks of one node occupy a **contiguous** block of ``M``. So compute the rows the
-*other* node needs first, hand them to the fabric, and compute our own node's rows while
-they fly.
+and one node's ranks occupy a contiguous block of ``M``, so compute the rows the *other*
+node needs first, hand them to the fabric, and compute our own while they fly.
 
-That remote-first ordering is Triton-distributed's idea: their
-``swizzle_tiled_m_with_padding`` renumbers GEMM tiles so a rank computes the block belonging
-to rank *r+1* first and its own last, precisely so the transfers that must happen can start
-earliest.
+That remote-first ordering is Triton-distributed's ``swizzle_tiled_m_with_padding``, which
+renumbers GEMM tiles so a rank computes rank *r+1*'s block first and its own last. **Their
+exact swizzle does not transfer**: theirs rotates per rank, which suits per-peer pushes where
+every block has one destination, whereas ``multimem.ld_reduce`` needs *every* local rank to
+have written a segment, so a per-rank rotation leaves each rank ready on a segment its
+siblings are not. Ours needs the same idea at coarser grain in a *common* order, one barrier
+per node slot.
 
-**Their exact swizzle does not transfer, and the reason is the reduce mechanism.** Theirs
-rotates *per rank*, which is right for per-peer pushes: every finished block has a single
-destination, and staggering the rotation spreads the senders. Ours reduces through the
-NVSwitch, and ``multimem.ld_reduce`` on a segment needs **every local rank** to have written
-it -- so a per-rank rotation would leave each rank ready on a segment its siblings are not.
-What ours needs is the same idea at coarser grain and in a *common* order: all ranks walk the
-node slots identically, with one barrier per slot.
+**And it loses, so ``serial`` stays the default.** At ``k-per-rank 2048`` serial 0.334 ms /
+411 TF against pipeline 0.365 / 376; at 4096, serial 0.429 / 640 against 0.476 / 578. Two
+costs swallow the gain: the two barriers are ~30-50 us each, and splitting one GEMM into two
+half-height launches worsens the persistent tcgen05 grid's wave quantisation. Together they
+exceed the fabric time hidden -- even though comm (~0.237 ms, near-fixed since the output is
+``M*N`` whatever ``K`` is) and compute (0.031 ms at K/rank 512 rising to ~0.248 at 4096) are
+comparable at the larger shapes.
 
-**And it loses, so ``serial`` stays the default.** Measured: at ``k-per-rank 2048`` serial
-0.334 ms / 411 TF against pipeline 0.365 / 376; at 4096, serial 0.429 / 640 against pipeline
-0.476 / 578. Roughly 10% worse at both, despite comm (~0.237 ms, near-fixed) and compute
-(0.031 ms at K/rank 512 rising to ~0.248 at 4096) being comparable at the larger shapes --
-which is exactly the regime overlap should win.
-
-Two costs swallow the gain. The two ``dist.barrier`` calls are ~30-50 us each of pure
-serialisation, and splitting one GEMM into two half-height launches hurts the persistent
-tcgen05 grid, whose wave quantisation over ``M/2`` rows is worse than over ``M``. Together
-they exceed the fabric time being hidden.
-
-The flag stays because the balance moves with shape and with barrier cost: replace the host
-barriers with a device-side arrive/wait on a symmetric flag and this should invert. That is
-the same conclusion three separate overlap attempts have reached -- see CLAUDE.md.
-
-The earlier flat attempt at this mismatched 5.9M of 8.4M elements because the collective also
-folded in this rank's own contribution and read a block not yet written. What makes it safe
-here is that the barrier is per node slot and the own-slot reduce happens after its rows are
-computed, so nothing is read early.
+The flag stays because the balance moves with barrier cost: with a device-side barrier this
+should invert. Three overlap attempts have now reached that same conclusion.
 """
 
 # NOTE: no `from __future__ import annotations` here -- see internode_2d.

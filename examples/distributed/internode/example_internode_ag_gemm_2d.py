@@ -18,33 +18,25 @@ Three modes:
   alone -- they never touch the fabric -- so half the GEMM (at 2 nodes) runs while the
   fabric hop is still in flight.
 
-What is being hidden, and why this arrangement rather than an in-kernel wait
----------------------------------------------------------------------------
+What is being hidden
+--------------------
 Unfused torch is ``all_gather`` then ``matmul``, strictly serial: 0.204 + 0.170 ms at the
-default shape. Serial fusion only inherits the collective's advantage (0.156 + 0.183 =
-0.339, about 1.10x). The prize is overlap: with the fabric hop hidden under compute the
-floor is ``max(comm, gemm)``, and cuBLAS being 8% faster than our GEMM in isolation stops
-mattering because that GEMM is covering the network.
+default shape. Serial fusion only inherits the collective's advantage. Overlap puts the
+floor at ``max(comm, gemm)``, which also stops cuBLAS being 8% faster than our GEMM from
+mattering, since that GEMM is covering the network.
 
-``pipeline`` gets at that with nothing but stream and event ordering over the collective's
-existing steps, plus one extra barrier -- so it reuses only kernels that are already
-verified, and its correctness rests on the barriers rather than on new signalling.
-
-Measured at 16 GPUs, M=8192 N=4096 K=4096, and the ordering *inverted* once the collective
+Measured at 16 GPUs, M=8192 N=4096 K=4096, and the ordering **inverted** once the collective
 got faster: with the slower collective pipeline 0.430 ms beat serial 0.481; with rail-group
-pipelining in place, serial 0.373 (736.8 TF) beats pipeline 0.441 (622.9) against unfused
-torch's 0.500 (550.0) -- 1.34x against 1.13x. Deliberately **not** an in-kernel signal wait:
-that deadlocked before, because a 2048-CTA GEMM grid fills every SM with CTAs waiting on
-a signal and the comm kernel never gets scheduled. Capping the GEMM at 132 persistent CTAs
-fixed the hang and was *slower than serial*. Doing it properly needs an SM partition like
-Triton-distributed's ``num_sync_sms``/``num_p2p_sms``, which is not something to tune
-blind.
+pipelining, serial 0.373 (736.8 TF) beats pipeline 0.441 (622.9) against torch's 0.500
+(550.0) -- 1.34x against 1.13x. Less exposed fabric leaves less to hide, and the extra
+barrier and split launches stop paying. Re-measure whenever the collective changes.
 
-Multimem only: on the pull path ``publish_own`` reads siblings' shards rather than writing
-to them, so the ordering is different. Falls back to ``overlap`` there.
+Done with stream and event ordering, never an in-kernel signal wait: see the deadlock note
+in the API reference. Multimem only -- on the pull path ``publish_own`` reads siblings'
+shards rather than writing to them, so the ordering differs; falls back to ``overlap``.
 
-Note the GEMM wants 256 threads, not the collective's 1024, or warp specialisation
-overflows the block limit.
+The GEMM wants 256 threads, not the collective's 1024, or warp specialisation overflows the
+block limit.
 """
 
 # NOTE: no `from __future__ import annotations` here -- see internode_2d.

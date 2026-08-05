@@ -1,10 +1,14 @@
 # TileScale Distributed API Reference
 
-TileScale extends TileLang with experimental single-node, multi-GPU CUDA
-primitives. The supported process model is one process per local GPU on one
-host, using an NCCL process group for host-side coordination. Multi-node
-execution, NVSHMEM, and a general-purpose distributed runtime are outside the
-current scope.
+TileScale extends TileLang with experimental multi-GPU CUDA primitives. The
+supported process model is one process per local GPU, using an NCCL process
+group for host-side coordination.
+
+Multi-node execution is supported through the NCCL Device API ("GIN",
+GPU-Initiated Networking), which exposes one-sided RDMA callable from inside a
+kernel. Intra-node peers keep using IPC or VMM peer pointers; inter-node peers
+are reached through a registered NCCL window instead. NVSHMEM and a
+general-purpose distributed runtime remain outside the current scope.
 
 The Python distribution is `tilescale`, while the import namespace remains
 `tilelang`. Install the optional host dependencies with
@@ -18,11 +22,17 @@ The available memory path depends on the host and visible GPUs:
 |------|--------------|-----------|
 | CUDA IPC | Same host, CUDA peer access between participating GPUs | Used when VMM is disabled or unavailable |
 | VMM fabric | CUDA driver API 12.4 or newer, fabric-handle support on every visible GPU, and an accessible NVIDIA IMEX channel | Auto-selected for distributed allocators when the runtime probe succeeds |
-| Multicast | VMM fabric requirements plus multicast-capable GPUs and fabric, normally an NVSwitch system | Enabled only when `mcast_size` is explicitly requested |
+| Multicast | A VMM allocator plus multicast-capable GPUs, normally an NVSwitch system. Fabric handles are *not* required: without an IMEX channel the multicast object is shared as a POSIX file descriptor | Enabled only when `mcast_size` is explicitly requested |
+| GIN (inter-node) | NCCL 2.28.7 or newer with `nccl_device/gin.h` and `ncclDevCommCreate`, a VMM-backed arena, and a working RDMA fabric | Attempted automatically when more than one node is detected; `TILESCALE_USE_GIN=1` makes an unavailable Device API a hard error |
 
 `_supports_vmm_fabric()` and `_supports_multicast()` are runtime probes, not
 portable feature guarantees. Both inspect all CUDA-visible devices, so set
 `CUDA_VISIBLE_DEVICES` to the exact local rank set before starting processes.
+
+Both probes reach `cuCtxGetDevice` and therefore report `False` with no current
+CUDA context. `cuInit` plus a primary-context retain is not sufficient; force a
+context first (for example `torch.zeros(1, device="cuda")`) or a capable machine
+will be misreported as incapable.
 
 Fabric handles require an NVIDIA IMEX channel that is accessible inside the
 host or container. On a compatible Linux driver installation, an administrator
@@ -48,10 +58,25 @@ rank, world_size, group = init_dist(
     num_local_ranks,
     master_port=None,
 )
+
+rank, world_size, group, node_info = init_dist(
+    local_rank,
+    num_local_ranks,
+    return_node_info=True,
+)
 ```
 
 `init_dist` sets `cuda:local_rank`, creates an NCCL process group, and returns
-its rank, size, and `dist.group.WORLD`.
+its rank, size, and `dist.group.WORLD`. With `return_node_info=True` it also
+returns a `NodeTopology` describing `num_nodes`, `node_rank`, `local_rank` and
+`local_world_size`, which the allocator needs to decide whether to set up GIN.
+Pass it on as `get_allocator(..., node_info=node_info)`.
+
+Topology is read from torchrun-style `LOCAL_WORLD_SIZE`/`GROUP_RANK` when those
+are present, and otherwise from `NNODES`/`NODE_RANK`.
+
+`init_dist` sets `NCCL_IB_DISABLE=1` by default. **Clear it for any inter-node
+run**, or NCCL will refuse to use the RDMA fabric that GIN depends on.
 
 The current implementation requires a contiguous rank-to-device mapping:
 process rank `i` uses CUDA ordinal `i`, and participating devices must appear
@@ -87,6 +112,25 @@ set the variable.
 
 Port precedence is: `master_port` argument, `TILESCALE_MASTER_PORT`,
 `MASTER_PORT`, then `8361`.
+
+Multi-node launches additionally need `WORLD_SIZE`, `LOCAL_WORLD_SIZE`, and
+either `NNODES`/`NODE_RANK` or torchrun's `GROUP_RANK`, with `MASTER_ADDR` set to
+an address the other nodes can reach. `NCCL_IB_DISABLE` must be cleared.
+
+Variables read outside `init_dist`:
+
+| Variable | Effective default | Behavior |
+|----------|-------------------|----------|
+| `TILESCALE_USE_VMM` | unset | `1` forces VMM, any other value forces CUDA IPC |
+| `TILESCALE_USE_GIN` | unset | `1` requests arena window registration even on a single node, and makes an unavailable Device API a hard error rather than a warning |
+| `TILESCALE_NCCL_LIB` | unset | Path to a GIN-capable `libnccl.so.2`, for when the ambient NCCL predates the Device API |
+| `TILESCALE_GIN_CONTEXTS` | `8` | Requested `ginContextCount`. One context is one QP per peer; the count is a hint and may be granted in part |
+| `TILESCALE_GIN_SIGNALS` | `32` | Requested `ginSignalCount`, i.e. how many independent signals a kernel may use |
+| `TILESCALE_GIN_COUNTERS` | `32` | Requested `ginCounterCount` |
+
+The GIN resource counts affect device memory but not start-up latency:
+`ncclDevCommCreate` measures the same at 1, 4 and 8 contexts, because its cost is
+transport initialisation rather than per-context setup.
 
 ## Distributed Allocator
 
@@ -129,6 +173,14 @@ The selection order is:
 
 Forcing VMM does not provide an IPC fallback if fabric allocation fails.
 
+GIN requires a VMM allocator: `ncclCommWindowRegister` rejects `cudaMalloc`
+memory, so window registration fails with the IPC backend. When fabric handles
+are unavailable the arena is still VMM-backed, created with
+`CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR` and shared between local ranks by
+duplicating that descriptor with `pidfd_getfd`. That path needs ptrace-level
+access to sibling ranks (true for one job under one user) and a kernel with
+`pidfd_getfd`, i.e. Linux 5.6 or newer.
+
 ### Multicast Allocation
 
 Passing `mcast_size` requires a distributed VMM allocator and a successful
@@ -137,6 +189,22 @@ multicast capability probe. The internal
 `(multicast_view, local_physical_view)`. The multicast view is used by multimem
 instructions; each rank writes its own contribution through the local physical
 view.
+
+The multicast buffer is a **separate allocation from the arena**, and only the
+arena is registered as an NCCL window. Anything a GIN put reads or writes must
+therefore come from `tilelang.tensor(..., allocator=...)`, not from
+`_allocate_mcast_tensor`. A kernel that reduces through the switch and then
+sends over the fabric needs one buffer of each.
+
+`mcast_size` is the total multicast capacity and is consumed by a bump pointer
+with no free, so size it for every multicast tensor the process will allocate.
+A caller that allocates two (an allreduce reducing its input and broadcasting
+its output, for instance) must request both up front.
+
+Sharing the multicast object across processes uses fabric handles when an IMEX
+channel is available and POSIX file descriptors otherwise; `_multicast_uses_fd()`
+reports which route the C++ side selected, so the allocator does not re-probe
+and risk disagreeing with it.
 
 `allocator.close()` must be called collectively before destroying the process
 group, especially for multicast allocations. The allocator is also a context
@@ -239,6 +307,46 @@ GPU-local and cross-block barrier helpers include `T.init_barrier_gpu`,
 `T.barrier_blocks`, and `T.sync_blocks`. Cross-GPU correctness still depends on
 using peer-visible storage and the appropriate system-scope ordering.
 
+### GIN Inter-Node Operations
+
+These lower to the NCCL Device API and are the only kernel-side path to a peer
+on another node. They live under `T.nccl_gin.*` and require the allocator to
+have registered its arena as an NCCL window.
+
+| API | Purpose |
+|-----|---------|
+| `T.nccl_gin.put(src, dst, size, peer, scope="block")` | One-sided RDMA write into `peer`'s symmetric buffer |
+| `T.nccl_gin.put_signal(src, dst, size, peer, signal_id, scope="block")` | Same, plus increment `signal_id` on the destination once the payload has landed |
+| `T.nccl_gin.signal(peer, signal_id, scope="block")` | Increment a remote signal with no payload |
+| `T.nccl_gin.wait_signal(least, signal_id, scope="block")` | Block until the cumulative count for `signal_id` reaches `least` |
+| `T.nccl_gin.flush(scope="block")` | Wait until this rank's source buffers are reusable |
+
+`src` and `dst` are ordinary buffer element references; the lowering converts
+them to `(window, offset)` pairs using the symmetric arena, so the offset that
+names bytes locally names the same bytes on the peer. `peer` is a **global**
+rank.
+
+Three properties of the signal mechanism decide how these are used:
+
+- **Signals are cumulative and a wait does not consume them.** A compile-time
+  `least` is therefore satisfied on every launch after the first, which silently
+  turns the wait into a no-op. Pass the target as a kernel argument that the host
+  advances per launch.
+- **Signal state is per context.** A put issued on sender context *i* increments
+  the receiver's signal through context *i*, so a CTA sees only `1/contexts` of
+  the arrivals. `wait_signal` divides `least` by the device-side
+  `context_span()` for this reason. A wait grid narrower than the sender's rounds
+  the target down, to zero in the worst case; a wider one parks CTAs on contexts
+  nothing signals.
+- **The requested context count is a hint.** `ncclDevCommRequirements.ginContextCount`
+  may be granted in part, so the divisor must come from the device rather than
+  from the host's request.
+
+Do not wait on a signal from inside a large-grid kernel. A waiting CTA occupies
+an SM, so if the CTAs that would issue the matching puts are still queued behind
+it, nothing progresses. Use separate streams, or confine the wait to a
+small-grid kernel.
+
 ### Multimem Operations
 
 Multimem operations require a valid multicast allocation and compatible
@@ -258,6 +366,20 @@ for a plain `multimem_tma_store`.
 The signal type is inferred from `addr`; there is no `dtype_tag` argument. The
 direct `multimem_ld_reduce` and `multimem_red` paths currently expose ADD;
 unsupported PTX dtype/operation combinations are rejected during lowering.
+
+Two constraints shape how these are called in practice:
+
+- **A float16/bfloat16 region must be exactly one contiguous pair per thread**,
+  because those dtypes lower to packed x2 instructions. In tile terms the region
+  width must equal `2 * threads`; any other width lets a neighbouring `T.copy`
+  infer a wider vectorisation, and layout inference then fails with *"requires
+  the local fragment layout to preserve canonical pair ownership"*. Work per
+  thread therefore has to come from looping over tiles, not from widening one.
+- **The multicast region must be provably in bounds at compile time.** A runtime
+  offset into it is rejected with *"multimem packed multicast region must be
+  provably in bounds or use a tile-aligned all-or-none dynamic partition"*, so a
+  kernel that publishes a varying slice needs the offset as a compile-time
+  constant, i.e. one specialisation per slice.
 Direct multimem operations and signals require SM90+ and CUDA Toolkit 12.1+
 (PTX 8.1+). Packed `float16`/`bfloat16` load-reduce additionally requires CUDA
 Toolkit 12.2+ because its `.acc::f32` form was introduced in PTX 8.2. Packed
@@ -339,6 +461,16 @@ releases. Every registered FFI name below is prefixed with
 | `_sync_vmm_handles(rank, device_ids, buffer_ptrs_gpu_addr, handles) -> None` | `sync_vmm_handles(rank: int64, num_ranks: int64, buffer_ptrs_gpu_addr: int64, packed_handles: Bytes) -> void` |
 | `_supports_vmm_fabric() -> bool` | `supports_vmm_fabric() -> bool` |
 | `_supports_multicast() -> bool` | `supports_multicast() -> bool` |
+| `_create_vmm_fd_handle(ptr) -> bytes` | `create_vmm_fd_handle(ptr: int64) -> Bytes` |
+| `_open_vmm_fd_handle(handle) -> int` | `open_vmm_fd_handle(handle: Bytes) -> int64` |
+
+`create_vmm_fd_handle` exports the allocation as a POSIX file descriptor and
+returns `size | pid | fd`; `open_vmm_fd_handle` duplicates that descriptor into
+the caller with `pidfd_open` plus `pidfd_getfd`, then imports and maps it. This
+is the route used when fabric handles are unavailable, and it avoids the
+unix-socket rendezvous an `SCM_RIGHTS` exchange would need. The exporting
+process keeps its descriptor open for its lifetime, because a peer may import at
+any point before teardown.
 
 The Python sync wrappers pack one handle per rank and derive `num_ranks` from
 `len(device_ids)`. `buffer_ptrs_gpu_addr` is the integer device address of a
@@ -358,6 +490,13 @@ currently ignored.
 | `_mc_release_handle(handle) -> None` | `(int64) -> void` |
 | `_mc_unmap(ptr, size, num_devices) -> None` | `(int64, int64, int64) -> void` |
 | `_mc_get_aligned_size(size, num_devices) -> int` | `(int64, int64) -> int64` |
+| `_mc_export_fd_handle(handle) -> bytes` | `(int64) -> Bytes` |
+| `_mc_open_fd_handle(handle_bytes) -> int` | `(Bytes) -> int64` |
+| `_multicast_uses_fd() -> bool` | `multicast_uses_fd() -> bool` |
+
+`mc_create` requests whichever handle type `multicast_uses_fd()` reports, and the
+matching export/import pair must be used with it. The fd pair carries `pid | fd`
+and is duplicated with `pidfd_getfd`, as for the arena.
 
 ### Tensor From Pointer
 
@@ -390,3 +529,19 @@ The maintained examples and tests are under `examples/distributed` and
 `testing/python/distributed`. This reference intentionally does not label every
 example as universally working because results depend on GPU architecture,
 topology, CUDA toolkit, driver, and IMEX configuration.
+
+Two inter-node limitations are known and will be met in normal use rather than
+at the edges:
+
+- **Some `put_signal` transfer sizes fail to lower**, with
+  `Can't fetch the lanes of a scalable vector at a compile time`. The trigger is
+  the element count, not the byte count, and the failing set is not contiguous.
+  Callers that derive a transfer size from a buffer length should be prepared to
+  adjust it; halving the chunk count doubles the transfer and generally moves off
+  a bad value.
+- **`T.barrier_blocks` is single-node** despite documenting a rendezvous across
+  "every rank". It is lowered with the global rank and world size, and the device
+  side takes `get_remote_base_ptr` of each participant, which returns 0 for a peer
+  it considers inter-node. In a multi-node job the inter-node slots become null
+  system atomics. Inter-node ordering should come from GIN signals, which need no
+  barrier; a node-local barrier variant does not exist yet.
