@@ -192,38 +192,6 @@ def rail_wait_kernel(
     return main
 
 
-def rail_sum_kernel(
-    shard_numel: int, chunks: int, threads: int, world_size: int, local_world_size: int,
-    dtype: str, signal_id: int = SIGNAL_DATA,
-):
-    """Reduce-scatter tail: add our own node's partial, wait, sum the ``nodes`` slots."""
-    nodes = world_size // local_world_size
-    chunk_numel = shard_numel // chunks
-
-    @T.prim_func
-    def main(
-        partial: T.Tensor((nodes * shard_numel,), dtype),
-        inbox: T.Tensor((nodes * shard_numel,), dtype),
-        out: T.Tensor((shard_numel,), dtype),
-        rank: T.int32,
-        signal_target: T.int32,
-    ):
-        with T.Kernel(chunks, threads=threads) as bx:
-            base = bx * chunk_numel
-            node = rank // local_world_size
-            for i in T.Parallel(chunk_numel):
-                inbox[node * shard_numel + base + i] = partial[node * shard_numel + base + i]
-            T.nccl_gin.wait_signal(least=signal_target, signal_id=signal_id, scope="block")
-            for i in T.Parallel(chunk_numel):
-                out[base + i] = T.cast(
-                    fp32_sum(nodes,
-                             lambda s: T.cast(inbox[s * shard_numel + base + i], "float32")),
-                    dtype,
-                )
-
-    return main
-
-
 def rs_sum_kernel(
     shard_numel: int, chunks: int, threads: int, world_size: int, local_world_size: int,
     dtype: str, elem_lo: int = 0, span_numel: int = 0,
