@@ -51,6 +51,7 @@ measured 4x slower, because RDMA is bandwidth-bound only once messages are large
 # annotations at runtime via get_type_hints, and PEP 563 would turn `T.Tensor(...)`
 # into a string evaluated against module globals, where the closure locals do not
 # exist.
+import argparse
 import functools
 
 import torch
@@ -531,9 +532,14 @@ class _Base:
     """Shared plumbing: shapes, signal bookkeeping, side stream."""
 
     def __init__(self, ctx, shard_numel, torch_dtype, tl_dtype, args, intra,
-                 signal_id=SIGNAL_DATA):
+                 signal_id=SIGNAL_DATA, signal_state=None):
         self.ctx, self.args, self.intra = ctx, args, intra
         self.signal_id = signal_id
+        # GIN signal counters live on the device and keep accumulating for the process
+        # lifetime, so a second collective reusing a signal id must continue the count
+        # rather than restart it. A sweep passes one dict through every candidate; on its
+        # own each collective just owns a private one.
+        self.signal_state = {} if signal_state is None else signal_state
         self.lws = ctx.local_world_size
         self.nodes = ctx.world_size // self.lws
         self.shard_numel = shard_numel
@@ -591,7 +597,6 @@ class _Base:
         self.rail_groups = want
         # Only rail peers signal us.
         self.per_launch = (self.nodes - 1) * self.chunks
-        self._target = 0
         self.side = torch.cuda.Stream()
 
     def phases(self):
@@ -618,8 +623,9 @@ class _Base:
         return getattr(self, "groups", 1)
 
     def _bump(self):
-        self._target += self.per_launch
-        return self._target
+        sid = self.signal_id
+        self.signal_state[sid] = self.signal_state.get(sid, 0) + self.per_launch
+        return self.signal_state[sid]
 
     def _rail_args(self, group=0):  # noqa: D401
         # Each pipelined group needs its own signal: arrivals are cumulative and a wait
@@ -656,12 +662,12 @@ class Allgather2D(_Base):
     """
 
     def __init__(self, ctx, numel, torch_dtype, tl_dtype, args, intra="auto",
-                 signal_id=SIGNAL_DATA, shard=None):
+                 signal_id=SIGNAL_DATA, shard=None, buffers=None, signal_state=None):
         intra = pick_intra(intra)
         if numel % ctx.world_size:
             raise SystemExit(f"numel {numel} must be divisible by {ctx.world_size}")
         super().__init__(ctx, numel // ctx.world_size, torch_dtype, tl_dtype, args, intra,
-                         signal_id)
+                         signal_id, signal_state)
         self.numel = numel
         use_mc = intra == "multimem"
 
@@ -727,6 +733,16 @@ class Allgather2D(_Base):
             self.pub_own_k = ctx.compile(build(slots="own"))
             self.pub_remote_ks = [ctx.compile(build(slots="remote"))]
 
+        # `buffers` lets a caller hand back a previous instance's allocations. No buffer
+        # shape depends on a knob -- only grids and tile widths do -- so a sweep can
+        # allocate once and rebuild kernels per candidate. That is not merely an
+        # optimisation: the arena is a bump allocator with no free and the multicast
+        # buffer is sized exactly, so a second allocation would exhaust it.
+        if buffers is not None:
+            self.__dict__.update(buffers)
+            self.buffers = buffers
+            self._use_mc = use_mc
+            return
         # `shard` lets a caller feed an existing arena tensor straight in -- allreduce
         # passes the reduce-scatter's output, which avoids a full-shard copy between
         # the two halves.
@@ -743,6 +759,8 @@ class Allgather2D(_Base):
             self.out_mc = self.inbox = self.out
         self.out.zero_()
         self._use_mc = use_mc
+        self.buffers = {k: getattr(self, k) for k in
+                        ("shard", "out", "out_mc", "inbox")}
 
     def phases(self):
         shard_bytes = self.shard_numel * self.shard.element_size()
@@ -820,11 +838,9 @@ class Allgather2D(_Base):
             self.publish_remote(g)
 
     def _bump_group(self, group):
-        # Each group has its own signal, so each needs its own running target.
-        if not hasattr(self, "_gtargets"):
-            self._gtargets = [0] * self.groups
-        self._gtargets[group] += self.per_group_signals
-        return self._gtargets[group]
+        sid = self.signal_id + group
+        self.signal_state[sid] = self.signal_state.get(sid, 0) + self.per_group_signals
+        return self.signal_state[sid]
 
     def publish_own(self, group=None):
         """Broadcast our own shard to every local rank. Ordered against nothing.
@@ -953,7 +969,6 @@ class ReduceScatter2D(_Base):
                               args.threads, ctx.world_size, self.lws, tl_dtype,
                               elem_lo=g * span, span_numel=span)))
         self.per_group_signals = (self.nodes - 1) * per_group
-        self._gtargets = [0] * self.groups
 
         if use_mc:
             self.inp_mc, self.inp = ctx.mcast_tensor((numel,), torch_dtype)
@@ -995,10 +1010,7 @@ class ReduceScatter2D(_Base):
         """
         ctx, args = self.ctx, self.args
         main_stream = torch.cuda.current_stream()
-        targets = []
-        for g in range(self.groups):
-            self._gtargets[g] += self.per_group_signals
-            targets.append(self._gtargets[g])
+        targets = [self._bump_group(g) for g in range(self.groups)]
         issue = lambda: [self.put_k[g](self.partial, self.inbox, ctx.rank, targets[g])
                          for g in range(self.groups)]
         if self.fused_reduce:
@@ -1036,10 +1048,7 @@ class ReduceScatter2D(_Base):
 
     def issue_puts(self):
         """Send every group's partial for the remote slots; returns the per-group targets."""
-        targets = []
-        for g in range(self.groups):
-            self._gtargets[g] += self.per_group_signals
-            targets.append(self._gtargets[g])
+        targets = [self._bump_group(g) for g in range(self.groups)]
         for g in range(self.groups):
             self.put_k[g](self.partial, self.inbox, self.ctx.rank, targets[g])
         return targets
@@ -1219,6 +1228,99 @@ def fused_allreduce_launch(rs, ag, ctx):
     dist.barrier(ctx.group)
 
 
+SWEEPABLE = ("chunks", "rail_groups", "gin_contexts", "mc_threads", "mc_tiles",
+             "intra_chunks", "threads")
+
+
+def parse_sweep(spec):
+    """``"chunks=4,8;mc_tiles=8,16"`` -> the 4-element cartesian product, as dicts.
+
+    Tuples rather than one knob at a time, because the knobs do not compose: at 32 MB
+    ``--chunks 4`` alone measured 209.4 GB/s and 185.2 combined with ``--mc-tiles 8``, so a
+    coordinate-descent sweep converges on the wrong point. See
+    docs/internode_optimization_log.md.
+    """
+    import itertools
+
+    axes = []
+    for part in (p for p in spec.split(";") if p.strip()):
+        key, _, vals = part.partition("=")
+        key = key.strip().replace("-", "_")
+        if key not in SWEEPABLE:
+            raise SystemExit(f"--sweep: {key!r} is not tunable; pick from {SWEEPABLE}")
+        axes.append([(key, int(v)) for v in vals.split(",") if v.strip()])
+    return [dict(combo) for combo in itertools.product(*axes)] if axes else [{}]
+
+
+def run_sweep(ctx, args, make, verify, launch_of, run_ref, moved, name):
+    """Time every candidate in ``args.sweep`` in **one process**, then rank them.
+
+    One process matters: start-up is ~19 s per rank, of which ncclDevCommCreate alone is
+    6.4 s and is not reducible, so a process per candidate would spend nearly all its time
+    in initialisation. Buffers are allocated by the first candidate and handed to the rest.
+
+    Every rank walks the same list in the same order, and the validity rules are
+    deterministic functions of the candidate, so a rejected candidate is rejected
+    identically everywhere -- which is what keeps the collective compiles and barriers in
+    lockstep. A candidate that cannot be built is skipped, not fatal.
+
+    torch is re-timed either side of every candidate, not once for the sweep: on this
+    cluster its reading drifts ~8% with other tenants, which is larger than most of what is
+    being compared.
+    """
+    from tilelang.distributed.bench import do_bench
+
+    cands = parse_sweep(args.sweep)
+    ctx.log(f"{name}: sweeping {len(cands)} candidate(s) in one process")
+    buffers, signal_state, rows = None, {}, []
+    for i, over in enumerate(cands):
+        cand = argparse.Namespace(**vars(args))
+        for k, v in over.items():
+            setattr(cand, k, v)
+        try:
+            coll = make(cand, buffers, signal_state)
+        except SystemExit as exc:                     # invalid tuple: same verdict on all ranks
+            ctx.log(f"  [{i + 1}/{len(cands)}] {over} skipped: {exc}")
+            rows.append((over, None, None, str(exc)))
+            continue
+        if buffers is None:
+            buffers = coll.buffers
+        launch = launch_of(coll)
+        eff = (f"chunks={coll.chunks} groups={coll.groups} "
+               f"ctx={cand.gin_contexts} mc_threads={cand.mc_threads} "
+               f"mc_tiles={coll.mc_tiles}")
+        torch.cuda.synchronize()
+        dist.barrier(ctx.group)
+        launch()
+        torch.cuda.synchronize()
+        bad = verify(coll, f"{name}[{i + 1}]")
+        if bad:
+            rows.append((over, None, None, f"MISMATCH on {bad} rank(s)"))
+            continue
+        pre = do_bench(run_ref, warmup=args.warmup, rep=args.rep, group=ctx.group)
+        ms = do_bench(launch, warmup=args.warmup, rep=args.rep, group=ctx.group)
+        post = do_bench(run_ref, warmup=args.warmup, rep=args.rep, group=ctx.group)
+        ref = min(pre, post)
+        rows.append((over, ms, ref, eff))
+        ctx.log(f"  [{i + 1}/{len(cands)}] {ms:7.3f} ms  {moved / (ms * 1e-3) / 1e9:6.1f} GB/s"
+                f"  {ref / ms:5.2f}x   {eff}   drift {abs(pre - post) / ref * 100:4.1f}%")
+        dist.barrier(ctx.group)
+
+    ok = [r for r in rows if r[1] is not None]
+    if ctx.is_leader and ok:
+        ok.sort(key=lambda r: r[1])
+        print(f"\n===== {name}: {len(ok)}/{len(rows)} candidates ranked =====", flush=True)
+        for over, ms, ref, eff in ok:
+            print(f"  {ms:7.3f} ms  {moved / (ms * 1e-3) / 1e9:6.1f} GB/s  {ref / ms:5.2f}x  "
+                  f"{over or 'defaults'}   [{eff}]", flush=True)
+        best = ok[0]
+        print(f"  best: {best[0] or 'defaults'} at {best[2] / best[1]:.2f}x torch", flush=True)
+        skipped = [r for r in rows if r[1] is None]
+        for over, _, _, why in skipped:
+            print(f"  skipped {over}: {why}", flush=True)
+    return rows
+
+
 def add_2d_args(parser):
     """Knobs shared by every 2D example. Defaults are the measured optima at 16 GPUs."""
     parser.add_argument("--intra", choices=("multimem", "pull", "auto"), default="auto",
@@ -1245,6 +1347,10 @@ def add_2d_args(parser):
                              "per-put size is unchanged, only per-group parallelism drops")
     parser.add_argument("--no-overlap", action="store_true",
                         help="run the phases serially, to show what the overlap buys")
+    parser.add_argument("--sweep", default=None, metavar="SPEC",
+                        help='tune in one process, e.g. "mc_tiles=8,16,32;chunks=4,8". '
+                             "Sweeps the cartesian product because the knobs do not "
+                             f"compose. Tunable: {', '.join(SWEEPABLE)}")
     # add_common_args defaults --chunks to 64, which suits the flat collectives. The
     # rail kernel here wants far fewer, larger messages: at 64 it fails to lower with
     # "Can't fetch the lanes of a scalable vector", and in the single-node proxy

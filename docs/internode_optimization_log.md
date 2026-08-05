@@ -16,6 +16,39 @@ conclusions in this file's history were noise.
 Runs only happen when two nodes are *fully* idle; a `PreToolUse` guard enforces that and the
 `gpu-window` skill queues work for the next window.
 
+## Sweeping
+
+Every knob is tunable from one flag, and the sweep runs in a **single process**, because
+start-up is ~19 s per rank (6.4 s of it `ncclDevCommCreate`, which does not shrink) so a
+process per candidate would spend nearly all its time initialising:
+
+    example_internode_allgather_2d.py --numel 16777216 \
+        --sweep "mc_tiles=8,16,32;chunks=4,8;gin_contexts=1,2,4"
+
+Tunable: `chunks`, `rail_groups`, `gin_contexts`, `mc_threads`, `mc_tiles`, `intra_chunks`,
+`threads`. The spec is a **cartesian product**, not one axis at a time, because the knobs do
+not compose -- see round 1, where `--chunks 4` measured 209.4 GB/s alone and 185.2 in
+combination. Coordinate descent converges on the wrong point here.
+
+Three properties that make it trustworthy rather than merely convenient:
+
+- **torch is re-timed either side of every candidate** and the printed `drift` column shows
+  the disagreement. A candidate whose drift is comparable to its margin proved nothing.
+- **Buffers are allocated once** by the first candidate and handed to the rest; only kernels
+  are rebuilt. Required, not an optimisation: the arena is a bump allocator with no free and
+  the multicast buffer is sized exactly, so a second allocation exhausts it.
+- **GIN signal counters are shared across candidates.** They live on the device and accumulate
+  for the process lifetime, so a candidate that restarted its count would have its wait
+  satisfied by an earlier candidate's arrivals and would silently measure nothing.
+
+Invalid tuples are skipped rather than fatal, and the validity rules are deterministic
+functions of the candidate, so every rank rejects the same ones and the collective compiles
+stay in lockstep.
+
+The reported configuration is the **effective** one, after the internal rewrites
+(`workable_chunks`, the `MIN_GROUP_BYTES` cap, `pick_mc_tiles`) -- otherwise the table names a
+configuration that did not run.
+
 ## Status
 
 | # | kernel | vs torch | vs triton-dist | state |
@@ -90,10 +123,10 @@ design pays less fixed cost than our multi-launch one. Crossover is near 48 MB.
   that same session against 122 on an idle pair.
 - `--rail-groups 2` with 4 contexts is the optimum at 240 MB (0.500 ms) and 8 groups on 1
   context is worse (0.561); the reverse holds for allreduce, so the depth is per collective.
-- `mc_tiles` must be 32 here at every size measured, unlike the reduce-carrying collectives
-  which want it scaled: allgather's intra half is two publishes and no reduce, so it is
-  switch-bound rather than occupancy-bound and prefers few fat CTAs (48 MB: 0.164 ms at 32
-  against 0.233 at 4).
+- allgather's intra half is two publishes and no reduce, so it is switch-bound rather than
+  occupancy-bound and wants fatter CTAs than the reduce-carrying collectives (48 MB: 0.164 ms
+  at 32 tiles against 0.233 at 4). **But "32 at every size" was wrong** -- see round 1: at
+  32 MB the curve peaks at 16 and 32 is past it. Only 4 and 32 had been compared at 48 MB.
 
 ### Round 1: knob sweep at 32 MB (2026-08-05)
 

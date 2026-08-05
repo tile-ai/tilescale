@@ -30,7 +30,13 @@ import argparse
 import torch
 import torch.distributed as dist
 
-from internode_2d import Allgather2D, add_2d_args, pick_intra, report_phases
+from internode_2d import (
+    Allgather2D,
+    add_2d_args,
+    pick_intra,
+    report_phases,
+    run_sweep,
+)
 from internode_common import (
     Context,
     TL_DTYPES,
@@ -76,35 +82,43 @@ def main() -> int:
 
     if not args.mc_tiles:
         args.mc_tiles = 16 if (args.numel // ctx.world_size) * itemsize < 3_000_000 else 32
-    ag = Allgather2D(ctx, args.numel, torch_dtype, tl_dtype, args, intra=intra)
+    def make(cand, buffers=None, signal_state=None):
+        return Allgather2D(ctx, cand.numel, torch_dtype, tl_dtype, cand, intra=intra,
+                           buffers=buffers, signal_state=signal_state)
+
+    ag = make(args)
     ag.shard.copy_(
         torch.arange(ag.shard_numel, device=ag.shard.device, dtype=torch.float32)
         .to(torch_dtype) + ctx.rank * 1000.0
     )
-
-    torch.cuda.synchronize()
-    dist.barrier(ctx.group)
-    ag.launch()
-    torch.cuda.synchronize()
-
     ref = torch.empty_like(ag.out)
-    dist.all_gather_into_tensor(ref, ag.shard, group=ctx.group)
-    failures = check(ctx, ag.out, ref, "allgather_2d")
+    run_ref = lambda: dist.all_gather_into_tensor(ref, ag.shard, group=ctx.group)
+    moved = ag.shard.numel() * ag.shard.element_size() * (ctx.world_size - 1)
 
-    if failures == 0:
-        if args.phases:
-            report_phases(ctx, ag, args)
-        if not args.no_bench:
-            moved = ag.shard.numel() * ag.shard.element_size() * (ctx.world_size - 1)
-            bench_vs_torch(
-                ctx, args, "allgather_2d", ag.launch,
-                lambda: dist.all_gather_into_tensor(ref, ag.shard, group=ctx.group), moved,
-            )
+    def verify(coll, label):
+        dist.all_gather_into_tensor(ref, coll.shard, group=ctx.group)
+        return check(ctx, coll.out, ref, label)
+
+    if args.sweep:
+        # Buffers come from the first candidate; every later one rebuilds kernels only.
+        run_sweep(ctx, args, make, verify, lambda c: c.launch, run_ref, moved,
+                  "allgather_2d")
+    else:
+        torch.cuda.synchronize()
+        dist.barrier(ctx.group)
+        ag.launch()
+        torch.cuda.synchronize()
+        failures = check(ctx, ag.out, ref, "allgather_2d")
+        if failures == 0:
+            if args.phases:
+                report_phases(ctx, ag, args)
+            if not args.no_bench:
+                bench_vs_torch(ctx, args, "allgather_2d", ag.launch, run_ref, moved)
 
     ctx.close()
-    if ctx.is_leader:
+    if ctx.is_leader and not args.sweep:
         print("PASS" if failures == 0 else f"FAIL: {failures} rank(s) mismatched", flush=True)
-    return 1 if failures else 0
+    return 1 if (not args.sweep and failures) else 0
 
 
 if __name__ == "__main__":
