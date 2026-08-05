@@ -67,6 +67,34 @@ from internode_common import SIGNAL_DATA, fp32_sum
 # the overlap saves. See _Base.__init__ for the measurement.
 MIN_GROUP_BYTES = 1_500_000
 
+# --mc-tiles has to scale with the buffer for the reduce-carrying collectives, and getting
+# it wrong is expensive in both directions. Measured at 16 GPUs: allreduce wants 32 tiles
+# per CTA at 240 MiB (0.944 ms against 1.086 at 4) and 4 at 48 MiB (0.282 against 0.361 at
+# 32) -- a fat-CTA publish starves the GPU once the shard is small, and a thin one wastes
+# scheduling once it is large. reduce_scatter behaves the same way (48 MiB: 0.138 ms at the
+# scaled value against 0.194 at 32).
+#
+# Allgather does *not*: it wants 32 at every size measured (48 MiB 0.164 ms at 32 against
+# 0.233 at 4; 240 MiB 0.501 against 0.585). Its intra-node half is two publishes and no
+# reduce, so it is switch-bound rather than occupancy-bound, and fewer fatter CTAs win.
+# Hence the example overrides this rather than a single global law covering both.
+# One tile per 480 KB of shard. 240 KB was tried and regressed allreduce at 120 MiB
+# (0.747 ms against 0.521), so the coarser divisor stands. This is a fit to three sizes,
+# not a law: the true optimum also depends on the group count and on which collective, and
+# --mc-tiles overrides it. See the tuning table in CLAUDE.md for what is left on the table.
+MC_TILE_BYTES_PER_TILE = 480 << 10
+
+
+def pick_mc_tiles(shard_numel, itemsize, requested):
+    """Tiles per multicast CTA: as asked if given, else scaled to the shard. See above."""
+    if requested:
+        return requested
+    want = max(1, (shard_numel * itemsize) // MC_TILE_BYTES_PER_TILE)
+    tiles = 1
+    while tiles * 2 <= min(want, 32):
+        tiles *= 2
+    return tiles
+
 
 # --------------------------------------------------------------------- fabric hop
 
@@ -349,10 +377,13 @@ def mc_reduce_kernel(
     the portable path below under torch.
 
     ``slots="remote"`` handles the node slots whose partials cross the fabric;
-    ``slots="own"`` handles the one we keep, which no peer waits for.
+    ``slots="own"`` handles the one we keep, which no peer waits for. ``"all"`` does both in
+    a single launch, which is what a small buffer wants: splitting them exists only to
+    overlap ``own`` with the fabric, and once the transfer is short that overlap is worth
+    less than the launch it costs.
     """
     nodes = world_size // local_world_size
-    groups = nodes - 1 if slots == "remote" else 1
+    groups = {"remote": nodes - 1, "own": 1}.get(slots, nodes)
     block_N = 2 * threads
     ctas = (shard_numel // block_N) // tiles_per_cta
 
@@ -367,7 +398,12 @@ def mc_reduce_kernel(
             k = bx // ctas
             local_rank = rank % local_world_size
             node = rank // local_world_size
-            n = (node + k + 1) % nodes if slots == "remote" else node
+            if slots == "remote":
+                n = (node + k + 1) % nodes
+            elif slots == "own":
+                n = node
+            else:
+                n = k  # "all": every node slot in one launch
             src_base = (n * local_world_size + local_rank) * shard_numel
             dst_base = n * shard_numel
             acc = T.alloc_fragment((block_N,), dtype)
@@ -547,6 +583,8 @@ class _Base:
         self.torch_dtype, self.tl_dtype = torch_dtype, tl_dtype
         if self.nodes < 2:
             raise SystemExit("the 2D collectives need >= 2 nodes")
+        itemsize = torch.empty((), dtype=torch_dtype).element_size()
+        args.mc_tiles = pick_mc_tiles(shard_numel, itemsize, args.mc_tiles)
         self.chunks = workable_chunks(shard_numel, args.threads, ctx.world_size, self.lws,
                                       tl_dtype, args.chunks, args.gin_contexts, ctx.log)
         if self.chunks % args.gin_contexts:
@@ -571,7 +609,7 @@ class _Base:
         # shard (1.96 MB per slice) and 0.61 ms at a 3.1 MB shard, where the fabric alone
         # needs only 0.13 -- i.e. 0.5 ms of pure overhead, and 0.50x torch.
         want = args.rail_groups
-        shard_bytes = shard_numel * torch.empty((), dtype=torch_dtype).element_size()
+        shard_bytes = shard_numel * itemsize
         reason = ""
         while want > 1 and shard_bytes // want < MIN_GROUP_BYTES:
             want //= 2
@@ -919,8 +957,15 @@ class ReduceScatter2D(_Base):
                                       tiles_per_cta=args.mc_tiles)
         else:
             build = functools.partial(pull_reduce_kernel, *self._pull_args(args.intra_chunks))
-        self.red_remote = ctx.compile(build(slots="remote"))
-        self.red_own = ctx.compile(build(slots="own"))
+        # With one group the fabric hop is a single transfer, so there is nothing for the
+        # own-slot reduce to hide behind and splitting it just costs a launch.
+        # self.rail_groups is the depth after the size cap, not what was asked for.
+        self.fused_reduce = self.rail_groups == 1 and use_mc
+        if self.fused_reduce:
+            self.red_all = ctx.compile(build(slots="all"))
+        else:
+            self.red_remote = ctx.compile(build(slots="remote"))
+            self.red_own = ctx.compile(build(slots="own"))
         # Grouped fabric hop, same idea as Allgather2D: group g's arithmetic runs while
         # group g+1 is still crossing the fabric. Per-put size is unchanged.
         self.groups = self.rail_groups
@@ -992,6 +1037,10 @@ class ReduceScatter2D(_Base):
             targets.append(self._gtargets[g])
         issue = lambda: [self.put_k[g](self.partial, self.inbox, ctx.rank, targets[g])
                          for g in range(self.groups)]
+        if self.fused_reduce:
+            self._reduce(self.red_all)
+            issue()
+            return targets
         self._reduce(self.red_remote)
         if args.no_overlap:
             self._reduce(self.red_own)
@@ -1156,6 +1205,17 @@ def fused_allreduce_launch(rs, ag, ctx):
 
     The two halves must already hold disjoint signal ranges; see the example.
     """
+    if ag.groups == 1:
+        # Nothing to interleave, so take the fewest launches: the allgather's put and wait
+        # are one kernel here, and the publishes are whole-shard. At small sizes this path
+        # is what wins -- the pipeline's extra launches cost more than its overlap saves.
+        for g, target in enumerate(rs.start()):
+            rs.finish_group(g, target)
+        ag.rail_hop()
+        ag.publish_own()
+        ag.publish_remote()
+        dist.barrier(ctx.group)
+        return
     rs_targets = rs.start()
     ag_targets = ag.bump_groups()
     for g, target in enumerate(rs_targets):
@@ -1179,9 +1239,11 @@ def add_2d_args(parser):
     parser.add_argument("--mc-threads", type=int, default=512,
                         help="threads per CTA on the multimem path; the tile is "
                              "2*threads, fixed by the packed-x2 fragment layout")
-    parser.add_argument("--mc-tiles", type=int, default=32,
-                        help="contiguous tiles each multimem CTA loops over; the tile "
-                             "width is pinned, so this is the only work-per-thread knob")
+    parser.add_argument("--mc-tiles", type=int, default=0,
+                        help="contiguous tiles each multimem CTA loops over; the tile width "
+                             "is pinned, so this is the only work-per-thread knob. 0 scales "
+                             "it to the shard, which matters: the best value is 32 at "
+                             "240 MiB and 4 at 48 MiB")
     parser.add_argument("--intra-chunks", type=int, default=1024,
                         help="chunking of the pull path's intra phase; sets its grid, "
                              "and is independent of --chunks because it carries no signal")

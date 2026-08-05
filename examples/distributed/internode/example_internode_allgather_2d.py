@@ -46,6 +46,12 @@ def main() -> int:
     parser = add_2d_args(add_common_args(argparse.ArgumentParser(description=__doc__)))
     parser.add_argument("--phases", action="store_true",
                         help="time each kernel on its own, to locate headroom")
+    # Allgather's intra-node half is two multicast publishes and no reduce, so it is
+    # switch-bound rather than occupancy-bound and prefers fewer, fatter CTAs at every size
+    # measured -- 0.164 ms at 32 tiles against 0.233 at 4 for 48 MiB, 0.501 against 0.585
+    # for 240 MiB. The size-scaling default in internode_2d is for the reduce-carrying
+    # collectives, which behave the opposite way.
+    parser.set_defaults(mc_tiles=32)
     args = parser.parse_args()
 
     prepare_env()
