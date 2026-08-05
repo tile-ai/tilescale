@@ -30,7 +30,25 @@ Tunable: `chunks`, `rail_groups`, `gin_contexts`, `mc_threads`, `mc_tiles`, `int
 not compose -- see round 1, where `--chunks 4` measured 209.4 GB/s alone and 185.2 in
 combination. Coordinate descent converges on the wrong point here.
 
-Three properties that make it trustworthy rather than merely convenient:
+**Candidates are measured round-robin over `--sweep-passes` passes (default 3), each keeping
+its best pass.** This is required, not a refinement. Measuring each candidate once in sequence
+ranks by *position*, not by configuration:
+
+| sweep | winner |
+|-------|--------|
+| `mc_tiles=8,16,32` | 8, at 222.0 GB/s |
+| `mc_tiles=32,16,8` | 32, at 218.1 GB/s |
+| `mc_threads=512,512,512` (control) | position 1 (1.73x), then 1.55x, then 1.44x |
+
+The control is the proof: the same configuration three times degraded monotonically by 20%.
+That is the GPUs' clocks drooping under sustained load, and it is far larger than the
+differences being compared -- a single-pass sweep would have confidently reported whichever
+candidate happened to be listed first. Round-robin spreads each candidate across the droop
+curve and the per-candidate minimum takes its least-throttled sample; the control then reads
+4.4%, and the tool prints a "within the noise floor -- treat these as tied" note when the
+whole spread is under 5%.
+
+Three further properties that make it trustworthy rather than merely convenient:
 
 - **torch is re-timed either side of every candidate** and the printed `drift` column shows
   the disagreement. A candidate whose drift is comparable to its margin proved nothing.

@@ -1252,73 +1252,92 @@ def parse_sweep(spec):
     return [dict(combo) for combo in itertools.product(*axes)] if axes else [{}]
 
 
-def run_sweep(ctx, args, make, verify, launch_of, run_ref, moved, name):
-    """Time every candidate in ``args.sweep`` in **one process**, then rank them.
+def run_sweep(ctx, args, make, verify, launch_of, run_ref, moved, name, buffers=None):
+    """Time every candidate in ``args.sweep`` in one process, then rank them.
 
-    One process matters: start-up is ~19 s per rank, of which ncclDevCommCreate alone is
-    6.4 s and is not reducible, so a process per candidate would spend nearly all its time
-    in initialisation. Buffers are allocated by the first candidate and handed to the rest.
+    One process matters: start-up is ~19 s per rank, 6.4 s of it ncclDevCommCreate which does
+    not shrink, so a process per candidate would spend nearly all its time initialising.
 
-    Every rank walks the same list in the same order, and the validity rules are
-    deterministic functions of the candidate, so a rejected candidate is rejected
-    identically everywhere -- which is what keeps the collective compiles and barriers in
-    lockstep. A candidate that cannot be built is skipped, not fatal.
+    **Candidates are measured round-robin over several passes, and each keeps its best pass.**
+    Measuring each candidate once in sequence does not work: position dominates the result.
+    Sweeping tiles 8/16/32 ranked 8 first; reversing to 32/16/8 ranked 32 first; and the
+    control -- the same configuration three times -- degraded monotonically, 1.73x then 1.55x
+    then 1.44x. That is the GPUs' clocks drooping under sustained load, and it is larger than
+    the differences being compared. Round-robin spreads each candidate across the droop curve
+    and the min across passes takes each one's least-throttled sample.
 
-    torch is re-timed either side of every candidate, not once for the sweep: on this
-    cluster its reading drifts ~8% with other tenants, which is larger than most of what is
-    being compared.
+    Buffers come from the instance the caller already built; without that, candidate 1
+    allocates a second time and the exactly-sized multicast buffer is exhausted.
+
+    Every rank walks the same list in the same order, and validity is a deterministic function
+    of the candidate, so a rejected candidate is rejected identically everywhere -- which keeps
+    the collective compiles and barriers in lockstep. An unbuildable candidate is skipped, not
+    fatal.
     """
     from tilelang.distributed.bench import do_bench
 
     cands = parse_sweep(args.sweep)
-    ctx.log(f"{name}: sweeping {len(cands)} candidate(s) in one process")
-    buffers, signal_state, rows = None, {}, []
-    for i, over in enumerate(cands):
+    passes = max(1, args.sweep_passes)
+    ctx.log(f"{name}: {len(cands)} candidate(s) x {passes} pass(es), round-robin, "
+            f"in one process")
+    signal_state = {}
+    built, skipped = [], []
+    for over in cands:
         cand = argparse.Namespace(**vars(args))
         for k, v in over.items():
             setattr(cand, k, v)
         try:
             coll = make(cand, buffers, signal_state)
-        except SystemExit as exc:                     # invalid tuple: same verdict on all ranks
-            ctx.log(f"  [{i + 1}/{len(cands)}] {over} skipped: {exc}")
-            rows.append((over, None, None, str(exc)))
+        except SystemExit as exc:      # invalid tuple: same verdict on every rank
+            skipped.append((over, str(exc)))
             continue
         if buffers is None:
             buffers = coll.buffers
-        launch = launch_of(coll)
-        eff = (f"chunks={coll.chunks} groups={coll.groups} "
-               f"ctx={cand.gin_contexts} mc_threads={cand.mc_threads} "
-               f"mc_tiles={coll.mc_tiles}")
-        torch.cuda.synchronize()
-        dist.barrier(ctx.group)
-        launch()
-        torch.cuda.synchronize()
-        bad = verify(coll, f"{name}[{i + 1}]")
-        if bad:
-            rows.append((over, None, None, f"MISMATCH on {bad} rank(s)"))
-            continue
-        pre = do_bench(run_ref, warmup=args.warmup, rep=args.rep, group=ctx.group)
-        ms = do_bench(launch, warmup=args.warmup, rep=args.rep, group=ctx.group)
-        post = do_bench(run_ref, warmup=args.warmup, rep=args.rep, group=ctx.group)
-        ref = min(pre, post)
-        rows.append((over, ms, ref, eff))
-        ctx.log(f"  [{i + 1}/{len(cands)}] {ms:7.3f} ms  {moved / (ms * 1e-3) / 1e9:6.1f} GB/s"
-                f"  {ref / ms:5.2f}x   {eff}   drift {abs(pre - post) / ref * 100:4.1f}%")
-        dist.barrier(ctx.group)
+        built.append({"over": over, "coll": coll, "launch": launch_of(coll),
+                      "eff": (f"chunks={coll.chunks} groups={coll.groups} "
+                              f"ctx={cand.gin_contexts} mc_threads={cand.mc_threads} "
+                              f"mc_tiles={coll.mc_tiles}"),
+                      "ms": float("inf"), "ref": float("inf"), "bad": 0})
+    for over, why in skipped:
+        ctx.log(f"  skipped {over}: {why}")
 
-    ok = [r for r in rows if r[1] is not None]
-    if ctx.is_leader and ok:
-        ok.sort(key=lambda r: r[1])
-        print(f"\n===== {name}: {len(ok)}/{len(rows)} candidates ranked =====", flush=True)
-        for over, ms, ref, eff in ok:
-            print(f"  {ms:7.3f} ms  {moved / (ms * 1e-3) / 1e9:6.1f} GB/s  {ref / ms:5.2f}x  "
-                  f"{over or 'defaults'}   [{eff}]", flush=True)
-        best = ok[0]
-        print(f"  best: {best[0] or 'defaults'} at {best[2] / best[1]:.2f}x torch", flush=True)
-        skipped = [r for r in rows if r[1] is None]
-        for over, _, _, why in skipped:
-            print(f"  skipped {over}: {why}", flush=True)
-    return rows
+    # Correctness once per candidate; timing round-robin so no candidate owns a position.
+    for b in built:
+        torch.cuda.synchronize()
+        dist.barrier(ctx.group)
+        b["launch"]()
+        torch.cuda.synchronize()
+        b["bad"] = verify(b["coll"], f"{name}{b['over']}")
+    built = [b for b in built if not b["bad"]]
+
+    for p in range(passes):
+        for b in built:
+            pre = do_bench(run_ref, warmup=args.warmup, rep=args.rep, group=ctx.group)
+            ms = do_bench(b["launch"], warmup=args.warmup, rep=args.rep, group=ctx.group)
+            post = do_bench(run_ref, warmup=args.warmup, rep=args.rep, group=ctx.group)
+            if ms < b["ms"]:
+                b["ms"], b["ref"] = ms, min(pre, post)
+            ctx.log(f"  pass {p + 1} {b['over']}: {ms:7.3f} ms  "
+                    f"{moved / (ms * 1e-3) / 1e9:6.1f} GB/s  drift "
+                    f"{abs(pre - post) / min(pre, post) * 100:4.1f}%")
+            dist.barrier(ctx.group)
+
+    if ctx.is_leader and built:
+        built.sort(key=lambda b: b["ms"])
+        print(f"\n===== {name}: {len(built)}/{len(cands)} candidates, best of "
+              f"{passes} passes =====", flush=True)
+        for b in built:
+            print(f"  {b['ms']:7.3f} ms  {moved / (b['ms'] * 1e-3) / 1e9:6.1f} GB/s  "
+                  f"{b['ref'] / b['ms']:5.2f}x  {b['over'] or 'defaults'}  [{b['eff']}]",
+                  flush=True)
+        best = built[0]
+        print(f"  best: {best['over'] or 'defaults'} at "
+              f"{best['ref'] / best['ms']:.2f}x torch", flush=True)
+        spread = built[-1]["ms"] / built[0]["ms"] - 1
+        if spread < 0.05:
+            print(f"  NOTE: spread is only {spread * 100:.1f}%, within the noise floor -- "
+                  f"treat these as tied", flush=True)
+    return built
 
 
 def add_2d_args(parser):
@@ -1351,6 +1370,10 @@ def add_2d_args(parser):
                         help='tune in one process, e.g. "mc_tiles=8,16,32;chunks=4,8". '
                              "Sweeps the cartesian product because the knobs do not "
                              f"compose. Tunable: {', '.join(SWEEPABLE)}")
+    parser.add_argument("--sweep-passes", type=int, default=3,
+                        help="round-robin passes over the candidates; each keeps its best. "
+                             "More than one is required, not optional: clock droop makes a "
+                             "single sequential pass rank by position rather than by config")
     # add_common_args defaults --chunks to 64, which suits the flat collectives. The
     # rail kernel here wants far fewer, larger messages: at 64 it fails to lower with
     # "Can't fetch the lanes of a scalable vector", and in the single-node proxy

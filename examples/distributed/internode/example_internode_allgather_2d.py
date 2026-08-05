@@ -102,7 +102,7 @@ def main() -> int:
     if args.sweep:
         # Buffers come from the first candidate; every later one rebuilds kernels only.
         run_sweep(ctx, args, make, verify, lambda c: c.launch, run_ref, moved,
-                  "allgather_2d")
+                  "allgather_2d", buffers=ag.buffers)
     else:
         torch.cuda.synchronize()
         dist.barrier(ctx.group)
