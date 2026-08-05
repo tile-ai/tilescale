@@ -142,107 +142,10 @@ def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
 MAX_SIGNALS = 32
 
 
-def tune_grid(args, signals_per_config: int = 1):
-    """Configurations to try, each with its own signal slots.
-
-    Why distinct slots per config rather than one shared slot: signals are
-    cumulative and nothing resets them, and ``wait_signal`` divides the target by
-    the device's ``context_span()``. A config that changes the context count would
-    therefore divide a total accumulated under a *different* span, so the target
-    would be wrong from that point on. Giving each config fresh slots means every
-    counter starts at zero under exactly one span, which makes ``--tune-contexts``
-    safe to sweep in a single process.
-    """
-    if not args.tune:
-        return [{
-            "chunks": args.chunks,
-            "gin_contexts": args.gin_contexts,
-            "threads": args.threads,
-            "signals": tuple(range(signals_per_config)),
-        }]
-
-    ints = lambda s: [int(x) for x in str(s).split(",") if x != ""]
-    grid = []
-    for contexts in ints(args.tune_contexts):
-        for chunks in ints(args.tune_chunks):
-            for threads in ints(args.tune_threads):
-                # A context must back the same number of CTAs for one wait target
-                # to be right, so the span has to divide the chunk count.
-                if chunks % max(1, contexts):
-                    continue
-                base = len(grid) * signals_per_config
-                if base + signals_per_config > MAX_SIGNALS:
-                    break
-                grid.append({
-                    "chunks": chunks,
-                    "gin_contexts": contexts,
-                    "threads": threads,
-                    "signals": tuple(range(base, base + signals_per_config)),
-                })
-    if not grid:
-        raise SystemExit("--tune grid is empty; check --tune-chunks / --tune-contexts")
-    return grid
 
 
-def report_tuning(ctx, name: str, rows, torch_ms_before: float, torch_ms_after: float, moved: int):
-    """Print every configuration, then the winner against torch.
-
-    torch is timed twice, before and after the sweep. If the two disagree the
-    fabric moved under us and the ratios are not trustworthy -- worth knowing,
-    since another tenant's job on the same NICs shifts these by up to 2x.
-    """
-    if not ctx.is_leader:
-        return
-    gbps = lambda ms: moved / (ms * 1e-3) / 1e9
-    print(f"\n===== {name}: tuning results ({len(rows)} configs) =====", flush=True)
-    print(f"{'chunks':>7} {'ctx':>4} {'thr':>5} {'ms':>9} {'GB/s':>8}  status", flush=True)
-    for r in sorted(rows, key=lambda r: -(r["gbps"] if r["ok"] else -1)):
-        print(
-            f"{r['chunks']:>7} {r['gin_contexts']:>4} {r['threads']:>5} "
-            f"{r['ms']:>9.3f} {r['gbps']:>8.1f}  {'PASS' if r['ok'] else 'FAIL'}",
-            flush=True,
-        )
-    good = [r for r in rows if r["ok"]]
-    if not good:
-        print("no configuration passed", flush=True)
-        return
-    best = max(good, key=lambda r: r["gbps"])
-    t_before, t_after = gbps(torch_ms_before), gbps(torch_ms_after)
-    t_ms = min(torch_ms_before, torch_ms_after)          # torch at its best
-    t_best = gbps(t_ms)
-    drift = abs(t_before - t_after) / max(t_before, t_after)
-    print(
-        f"\n{name}: BEST chunks={best['chunks']} contexts={best['gin_contexts']} "
-        f"threads={best['threads']}\n"
-        f"  tilescale {best['ms']:.3f} ms  {best['gbps']:.1f} GB/s\n"
-        f"  torch     {t_ms:.3f} ms  {t_best:.1f} GB/s   "
-        f"(measured {t_before:.1f} then {t_after:.1f} GB/s, drift {drift * 100:.0f}%)\n"
-        f"  speedup   {best['gbps'] / t_best:.2f}x vs torch's best of the two",
-        flush=True,
-    )
-    if drift > 0.15:
-        print("  WARNING: torch drifted >15% across the sweep; fabric was not stable", flush=True)
 
 
-def per_launch_signals(peers: int, chunks: int, signal_div: int = 0) -> int:
-    """Signal increments this rank actually receives per launch.
-
-    Each of ``peers`` senders signals once per chunk, so the honest target is
-    ``peers * chunks``. This is the only value that makes ``wait_signal`` mean
-    "all my data has landed".
-
-    ``signal_div`` divides it, and exists solely to investigate why multiple GIN
-    contexts hang (see nccl_gin.h). It makes the wait weaker than the data, so the
-    kernel can return before the payload arrives -- which shows up as bandwidth
-    above what the hardware can carry. Any number produced with signal_div set is
-    not a measurement of the collective.
-    """
-    total = peers * chunks
-    if not signal_div:
-        return total
-    if total % signal_div:
-        raise SystemExit(f"--signal-div {signal_div} must divide peers*chunks = {total}")
-    return total // signal_div
 
 
 TORCH_DTYPES = {"fp32": torch.float32, "bf16": torch.bfloat16, "fp16": torch.float16}

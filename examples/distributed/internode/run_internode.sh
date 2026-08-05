@@ -2,7 +2,7 @@
 # Launch an inter-node collective example across two nodes, one GPU each.
 #
 # Usage: run_internode.sh <rank0_node> <rank0_gpu> <rank1_node> <rank1_gpu> <script> [extra args...]
-#   e.g. run_internode.sh <node> 0 <node> 4 example_internode_allgather.py --numel 4194304
+#   e.g. run_internode.sh <node> 0 <node> 4 example_internode_allgather_2d.py --numel 4194304
 #
 # Run this from <node>, which is the only node reachable directly from a laptop;
 # it ssh's to both target nodes. Rank 0 also hosts the rendezvous, so its internal

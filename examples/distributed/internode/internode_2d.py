@@ -33,8 +33,8 @@ those two legs are almost perfectly balanced at 8 GPUs against 8 400-Gbps NICs. 
 remaining gap is that the second intra-node phase cannot start until the fabric hop
 has landed; see ``Allgather2D`` for what overlaps and what does not.
 
-Three traps worth knowing before editing any of this
-----------------------------------------------------
+Four traps worth knowing before editing any of this
+---------------------------------------------------
 1. **``src_pe``/``dst_pe`` are GLOBAL ranks.** ``get_remote_base_ptr`` returns 0 for a
    peer it considers inter-node, so a *local* rank yields a null base and faults --
    but only on nodes other than node 0, where the two numberings coincide.
@@ -44,7 +44,16 @@ Three traps worth knowing before editing any of this
    layout inference fails with "requires the local fragment layout to preserve
    canonical pair ownership". Work per thread therefore has to come from
    ``tiles_per_cta``, and it matters a lot: 1 tile gives 317 GB/s, 32 gives ~400.
-3. **``wait_signal`` divides the grid-wide target by the granted GIN context count**,
+3. **Never wait on a signal from inside a large-grid kernel.** The tempting fused shape --
+   some CTAs of a GEMM grid issue the puts while the rest wait on the signal -- deadlocks
+   as soon as the grid stops being co-resident: a waiting CTA occupies an SM, and if the
+   CTAs that would issue the puts are still queued behind it, nothing progresses. A GEMM
+   grid is far larger than what fits at once, so that is the default rather than the
+   exception. Capping the grid at one CTA per SM fixes the hang and measured *slower* than
+   not overlapping at all. Overlap with separate streams instead (which is what
+   ``Allgather2D``'s side stream and the fused examples' ``--mode`` flags do), or with a
+   device-side signal in a small-grid kernel like ``rail_wait_kernel``.
+4. **``wait_signal`` divides the grid-wide target by the granted GIN context count**,
    so a rail grid smaller than that count rounds the target down -- to 0 in the worst
    case, which turns the wait into a silent no-op. Keep ``chunks % gin_contexts == 0``.
 """
