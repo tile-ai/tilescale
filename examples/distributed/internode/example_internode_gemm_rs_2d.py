@@ -9,18 +9,46 @@ is the multicast allocation -- so there is no copy between compute and communica
 That is the one integration detail worth noting: ``ReduceScatter2D.inp`` is this rank's
 own view of that buffer, and it is a perfectly ordinary tensor to write into.
 
-Serial only, and that is a correctness decision rather than an omission
-----------------------------------------------------------------------
-The dependency runs the wrong way for the trick that works in AG-GEMM: there the rows a
-rank owns need no communication, so their GEMM can run during the collective. Here the
-GEMM *produces* what is sent, so nothing can be sent before it finishes.
+``--mode pipeline``: overlap by node slot, the way triton-dist swizzles tiles
+---------------------------------------------------------------------------
+The dependency runs the wrong way for the trick AG-GEMM uses -- here the GEMM *produces*
+what is sent -- but it can still be split. Output row block *g* belongs to global rank *g*,
+and the ranks of one node occupy a **contiguous** block of ``M``. So compute the rows the
+*other* node needs first, hand them to the fabric, and compute our own node's rows while
+they fly.
 
-The flat version tried computing the peer's block first, launching the collective, then
-computing our own -- and it silently mismatched 5.9M of 8.4M elements, because the
-reduce-scatter kernel also folds in this rank's own contribution and so read a block
-that had not been written yet. Real overlap needs the collective decomposed into a
-per-peer put plus a separate accumulate, which is a kernel change rather than a
-scheduling one. Left serial rather than shipping a fast wrong answer.
+That remote-first ordering is Triton-distributed's idea: their
+``swizzle_tiled_m_with_padding`` renumbers GEMM tiles so a rank computes the block belonging
+to rank *r+1* first and its own last, precisely so the transfers that must happen can start
+earliest.
+
+**Their exact swizzle does not transfer, and the reason is the reduce mechanism.** Theirs
+rotates *per rank*, which is right for per-peer pushes: every finished block has a single
+destination, and staggering the rotation spreads the senders. Ours reduces through the
+NVSwitch, and ``multimem.ld_reduce`` on a segment needs **every local rank** to have written
+it -- so a per-rank rotation would leave each rank ready on a segment its siblings are not.
+What ours needs is the same idea at coarser grain and in a *common* order: all ranks walk the
+node slots identically, with one barrier per slot.
+
+**And it loses, so ``serial`` stays the default.** Measured: at ``k-per-rank 2048`` serial
+0.334 ms / 411 TF against pipeline 0.365 / 376; at 4096, serial 0.429 / 640 against pipeline
+0.476 / 578. Roughly 10% worse at both, despite comm (~0.237 ms, near-fixed) and compute
+(0.031 ms at K/rank 512 rising to ~0.248 at 4096) being comparable at the larger shapes --
+which is exactly the regime overlap should win.
+
+Two costs swallow the gain. The two ``dist.barrier`` calls are ~30-50 us each of pure
+serialisation, and splitting one GEMM into two half-height launches hurts the persistent
+tcgen05 grid, whose wave quantisation over ``M/2`` rows is worse than over ``M``. Together
+they exceed the fabric time being hidden.
+
+The flag stays because the balance moves with shape and with barrier cost: replace the host
+barriers with a device-side arrive/wait on a symmetric flag and this should invert. That is
+the same conclusion three separate overlap attempts have reached -- see CLAUDE.md.
+
+The earlier flat attempt at this mismatched 5.9M of 8.4M elements because the collective also
+folded in this rank's own contribution and read a block not yet written. What makes it safe
+here is that the barrier is per node slot and the own-slot reduce happens after its rows are
+computed, so nothing is read early.
 """
 
 # NOTE: no `from __future__ import annotations` here -- see internode_2d.
@@ -51,6 +79,9 @@ def main() -> int:
     parser.add_argument("--block-m", type=int, default=128)
     parser.add_argument("--block-k", type=int, default=64)
     parser.add_argument("--gemm-block-n", type=int, default=256)
+    parser.add_argument("--mode", choices=("serial", "pipeline"), default="serial",
+                        help="pipeline computes the other node's rows first and reduces them "
+                             "while our own node's rows are still being computed")
     args = parser.parse_args()
 
     prepare_env()
@@ -67,15 +98,23 @@ def main() -> int:
     torch_dtype, tl_dtype = TORCH_DTYPES[args.dtype], TL_DTYPES[args.dtype]
     ctx.log(
         f"gemm_rs_2d: world={ctx.world_size} M={M} N={N} K={K_per_rank}/rank "
-        f"intra={intra} chunks={args.chunks} dtype={args.dtype}"
+        f"intra={intra} mode={args.mode} chunks={args.chunks} dtype={args.dtype}"
     )
 
     rs = ReduceScatter2D(ctx, M * N, torch_dtype, tl_dtype, args, intra=intra)
 
+    nodes = ctx.world_size // ctx.local_world_size
+    rows_per_node = M // nodes
+    if args.mode == "pipeline" and M % nodes:
+        raise SystemExit(f"--m {M} must divide by {nodes} nodes for --mode pipeline")
     gemm = ctx.compile(
         tcgen05_gemm_range_kernel(M, N, K_per_rank, M, block_M=args.block_m,
                                   block_N=args.gemm_block_n, block_K=args.block_k)
     )
+    gemm_node = ctx.compile(
+        tcgen05_gemm_range_kernel(M, N, K_per_rank, rows_per_node, block_M=args.block_m,
+                                  block_N=args.gemm_block_n, block_K=args.block_k)
+    ) if args.mode == "pipeline" else None
 
     A = ctx.tensor((M, K_per_rank), torch_dtype)
     B = ctx.tensor((K_per_rank, N), torch_dtype)
@@ -84,7 +123,27 @@ def main() -> int:
     # The GEMM writes the collective's input directly -- no staging copy.
     partial = rs.inp.view(M, N)
 
+    my_node = ctx.rank // ctx.local_world_size
+
+    def launch_pipeline():
+        # The other node's rows are what the fabric needs, so they go first.
+        for n in range(nodes):
+            if n == my_node:
+                continue
+            gemm_node(A, B, partial, n * rows_per_node)
+        dist.barrier(ctx.group)          # every rank has finished those rows
+        rs.reduce_remote()
+        targets = rs.issue_puts()        # fabric starts
+        gemm_node(A, B, partial, my_node * rows_per_node)  # overlaps the transfer
+        dist.barrier(ctx.group)
+        rs.reduce_own()
+        for g, target in enumerate(targets):
+            rs.finish_group(g, target)
+
     def launch():
+        if args.mode == "pipeline":
+            launch_pipeline()
+            return
         gemm(A, B, partial, 0)
         # The GEMM *produces* the collective's input, and the reduce reads every local
         # rank's copy of it through the multicast VA. Stream order only sequences our own

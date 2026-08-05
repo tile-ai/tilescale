@@ -1069,6 +1069,30 @@ class ReduceScatter2D(_Base):
             main_stream.wait_stream(self.side)
         return targets
 
+    # --- staged entry points, for a producer that wants to interleave compute ---
+    #
+    # A fused GEMM can compute the rows one node slot needs, hand that slot to the fabric,
+    # and compute the next slot's rows while the first is in flight. See
+    # example_internode_gemm_rs_2d.py --mode pipeline.
+
+    def reduce_remote(self):
+        """NVSwitch-reduce the node slots whose partials cross the fabric."""
+        self._reduce(self.red_remote)
+
+    def reduce_own(self):
+        """NVSwitch-reduce the slot we keep. Nothing on the network waits for it."""
+        self._reduce(self.red_own)
+
+    def issue_puts(self):
+        """Send every group's partial for the remote slots; returns the per-group targets."""
+        targets = []
+        for g in range(self.groups):
+            self._gtargets[g] += self.per_group_signals
+            targets.append(self._gtargets[g])
+        for g in range(self.groups):
+            self.put_k[g](self.partial, self.inbox, self.ctx.rank, targets[g])
+        return targets
+
     def finish_group(self, group, target):
         """Wait for group `group`'s arrivals and sum it into ``out``."""
         self.wait_k[group](self.inbox, target)
