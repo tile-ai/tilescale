@@ -21,7 +21,10 @@ _EXPORTS = {
     "_create_tensor": (".shared_memory", "_create_tensor"),
     "_create_ipc_handle": (".shared_memory", "_create_ipc_handle"),
     "_sync_ipc_handles": (".shared_memory", "_sync_ipc_handles"),
+    "_supports_vmm": (".shared_memory", "_supports_vmm"),
     "_supports_vmm_fabric": (".shared_memory", "_supports_vmm_fabric"),
+    "_create_vmm_fd_handle": (".shared_memory", "_create_vmm_fd_handle"),
+    "_open_vmm_fd_handle": (".shared_memory", "_open_vmm_fd_handle"),
     "_vmm_malloc": (".shared_memory", "_vmm_malloc"),
     "_vmm_free": (".shared_memory", "_vmm_free"),
     "_create_vmm_handle": (".shared_memory", "_create_vmm_handle"),
@@ -29,6 +32,8 @@ _EXPORTS = {
     "_close_vmm_handle": (".shared_memory", "_close_vmm_handle"),
     "_sync_vmm_handles": (".shared_memory", "_sync_vmm_handles"),
     "_supports_multicast": (".shared_memory", "_supports_multicast"),
+    "nccl_supports_device_api": (".nccl_window", "supports_device_api"),
+    "nccl_version": (".nccl_window", "nccl_version"),
 }
 
 __all__ = list(_EXPORTS)

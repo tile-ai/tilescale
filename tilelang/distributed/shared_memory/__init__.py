@@ -45,12 +45,18 @@ _create_vmm_handle = _get_required_global_func("tl.shared_memory.create_vmm_hand
 _open_vmm_handle = _get_required_global_func("tl.shared_memory.open_vmm_handle")
 _close_vmm_handle = _get_required_global_func("tl.shared_memory.close_vmm_handle")
 _sync_vmm_handles_raw = _get_required_global_func("tl.shared_memory.sync_vmm_handles")
+# POSIX-FD export/import, for nodes with no IMEX channel where a fabric handle
+# cannot be created. Capability-style lookup so an older native library still
+# imports.
+_create_vmm_fd_handle = _get_required_global_func("tl.shared_memory.create_vmm_fd_handle")
+_open_vmm_fd_handle = _get_required_global_func("tl.shared_memory.open_vmm_fd_handle")
 
 _create_ipc_handle = _get_required_global_func("tl.shared_memory.create_ipc_handle")
 _open_ipc_handle = _get_required_global_func("tl.shared_memory.open_ipc_handle")
 _close_ipc_handle = _get_required_global_func("tl.shared_memory.close_ipc_handle")
 _sync_ipc_handles_raw = _get_required_global_func("tl.shared_memory.sync_ipc_handles")
 
+_supports_vmm = _get_capability_global_func("tl.shared_memory.supports_vmm")
 _supports_vmm_fabric = _get_capability_global_func("tl.shared_memory.supports_vmm_fabric")
 _supports_multicast = _get_capability_global_func("tl.shared_memory.supports_multicast")
 
@@ -58,6 +64,10 @@ _supports_multicast = _get_capability_global_func("tl.shared_memory.supports_mul
 _mc_create = _get_required_global_func("tl.shared_memory.mc_create")
 _mc_export_handle = _get_required_global_func("tl.shared_memory.mc_export_handle")
 _mc_import_handle = _get_required_global_func("tl.shared_memory.mc_import_handle")
+# POSIX-fd route, for a cluster with no IMEX channel (see mc_export_fd_handle).
+_mc_export_fd_handle = _get_required_global_func("tl.shared_memory.mc_export_fd_handle")
+_mc_open_fd_handle = _get_required_global_func("tl.shared_memory.mc_open_fd_handle")
+_multicast_uses_fd = _get_capability_global_func("tl.shared_memory.multicast_uses_fd")
 _mc_add_device = _get_required_global_func("tl.shared_memory.mc_add_device")
 _mc_bind_mem = _get_required_global_func("tl.shared_memory.mc_bind_mem")
 _mc_map = _get_required_global_func("tl.shared_memory.mc_map")
@@ -285,12 +295,18 @@ __all__ = [
     "_close_ipc_handle",
     "_sync_ipc_handles",
     "create_host_device_tensor",
+    "_supports_vmm",
     "_supports_vmm_fabric",
     "_vmm_malloc",
     "_vmm_free",
     "_create_vmm_handle",
+    "_create_vmm_fd_handle",
+    "_open_vmm_fd_handle",
     "_open_vmm_handle",
     "_close_vmm_handle",
     "_sync_vmm_handles",
     "_supports_multicast",
+    "_mc_export_fd_handle",
+    "_mc_open_fd_handle",
+    "_multicast_uses_fd",
 ]

@@ -683,6 +683,12 @@ std::string CodeGenTileLangCUDA::Finish() {
     decl_stream << "#include <tl_templates/cuda/distributed/atomic.h>\n";
     decl_stream << "#include <tl_templates/cuda/distributed/ldst.h>\n";
     decl_stream << "#include <tl_templates/cuda/distributed/copy.h>\n";
+#ifdef TL_ENABLE_NCCL_GIN
+    // Inter-node put/signal via the NCCL Device API. The header is a no-op
+    // unless TL_ENABLE_NCCL_GIN is also defined for the JIT compile, which
+    // tilelang/env.py forwards when the build found a GIN-capable NCCL.
+    decl_stream << "#include <tl_templates/cuda/distributed/nccl_gin.h>\n";
+#endif
   }
   if (need_multimem_h_) {
     decl_stream << "#include <tl_templates/cuda/distributed/multimem.h>\n";
@@ -2001,6 +2007,9 @@ void CodeGenTileLangCUDA::PrintCallExtern(Type ret_type, String global_symbol,
       "tl::cp_warp",     "tl::cp_block",
       "tl::st<",         "tl::ld<",
       "tl::remote_load", "tl::remote_store",
+      // GIN helpers live under the distributed includes, so an inter-node
+      // kernel that only calls tl::gin:: must still pull them in.
+      "tl::gin::",
   };
   for (const char *prefix : kDistributedPrefixes) {
     size_t prefix_len = std::strlen(prefix);

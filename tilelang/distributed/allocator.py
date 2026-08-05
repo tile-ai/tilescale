@@ -4,9 +4,11 @@ import ctypes
 import ctypes.util
 import contextlib
 import os
+import time
 import operator
 import threading
 import warnings
+from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
@@ -20,8 +22,14 @@ from tilelang.distributed.shared_memory import (
     _create_vmm_handle,
     _open_vmm_handle,
     _close_vmm_handle,
+    _supports_vmm,
     _supports_vmm_fabric,
+    _create_vmm_fd_handle,
+    _open_vmm_fd_handle,
     _supports_multicast,
+    _mc_export_fd_handle,
+    _mc_open_fd_handle,
+    _multicast_uses_fd,
     _mc_create,
     _mc_export_handle,
     _mc_import_handle,
@@ -34,7 +42,25 @@ from tilelang.distributed.shared_memory import (
 )
 from tilelang.utils.target import parse_device
 
+if TYPE_CHECKING:
+    from tilelang.distributed.host import NodeTopology
+
 __all__ = ["BaseAllocator", "get_allocator"]
+
+# Distributed metadata table layout. Keep in sync with
+# src/tl_templates/cuda/distributed/meta_layout.h, which documents the fields
+# and is shared by the device helpers and the host remote-TMA remapping.
+_META_GLOBAL_RANK = 0
+_META_GLOBAL_WORLD_SIZE = 1
+_META_NODE_RANK = 2
+_META_NUM_NODES = 3
+_META_LOCAL_RANK = 4
+_META_LOCAL_WORLD_SIZE = 5
+_META_GLOBAL_DEV_COMM = 6
+_META_INTERNODE_DEV_COMM = 7
+_META_ARENA_WINDOW = 8
+_META_ARENA_BASE = 9
+_META_PEER_BASE = 10
 
 _dtype_to_str = {
     torch.float32: "float32",
@@ -120,14 +146,46 @@ def _parse_bool_env(name: str, value: str) -> bool:
     )
 
 
-def _resolve_use_vmm(use_vmm: bool | None, is_distributed: bool = False) -> bool:
-    """Resolve whether to use VMM based on env var and hardware support."""
+def _resolve_use_vmm(
+    use_vmm: bool | None,
+    is_distributed: bool = False,
+    needs_window: bool = False,
+) -> bool:
+    """Resolve whether to use VMM based on env var and hardware support.
+
+    Two different capabilities are involved. Mapping a peer's arena into this
+    process needs an *exportable fabric* handle, which requires an IMEX channel.
+    Registering the arena as an NCCL window for GIN needs only a driver-level
+    (VMM) allocation, which a POSIX-FD handle type also provides. So on a node
+    with no IMEX channel, fabric is unavailable but GIN is still reachable --
+    hence the weaker ``_supports_vmm`` check when a window is wanted.
+    """
     env_val = os.environ.get("TILESCALE_USE_VMM", None)
     if env_val is not None:
         return _parse_bool_env("TILESCALE_USE_VMM", env_val)
     if use_vmm is not None:
         return use_vmm
-    return is_distributed and _supports_vmm_fabric()
+    if is_distributed and _supports_vmm_fabric():
+        return True
+    # A cudaMalloc arena cannot be registered as an NCCL window, so GIN would be
+    # dead on arrival; prefer VMM whenever it can be allocated at all.
+    return bool(needs_window) and _supports_vmm()
+
+
+def _resolve_register_window(is_multi_node: bool) -> tuple[bool, bool]:
+    """Resolve whether to register the arena as an NCCL window for GIN.
+
+    Returns ``(requested, required)``. ``required`` marks an explicit opt-in via
+    ``TILESCALE_USE_GIN``, where a failure to register must raise rather than
+    silently fall back -- inter-node traffic would otherwise be quietly dead.
+    Auto mode only attempts registration for a genuine multi-node job, so
+    single-node runs never take on an NCCL Device API dependency.
+    """
+    env_val = os.environ.get("TILESCALE_USE_GIN", None)
+    if env_val is not None:
+        requested = _parse_bool_env("TILESCALE_USE_GIN", env_val)
+        return requested, requested
+    return is_multi_node, False
 
 
 class BaseAllocator:
@@ -144,6 +202,7 @@ class BaseAllocator:
         align: int = 256,
         use_vmm: bool | None = None,
         mcast_size: int | None = None,
+        node_info: NodeTopology | None = None,
     ) -> None:
         # Keep potentially failing local parsing inside the first collective
         # stage below. Otherwise one rank can exit while its peers wait forever
@@ -159,6 +218,8 @@ class BaseAllocator:
         self._local_rank = local_rank
         self._num_local_ranks = num_local_ranks
         self._group = group
+        self._node_info = node_info
+        self._is_multi_node = (node_info is not None and node_info.num_nodes > 1)
         self._align = align
         self._lock = threading.RLock()
         self._mcast_size_requested = mcast_size
@@ -186,6 +247,23 @@ class BaseAllocator:
         self._use_multicast = False
         self._group_size = 1
         self._group_root_global_rank = 0
+        # NCCL/GIN arena window state. Zero means "no window registered", which
+        # is the normal single-node case and keeps the intra-node peer-pointer
+        # path free of any NCCL Device API dependency.
+        self._arena_window = 0
+        self._arena_window_comm = 0
+        self._arena_window_size = 0
+        # The GIN devcomm, created only once the window registers. Holding the
+        # object alive is what keeps its device pointer valid.
+        self._dev_comm = None
+        # GIN gets its own process group. ncclDevCommCreate needs a communicator
+        # that still supports symmetric memory, and a torch communicator loses
+        # that after its first collective -- the call then *segfaults* rather
+        # than failing, so it cannot be attempted and recovered from. Allocator
+        # construction runs several collectives on the caller's group before GIN
+        # setup, so a private group is the only safe option.
+        self._gin_group = None
+        self._register_window, self._require_window = _resolve_register_window(self._is_multi_node)
 
         if self._is_distributed:
             if self._group is None:
@@ -193,8 +271,17 @@ class BaseAllocator:
             if not dist.is_initialized():
                 raise RuntimeError("torch.distributed must be initialized before creating a distributed allocator")
 
-            self._group_size = dist.get_world_size(self._group)
-            group_rank = dist.get_rank(self._group)
+            # For multi-node, use node-local group for IPC/VMM operations
+            # For single-node, use the provided group as-is
+            if self._is_multi_node:
+                self._allocator_group = self._node_info.node_local_group
+                self._global_group = self._group
+            else:
+                self._allocator_group = self._group
+                self._global_group = self._group
+
+            self._group_size = dist.get_world_size(self._allocator_group)
+            group_rank = dist.get_rank(self._allocator_group)
 
         try:
             if self._is_distributed:
@@ -214,6 +301,7 @@ class BaseAllocator:
                 self._collective_stage("allocate base storage", self._alloc_base)
                 if self._mcast_size_requested is not None:
                     self._init_multicast_buffer()
+                self._init_arena_window()
                 self._init_table()
             else:
                 self._prepare_local_configuration()
@@ -245,7 +333,11 @@ class BaseAllocator:
         if self._mcast_size_requested is not None:
             self._mcast_size_requested = positive_integer(self._mcast_size_requested, "mcast_size")
         self._device = parse_device(self._device_request)
-        self._use_vmm = _resolve_use_vmm(self._use_vmm_requested, self._is_distributed)
+        self._use_vmm = _resolve_use_vmm(
+            self._use_vmm_requested,
+            self._is_distributed,
+            needs_window=self._register_window,
+        )
 
     def _validate_distributed_configuration(self, group_rank: int) -> None:
         """Collectively validate invariants before any allocation is created."""
@@ -259,16 +351,19 @@ class BaseAllocator:
             "device": self._device,
         }
         configurations = [None] * self._group_size
-        dist.all_gather_object(configurations, local_config, group=self._group)
+        dist.all_gather_object(configurations, local_config, group=self._allocator_group)
 
         failures = []
         reference = configurations[0]
         invariant_keys = ("size", "align", "use_vmm", "mcast_size", "num_local_ranks")
         for rank, config in enumerate(configurations):
+            # The allocator group is node-local, so a rank's index within it is
+            # its local rank in both the single-node and multi-node cases.
             if config["local_rank"] != rank:
                 failures.append(f"rank {rank} reports local_rank={config['local_rank']!r}")
-            if config["device"] != rank:
-                failures.append(f"rank {rank} reports device={config['device']!r}")
+            if config["device"] != config["local_rank"]:
+                failures.append(f"rank {rank} reports device={config['device']!r}, expected local_rank={config['local_rank']!r}")
+
             for key in invariant_keys:
                 if config[key] != reference[key]:
                     failures.append(f"rank {rank} reports {key}={config[key]!r}, expected {reference[key]!r}")
@@ -285,9 +380,12 @@ class BaseAllocator:
         self._device_ids = [config["device"] for config in configurations]
 
     def _resolve_group_root(self) -> None:
+        # For multi-node, resolve global rank of node-local group root
+        # For single-node, resolve as before
+        group_to_resolve = self._allocator_group if self._is_multi_node else self._group
         if hasattr(dist, "get_global_rank"):
-            self._group_root_global_rank = dist.get_global_rank(self._group, 0)
-        elif self._group is not dist.group.WORLD:
+            self._group_root_global_rank = dist.get_global_rank(group_to_resolve, 0)
+        elif group_to_resolve is not dist.group.WORLD:
             raise RuntimeError("this PyTorch version cannot resolve the global rank of a subgroup")
 
     def _prepare_multicast(self) -> None:
@@ -307,6 +405,23 @@ class BaseAllocator:
                     f"to avoid dangling peer mappings ({rollback_error})"
                 )
 
+            # Any one of the three is worth a rollback, and they are created in
+            # order (group, devcomm, window), so a failure at any point leaves a
+            # different subset behind. _free_arena_window releases whichever exist.
+            if self._arena_window or self._dev_comm is not None or self._gin_group is not None:
+                try:
+                    self._collective_stage(
+                        "rollback arena NCCL window",
+                        self._free_arena_window,
+                        group=self._global_group,
+                    )
+                except Exception as rollback_error:  # noqa: BLE001
+                    return RuntimeError(
+                        "distributed allocator initialization failed and deregistration of the "
+                        "arena NCCL window also failed; owned allocations were intentionally "
+                        f"retained to avoid freeing memory behind a live window ({rollback_error})"
+                    )
+
             try:
                 self._collective_stage("rollback owned allocations", self._free_local_allocations)
             except Exception as rollback_error:  # noqa: BLE001
@@ -324,20 +439,34 @@ class BaseAllocator:
             )
         return None
 
-    def _collective_stage(self, stage: str, operation):
-        """Run a local operation and make every rank observe any exception."""
+    def _collective_stage(self, stage: str, operation, group: dist.ProcessGroup | None = None):
+        """Run a local operation and make every rank observe any exception.
+
+        ``group`` defaults to the node-local allocator group. Stages whose
+        collective spans nodes (NCCL window registration) must pass the global
+        group, or a failure on one node leaves the other node waiting forever.
+        """
+        if group is None:
+            group = self._allocator_group
+        group_size = dist.get_world_size(group)
         local_exception = None
         result = None
+        _trace = os.environ.get("TL_STAGE_TRACE")
+        _t0 = time.perf_counter() if _trace else 0.0
         try:
             result = operation()
         except Exception as exc:  # noqa: BLE001 - propagated with rank context
             local_exception = exc
+        _t1 = time.perf_counter() if _trace else 0.0
 
         local_status = None
         if local_exception is not None:
             local_status = f"{type(local_exception).__name__}: {local_exception}"
-        statuses = [None] * self._group_size
-        dist.all_gather_object(statuses, local_status, group=self._group)
+        statuses = [None] * group_size
+        dist.all_gather_object(statuses, local_status, group=group)
+        if _trace:
+            print(f"[alloc r{dist.get_rank()}] {_t1 - _t0:6.3f}s work "
+                  f"{time.perf_counter() - _t1:6.3f}s sync  {stage}", flush=True)
         failures = [f"rank {rank}: {status}" for rank, status in enumerate(statuses) if status is not None]
         if failures:
             error = RuntimeError(f"distributed allocator stage '{stage}' failed ({'; '.join(failures)})")
@@ -363,6 +492,104 @@ class BaseAllocator:
                 raise RuntimeError(f"cudaMalloc failed: {rc} {msg.decode() if msg else ''}")
         self._ptr.value = self._base_ptr.value
 
+    def _init_arena_window(self):
+        """Register the whole arena as one NCCL window for GIN inter-node access.
+
+        Registration is collective over the *global* group and 4096-byte
+        aligned, so it happens once here rather than per tensor. One handle plus
+        a peer index names any rank's bytes, and the arena is symmetric, so
+        ``local_ptr - arena_base`` is the offset valid on every rank.
+        """
+        if not self._register_window:
+            return
+
+        from tilelang.distributed import nccl_window as _win
+
+        def check_support():
+            if not _win.supports_device_api():
+                raise RuntimeError(_win.unavailable_reason())
+            # Measured on <node> with NCCL 2.28.9: ncclCommWindowRegister
+            # rejects a plain cudaMalloc pointer with "invalid argument" under
+            # both NCCL_WIN_COLL_SYMMETRIC and flags=0, while a VMM-mapped arena
+            # registers cleanly. The NIC needs the driver-level allocation that
+            # only the VMM path (or ncclMemAlloc) produces.
+            if not self._use_vmm:
+                raise RuntimeError(
+                    "NCCL window registration requires a VMM-backed arena; the cudaMalloc "
+                    "backend cannot be registered. Enable VMM (unset TILESCALE_USE_VMM=0) "
+                    "for inter-node GIN support")
+
+        try:
+            self._collective_stage(
+                "check NCCL Device API support", check_support, group=self._global_group)
+        except Exception as exc:  # noqa: BLE001 - optional unless explicitly requested
+            if self._require_window:
+                raise RuntimeError(
+                    "TILESCALE_USE_GIN requested NCCL window registration, but the NCCL "
+                    f"Device API is unavailable: {exc}"
+                ) from exc
+            warnings.warn(
+                "inter-node run without GIN: the arena could not be registered as an NCCL "
+                f"window ({exc}); inter-node primitives will be unavailable",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            self._register_window = False
+            return
+
+        def make_gin_group():
+            # device_id makes the new communicator eager, so _comm_ptr() is
+            # non-null right away; without it the comm is created lazily on
+            # first use, and the first use would be the collective that
+            # invalidates it for ncclDevCommCreate.
+            self._gin_group = dist.new_group(
+                ranks=dist.get_process_group_ranks(self._global_group),
+                backend="nccl",
+                device_id=torch.device("cuda", self._device),
+            )
+
+        # new_group is collective over WORLD and every rank must reach it, so it
+        # runs as its own stage rather than inside the registration closure.
+        self._collective_stage("create GIN process group", make_gin_group, group=self._global_group)
+
+        def create_dev_comm():
+            # Before any collective touches this group -- see make_gin_group.
+            comm_ptr = _win.get_comm_ptr(self._gin_group)
+            if not comm_ptr:
+                raise RuntimeError(
+                    "could not obtain the raw ncclComm_t for the GIN process group; "
+                    "torch.distributed must expose ProcessGroupNCCL._comm_ptr()"
+                )
+            self._arena_window_comm = comm_ptr
+            self._dev_comm = _win.create_dev_comm(comm_ptr)
+
+        self._collective_stage("create GIN devcomm", create_dev_comm, group=self._global_group)
+
+        def register():
+            base = self._base_ptr.value
+            if base is None or base == 0:
+                raise RuntimeError("arena base pointer is null; cannot register an NCCL window")
+            if base % _win.NCCL_WIN_REQUIRED_ALIGNMENT:
+                raise RuntimeError(
+                    f"arena base {base:#x} is not {_win.NCCL_WIN_REQUIRED_ALIGNMENT}-byte aligned; "
+                    "NCCL window registration requires NCCL_WIN_REQUIRED_ALIGNMENT"
+                )
+            size = _align_up(self.size, _win.NCCL_WIN_REQUIRED_ALIGNMENT)
+            if size > self.size:
+                raise RuntimeError(
+                    f"arena size {self.size} is not a multiple of "
+                    f"{_win.NCCL_WIN_REQUIRED_ALIGNMENT}; registering {size} bytes would run "
+                    "past the allocation"
+                )
+            # The same communicator the devcomm was created from: a window
+            # handle is only meaningful to the devcomm that shares its comm.
+            self._arena_window_size = size
+            self._arena_window = _win.register_window(
+                self._arena_window_comm, base, size, _win.NCCL_WIN_COLL_SYMMETRIC)
+
+        # Spans nodes, so it must be gated on the global group.
+        self._collective_stage("register arena NCCL window", register, group=self._global_group)
+
     def _init_multicast_buffer(self):
         """Create multicast object and map, following multi-process fabric pattern."""
         num_devices = self._num_local_ranks
@@ -375,17 +602,27 @@ class BaseAllocator:
         self._collective_stage("allocate multicast physical storage", allocate_physical_storage)
 
         # Rank 0 creates MC object, exports fabric handle; broadcast to all
+        # Fabric handles need an IMEX channel; without one the multicast object is
+        # shared as a POSIX fd instead. The C++ side picks the route, so ask it
+        # rather than re-probing here and risking the two disagreeing.
+        mcast_uses_fd = bool(_multicast_uses_fd())
+
         def create_and_export():
             if self._local_rank != 0:
                 return None
             self._mcast_handle = _mc_create(aligned, num_devices)
-            return bytes(_mc_export_handle(self._mcast_handle))
+            export = _mc_export_fd_handle if mcast_uses_fd else _mc_export_handle
+            return bytes(export(self._mcast_handle))
 
         mcast_fabric_bytes = self._collective_stage("create multicast object", create_and_export)
 
         def broadcast_handle():
+            # The multicast object spans one node's devices, and each node's
+            # local rank 0 creates its own. Broadcasting over the global group
+            # would have ranks on different nodes pass different `src` values to
+            # the same collective, so this must stay node-local.
             obj_list = [mcast_fabric_bytes]
-            dist.broadcast_object_list(obj_list, src=self._group_root_global_rank, group=self._group)
+            dist.broadcast_object_list(obj_list, src=self._group_root_global_rank, group=self._allocator_group)
             return obj_list[0]
 
         mcast_fabric_bytes = self._collective_stage("broadcast multicast object", broadcast_handle)
@@ -393,7 +630,8 @@ class BaseAllocator:
         # Non-rank-0 import the MC handle
         def import_handle():
             if self._local_rank != 0:
-                self._mcast_handle = _mc_import_handle(mcast_fabric_bytes)
+                open_handle = _mc_open_fd_handle if mcast_uses_fd else _mc_import_handle
+                self._mcast_handle = open_handle(mcast_fabric_bytes)
 
         self._collective_stage("import multicast object", import_handle)
 
@@ -495,10 +733,22 @@ class BaseAllocator:
                     lambda: torch.cuda.synchronize(self._device),
                 )
                 self._collective_stage("release imported mappings", self._free_remote_mappings)
+                # Deregistration is collective over the global group and must
+                # precede freeing the arena the window points at. Destroying the
+                # devcomm and the GIN group are collective too, so this stage runs
+                # when any of the three exists -- gating on the window alone would
+                # skip resources left behind by a partially failed init.
+                if self._arena_window or self._dev_comm is not None or self._gin_group is not None:
+                    self._collective_stage(
+                        "deregister arena NCCL window",
+                        self._free_arena_window,
+                        group=self._global_group,
+                    )
                 self._collective_stage("release owned allocations", self._free_local_allocations)
             else:
                 self._set_device("allocator close")
                 self._free_remote_mappings()
+                self._free_arena_window()
                 self._free_local_allocations()
 
             self._closed = True
@@ -516,6 +766,7 @@ class BaseAllocator:
         """Best-effort non-collective teardown used by failed construction/destruction."""
         self._set_device("allocator cleanup")
         self._free_remote_mappings()
+        self._free_arena_window()
         self._free_local_allocations()
 
     def _free_remote_mappings(self):
@@ -545,6 +796,61 @@ class BaseAllocator:
         self._peer_ptr_values = []
         self._buffer_ptrs = None
 
+    def _free_dev_comm(self):
+        """Destroy the GIN devcomm. Collective, and must precede window teardown."""
+        dev_comm = getattr(self, "_dev_comm", None)
+        if dev_comm is None:
+            return
+        # Clear first so a failed destroy is not retried against a handle NCCL may
+        # already have released, and so kernels cannot read a stale pointer.
+        self._dev_comm = None
+        if self._table is not None and len(self._table) > _META_INTERNODE_DEV_COMM:
+            self._table[_META_GLOBAL_DEV_COMM] = 0
+            self._table[_META_INTERNODE_DEV_COMM] = 0
+
+        from tilelang.distributed import nccl_window as _win
+
+        _win.destroy_dev_comm(dev_comm)
+
+    def _free_arena_window(self):
+        """Tear down the whole GIN stack: devcomm, then window, then its group.
+
+        Ordered innermost-first, since each resource references the one after it.
+        No step short-circuits the rest: a partially failed init can leave any
+        subset of the three behind, and each one is skipped individually rather
+        than by returning early.
+        """
+        # The devcomm references the communicator the window belongs to, so it has
+        # to go first regardless of whether a window was ever registered.
+        self._free_dev_comm()
+
+        window = getattr(self, "_arena_window", 0)
+        if window:
+            comm_ptr = getattr(self, "_arena_window_comm", 0)
+            # Clear first: a failed deregistration must not be retried against a
+            # handle NCCL may already have destroyed.
+            self._arena_window = 0
+            self._arena_window_comm = 0
+            self._arena_window_size = 0
+            if self._table is not None and len(self._table) > _META_ARENA_WINDOW:
+                self._table[_META_ARENA_WINDOW] = 0
+
+            from tilelang.distributed import nccl_window as _win
+
+            _win.deregister_window(comm_ptr, window)
+
+        # Last: the communicator both of the above were created from.
+        self._free_gin_group()
+
+    def _free_gin_group(self):
+        """Destroy the private GIN process group, after its devcomm and window."""
+        gin_group = getattr(self, "_gin_group", None)
+        if gin_group is None:
+            return
+        self._gin_group = None
+        # Collective, and only safe once nothing references the communicator.
+        dist.destroy_process_group(gin_group)
+
     def _free_local_allocations(self):
         if getattr(self, "_mcast_phys_ptr", 0) and self._mcast_phys_ptr:
             mcast_phys_ptr = self._mcast_phys_ptr
@@ -572,17 +878,46 @@ class BaseAllocator:
         # Synchronize handles (VMM or IPC)
         handles = [None] * self._group_size
 
+        # With a single rank on the node there is no peer to map, so the export is
+        # pure overhead -- and it is not always possible: a VMM arena allocated
+        # with a POSIX-FD handle type (the fallback when no IMEX channel exists)
+        # cannot be exported as a fabric handle. Skipping keeps a GIN-only run
+        # working on nodes where intra-node peer mapping is unavailable.
+        #
+        # TILESCALE_SKIP_PEER_IPC=1 extends that to multi-rank nodes, for kernels
+        # that reach every peer through GIN and never dereference a peer pointer.
+        # The cost is real: peer base pointers stay zero, so every intra-node
+        # primitive that resolves a peer address (push/pull, remote TMA, the
+        # multimem paths) is unusable, which rules out any hierarchical
+        # collective. Prefer the POSIX-FD path below.
+        skip_peer_handles = (
+            self._group_size == 1 or os.environ.get("TILESCALE_SKIP_PEER_IPC") == "1"
+        )
+
+        # Which VMM export to use for intra-node mapping. Fabric handles need an
+        # IMEX channel; where there is none the arena is created with a POSIX-FD
+        # handle type, which cannot be exported as fabric at all
+        # (cuMemExportToShareableHandle -> "invalid argument"). The FD path shares
+        # that same allocation by publishing (pid, fd) and having peers duplicate
+        # the descriptor with pidfd_getfd, so 8 ranks per node work without IMEX.
+        use_fd_export = self._use_vmm and not _supports_vmm_fabric()
+
         def create_handle():
             if self._use_vmm:
+                if use_fd_export:
+                    return _create_vmm_fd_handle(self._base_ptr.value)
                 return _create_vmm_handle(self._base_ptr.value)
             return _create_ipc_handle(self._base_ptr.value)
 
-        local_handle = self._collective_stage("export allocation handles", create_handle)
-        local_handle = self._collective_stage(
-            "serialize allocation handle",
-            lambda: bytes(local_handle),
-        )
-        dist.all_gather_object(handles, local_handle, group=self._group)
+        if skip_peer_handles:
+            handles = [b""]
+        else:
+            local_handle = self._collective_stage("export allocation handles", create_handle)
+            local_handle = self._collective_stage(
+                "serialize allocation handle",
+                lambda: bytes(local_handle),
+            )
+            dist.all_gather_object(handles, local_handle, group=self._allocator_group)
 
         def allocate_peer_pointer_table():
             self._buffer_ptrs = torch.empty(self._group_size, dtype=torch.uint64, device=f"cuda:{self._device}")
@@ -596,8 +931,13 @@ class BaseAllocator:
             for peer_rank, handle in enumerate(handles):
                 if peer_rank == self._local_rank:
                     self._peer_ptr_values[peer_rank] = self._base_ptr.value
+                elif skip_peer_handles:
+                    continue
                 elif self._use_vmm:
-                    self._peer_ptr_values[peer_rank] = _open_vmm_handle(handle)
+                    self._peer_ptr_values[peer_rank] = (
+                        _open_vmm_fd_handle(handle) if use_fd_export
+                        else _open_vmm_handle(handle)
+                    )
                 else:
                     self._peer_ptr_values[peer_rank] = _open_ipc_handle(handle)
 
@@ -607,11 +947,42 @@ class BaseAllocator:
         self._collective_stage("import allocation handles", import_handles)
 
         def finalize_pointer_table():
-            self._table_size = 2 + self._group_size
+            # Layout is defined once in
+            # src/tl_templates/cuda/distributed/meta_layout.h and must match the
+            # device helpers in distributed.h and the host-side remote TMA
+            # remapping in src/cuda/runtime.cc.
+            if self._is_multi_node:
+                global_rank = dist.get_rank(self._global_group)
+                global_world_size = dist.get_world_size(self._global_group)
+                node_rank = self._node_info.node_rank
+                num_nodes = self._node_info.num_nodes
+            else:
+                global_rank = self._local_rank
+                global_world_size = self._num_local_ranks
+                node_rank = 0
+                num_nodes = 1
+            local_rank = self._local_rank
+            local_world_size = self._num_local_ranks
+
+            self._table_size = _META_PEER_BASE + local_world_size
             self._table = torch.empty(self._table_size, dtype=torch.uint64, device="cpu")
-            self._table[0] = self._local_rank
-            self._table[1] = self._group_size
-            self._table[2:] = self._buffer_ptrs
+            self._table[_META_GLOBAL_RANK] = global_rank
+            self._table[_META_GLOBAL_WORLD_SIZE] = global_world_size
+            self._table[_META_NODE_RANK] = node_rank
+            self._table[_META_NUM_NODES] = num_nodes
+            self._table[_META_LOCAL_RANK] = local_rank
+            self._table[_META_LOCAL_WORLD_SIZE] = local_world_size
+            # Device pointer to the GIN devcomm, or zero when GIN is unavailable;
+            # tl::gin::available() tests exactly this slot. The devcomm covers the
+            # whole global communicator, so the same handle serves both slots --
+            # the inter-node entry is kept distinct for a future rail-local comm.
+            dev_comm_ptr = self._dev_comm.device_ptr if self._dev_comm is not None else 0
+            self._table[_META_GLOBAL_DEV_COMM] = dev_comm_ptr
+            self._table[_META_INTERNODE_DEV_COMM] = dev_comm_ptr
+            # Zero window means no GIN; kernels must check before using it.
+            self._table[_META_ARENA_WINDOW] = self._arena_window
+            self._table[_META_ARENA_BASE] = self._base_ptr.value or 0
+            self._table[_META_PEER_BASE:] = self._buffer_ptrs
 
         self._collective_stage("finalize peer pointer table", finalize_pointer_table)
 
@@ -697,6 +1068,33 @@ class BaseAllocator:
     def table_size(self) -> int:
         return self._table_size
 
+    @property
+    def arena_window(self) -> int:
+        """``ncclWindow_t`` for the whole arena, or 0 when GIN is unavailable."""
+        return self._arena_window
+
+    @property
+    def arena_base(self) -> int:
+        """Arena base address; subtract from a local pointer to get a window offset."""
+        return int(self._base_ptr.value) if self._base_ptr and self._base_ptr.value else 0
+
+    def window_offset(self, ptr: int) -> int:
+        """Convert a local arena pointer to the offset valid on every rank.
+
+        The arena is symmetric, so the same offset names the corresponding bytes
+        on any peer -- the identical subtraction the intra-node peer-pointer path
+        performs, just paired with a window handle instead of a peer base.
+        """
+        base = self.arena_base
+        if not base:
+            raise RuntimeError("allocator has no arena base; cannot compute a window offset")
+        ptr = operator.index(ptr)
+        if not base <= ptr < base + self.size:
+            raise ValueError(
+                f"pointer {ptr:#x} is outside the arena [{base:#x}, {base + self.size:#x})"
+            )
+        return ptr - base
+
     def __enter__(self):
         return self
 
@@ -734,6 +1132,7 @@ def get_allocator(
     group: dist.ProcessGroup | None = None,
     use_vmm: bool | None = None,
     mcast_size: int | None = None,
+    node_info: NodeTopology | None = None,
 ) -> BaseAllocator:
     return BaseAllocator(
         size,
@@ -744,4 +1143,5 @@ def get_allocator(
         group=group,
         use_vmm=use_vmm,
         mcast_size=mcast_size,
+        node_info=node_info,
     )

@@ -158,6 +158,33 @@ list(APPEND TILE_LANG_SRCS ${TILE_LANG_CUDA_SRCS})
 list(APPEND TILE_LANG_INCLUDES ${CUDAToolkit_INCLUDE_DIRS})
 link_directories(${CUDAToolkit_LIBRARY_DIR} ${CUDAToolkit_LIBRARY_DIR}/stubs)
 
+# Inter-node support (NCCL Device API / GIN). Optional: when absent, the
+# nccl_gin.h include is not emitted by codegen and distributed kernels keep
+# working on the intra-node NVLink paths.
+option(TILELANG_USE_NCCL_GIN
+  "Enable inter-node put/signal via the NCCL Device API (GIN) when available" ON)
+
+set(TILELANG_NCCL_GIN_ENABLED OFF)
+if(TILELANG_USE_NCCL_GIN)
+  # This file is include()d from the top-level CMakeLists.txt, so
+  # CMAKE_CURRENT_SOURCE_DIR is the repo root (same assumption as the
+  # file(GLOB src/cuda/*.cc) calls below).
+  include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindNCCLGin.cmake)
+  if(NCCLGin_FOUND)
+    set(TILELANG_NCCL_GIN_ENABLED ON)
+    list(APPEND TILE_LANG_INCLUDES ${NCCL_INCLUDE_DIR})
+    # codegen_cuda.cc reads this to decide whether to emit the GIN include.
+    # tilelang_objs does not exist yet at include() time, so set the definition
+    # directory-wide (same approach as CUDA_MAJOR_VERSION above).
+    add_compile_definitions(TL_ENABLE_NCCL_GIN=1)
+    # Recorded for tilelang/env.py, which must pass the same include dir and
+    # define to nvcc at JIT time -- the host build enabling GIN is not enough.
+    set(TILELANG_NCCL_INCLUDE_DIR "${NCCL_INCLUDE_DIR}")
+    set(TILELANG_NCCL_LIBRARY "${NCCL_LIBRARY}")
+    set(TILELANG_NCCL_VERSION "${NCCL_VERSION_STRING}")
+  endif()
+endif()
+
 # Register stubs for linking and install
 if(TILELANG_USE_CUDA_STUBS)
   list(APPEND TILELANG_ACTIVE_BACKEND_STUB_LINK cuda_stub)

@@ -8,7 +8,13 @@ import os
 import subprocess
 import warnings
 import contextlib
-from tilelang.env import CUDA_HOME, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH, env
+from tilelang.env import (
+    CUDA_HOME,
+    CUTLASS_INCLUDE_DIR,
+    NCCL_INCLUDE_DIR,
+    TILELANG_TEMPLATE_PATH,
+    env,
+)
 import shutil
 import tempfile
 import tvm_ffi
@@ -178,6 +184,13 @@ def default_compile_options(compile_flags: list[str] | None = None) -> list[str]
     try:
         if CUTLASS_INCLUDE_DIR:
             options.append(f"-I{CUTLASS_INCLUDE_DIR}")
+    except Exception:
+        pass
+    try:
+        # NCCL device headers plus the define codegen keys the GIN include off.
+        if NCCL_INCLUDE_DIR:
+            options.append(f"-I{NCCL_INCLUDE_DIR}")
+            options.append("-DTL_ENABLE_NCCL_GIN=1")
     except Exception:
         pass
     try:

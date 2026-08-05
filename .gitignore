@@ -128,3 +128,6 @@ maint/host_checks/logs/*
 
 # uv Lockfile
 uv.lock
+
+# Private working notes: cluster hostnames, internal IPs, absolute paths.
+CLAUDE.md

@@ -37,6 +37,12 @@ from .multimem import (
     multimem_signal_add,
 )
 
+# Exposed as a namespace (T.nccl_gin.put) rather than flattened, because these
+# names would otherwise collide with the intra-node put/get and read as though
+# they were interchangeable with them. They are not: GIN addresses windows, not
+# peer pointers, and takes global rather than local ranks.
+from . import nccl_gin  # noqa: F401
+
 __all__ = [
     "get_rank",
     "get_num_ranks",
@@ -63,4 +69,5 @@ __all__ = [
     "multimem_tma_store",
     "multimem_signal",
     "multimem_signal_add",
+    "nccl_gin",
 ]

@@ -9,6 +9,7 @@
 #include <tvm/runtime/logging.h>
 
 #include "cuda/stubs/cuda.h"
+#include "tl_templates/cuda/distributed/meta_layout.h"
 #include <cstdint>
 #include <sstream>
 #include <vector>
@@ -220,21 +221,35 @@ static bool IsPackedAlign16TensorMapType(CUtensorMapDataType type) {
 }
 
 static void *RemapSymmetricRemoteAddress(void *local_address, int64_t dst_pe) {
-  ICHECK_GE(remote_tensormap_meta_data.size(), 3U)
+  ICHECK_GT(remote_tensormap_meta_data.size(),
+            static_cast<size_t>(TL_META_PEER_BASE))
       << "Distributed meta_data is not initialized. Call "
          "kernel.initialize(allocator=...) before using remote TMA "
          "descriptors.";
   ICHECK_GE(dst_pe, 0);
-  uint64_t local_rank = remote_tensormap_meta_data[0];
-  if (dst_pe >= static_cast<int64_t>(remote_tensormap_meta_data[1])) {
-    // Remote descriptor lowering may materialize a fixed peer descriptor set
-    // and select among them in device code. Descriptors for peers outside the
-    // current process group are never selected, but still need a valid dummy
-    // address during host-side CUtensorMap encoding.
-    dst_pe = static_cast<int64_t>(local_rank);
+  // Peer base pointers are indexed by local rank: only node-local peers are
+  // mappable, so a global rank must be reduced to its node-local rank.
+  uint64_t local_world_size =
+      remote_tensormap_meta_data[TL_META_LOCAL_WORLD_SIZE];
+  ICHECK_GT(local_world_size, 0U) << "Distributed meta_data reports an empty "
+                                     "node-local world size.";
+  uint64_t local_rank = remote_tensormap_meta_data[TL_META_LOCAL_RANK];
+  uint64_t node_rank = remote_tensormap_meta_data[TL_META_NODE_RANK];
+  // Remote descriptor lowering may materialize a fixed peer descriptor set and
+  // select among them in device code. Descriptors for peers outside this node
+  // are never selected, but still need a valid dummy address during host-side
+  // CUtensorMap encoding.
+  uint64_t dst = static_cast<uint64_t>(dst_pe);
+  uint64_t dst_local_rank = (dst / local_world_size == node_rank)
+                                ? dst % local_world_size
+                                : local_rank;
+  if (dst_local_rank >= local_world_size) {
+    dst_local_rank = local_rank;
   }
-  uint64_t local_base = remote_tensormap_meta_data[2 + local_rank];
-  uint64_t remote_base = remote_tensormap_meta_data[2 + dst_pe];
+  uint64_t local_base =
+      remote_tensormap_meta_data[TL_META_PEER_BASE + local_rank];
+  uint64_t remote_base =
+      remote_tensormap_meta_data[TL_META_PEER_BASE + dst_local_rank];
   uint64_t local_ptr = reinterpret_cast<uint64_t>(local_address);
   ICHECK_GE(local_ptr, local_base)
       << "Remote TMA descriptor base pointer is outside the symmetric "
