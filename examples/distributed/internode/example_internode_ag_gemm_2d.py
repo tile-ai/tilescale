@@ -30,9 +30,10 @@ mattering because that GEMM is covering the network.
 existing steps, plus one extra barrier -- so it reuses only kernels that are already
 verified, and its correctness rests on the barriers rather than on new signalling.
 
-Measured at 16 GPUs, M=8192 N=4096 K=4096: pipeline 0.430 ms (639.6 TF), serial 0.481
-(571.9), unfused torch 0.500 (550.0). So pipelining is worth 12% over serial and the
-fused kernel is 1.16x torch. Deliberately **not** an in-kernel signal wait:
+Measured at 16 GPUs, M=8192 N=4096 K=4096, and the ordering *inverted* once the collective
+got faster: with the slower collective pipeline 0.430 ms beat serial 0.481; with rail-group
+pipelining in place, serial 0.373 (736.8 TF) beats pipeline 0.441 (622.9) against unfused
+torch's 0.500 (550.0) -- 1.34x against 1.13x. Deliberately **not** an in-kernel signal wait:
 that deadlocked before, because a 2048-CTA GEMM grid fills every SM with CTAs waiting on
 a signal and the comm kernel never gets scheduled. Capping the GEMM at 132 persistent CTAs
 fixed the hang and was *slower than serial*. Doing it properly needs an SM partition like
@@ -74,10 +75,15 @@ def main() -> int:
     parser.add_argument("--block-m", type=int, default=128)
     parser.add_argument("--block-k", type=int, default=64)
     parser.add_argument("--gemm-block-n", type=int, default=256)
-    # pipeline is the default now that it has run: correct on all 16 ranks, 0.430 ms
-    # against serial's 0.481 (12% faster) and torch's 0.500.
+    # serial is the default again, and the reversal is the point. When the collective was
+    # slower, pipelining the fabric hop under our own node's GEMM won by 12% (0.430 ms
+    # against 0.481). Once rail-group pipelining made the collective ~50% faster there was
+    # far less fabric left to hide, and the pipeline's extra barrier and split GEMM launches
+    # cost more than they save: serial 0.373 ms / 736.8 TF against pipeline 0.441 / 622.9,
+    # so 1.34x torch against 1.13x. Re-measure whenever the collective changes -- the answer
+    # is a function of the comm/compute balance, not a property of this kernel.
     parser.add_argument("--mode", choices=("serial", "overlap", "pipeline"),
-                        default="pipeline")
+                        default="serial")
     args = parser.parse_args()
 
     prepare_env()
