@@ -47,11 +47,15 @@ def main() -> int:
     parser.add_argument("--phases", action="store_true",
                         help="time each kernel on its own, to locate headroom")
     # Allgather's intra-node half is two multicast publishes and no reduce, so it is
-    # switch-bound rather than occupancy-bound and prefers fewer, fatter CTAs at every size
-    # measured -- 0.164 ms at 32 tiles against 0.233 at 4 for 48 MiB, 0.501 against 0.585
-    # for 240 MiB. The size-scaling default in internode_2d is for the reduce-carrying
-    # collectives, which behave the opposite way.
-    parser.set_defaults(mc_tiles=32)
+    # switch-bound rather than occupancy-bound and wants fatter CTAs than the
+    # reduce-carrying collectives: 32 tiles gives 0.164 ms against 0.233 at 4 for 48 MB,
+    # and 0.501 against 0.585 for 240 MB.
+    #
+    # But not at the smallest sizes. At 32 MB (a 2 MB shard) the curve peaks at 16, and 32 is
+    # well past it: tiles 2/8/16/32 measure 183.7 / 210.4 / 216.9 / 194.5 GB/s. So this is a
+    # threshold fitted to three shard sizes -- 2 MB wants 16, 3 MB and 15.7 MB want 32 -- and
+    # nothing finer. --mc-tiles overrides it.
+    parser.set_defaults(mc_tiles=0)
     args = parser.parse_args()
 
     prepare_env()
@@ -70,6 +74,8 @@ def main() -> int:
         f"overlap={not args.no_overlap} contexts={args.gin_contexts} dtype={args.dtype}"
     )
 
+    if not args.mc_tiles:
+        args.mc_tiles = 16 if (args.numel // ctx.world_size) * itemsize < 3_000_000 else 32
     ag = Allgather2D(ctx, args.numel, torch_dtype, tl_dtype, args, intra=intra)
     ag.shard.copy_(
         torch.arange(ag.shard_numel, device=ag.shard.device, dtype=torch.float32)
