@@ -540,9 +540,15 @@ def workable_chunks(shard_numel, threads, world_size, local_world_size, dtype,
     120 MB does not, because its 491520-element put lands in the bad set.
 
     Halving the count doubles the put size and moves off the bad value -- and larger puts
-    are what RDMA wants anyway. Probed with a plain ``tilelang.compile`` rather than
-    ``ctx.compile``: the latter is collective, and a rank raising inside it while its peers
-    proceed would hang instead of failing.
+    are what RDMA wants anyway.
+
+    Probed with a plain ``tilelang.compile`` rather than ``ctx.compile``. Not because a
+    collective compile cannot report a failure -- ``_maybe_compile_once`` does ship the
+    root's traceback through its ``all_gather_object``, so a root lowering failure fails
+    cleanly on every rank. The reason is that each node runs a different interpreter and
+    NCCL (see run_internode.sh), so "every rank rejects the same size" is an assumption
+    about two toolchains rather than a guarantee; probing locally keeps the retry loop from
+    depending on it.
     """
     while True:
         try:
@@ -584,7 +590,13 @@ class _Base:
         if self.nodes < 2:
             raise SystemExit("the 2D collectives need >= 2 nodes")
         itemsize = torch.empty((), dtype=torch_dtype).element_size()
-        args.mc_tiles = pick_mc_tiles(shard_numel, itemsize, args.mc_tiles)
+        # Resolved onto self, never back onto `args`. Several of these knobs are rewritten
+        # from the requested value (pick_mc_tiles here, workable_chunks and the
+        # MIN_GROUP_BYTES cap below), and mutating the shared namespace would make a caller
+        # that builds more than one collective -- an autotuner sweeping candidates, or
+        # allreduce building both halves -- silently inherit the previous one's rewrites and
+        # report a config it did not run.
+        self.mc_tiles = pick_mc_tiles(shard_numel, itemsize, args.mc_tiles)
         self.chunks = workable_chunks(shard_numel, args.threads, ctx.world_size, self.lws,
                                       tl_dtype, args.chunks, args.gin_contexts, ctx.log)
         if self.chunks % args.gin_contexts:
@@ -593,7 +605,8 @@ class _Base:
                 f"{args.gin_contexts}: wait_signal divides the target by the granted "
                 f"context count and would round it down")
         if intra == "multimem":
-            unit = 2 * args.mc_threads * args.mc_tiles
+            # self.mc_tiles, not args.mc_tiles: the latter is 0 in auto mode.
+            unit = 2 * args.mc_threads * self.mc_tiles
             if shard_numel % unit:
                 raise SystemExit(
                     f"shard {shard_numel} must be a multiple of "
@@ -742,7 +755,7 @@ class Allgather2D(_Base):
 
         if use_mc:
             mc = functools.partial(mc_bcast_kernel, *self._mc_args(),
-                                   tiles_per_cta=args.mc_tiles)
+                                   tiles_per_cta=self.mc_tiles)
             span = self.shard_numel // self.groups
             self.group_numel = span
             # One kernel per group: the slice offset must be compile-time, see
@@ -954,7 +967,7 @@ class ReduceScatter2D(_Base):
 
         if use_mc:
             build = functools.partial(mc_reduce_kernel, *self._mc_args(),
-                                      tiles_per_cta=args.mc_tiles)
+                                      tiles_per_cta=self.mc_tiles)
         else:
             build = functools.partial(pull_reduce_kernel, *self._pull_args(args.intra_chunks))
         # With one group the fabric hop is a single transfer, so there is nothing for the
@@ -1110,7 +1123,7 @@ class Allreduce2D(_Base):
                 f"of --gin-contexts {args.gin_contexts}; got {cps} per slot")
 
         mc = functools.partial(mc_reduce_kernel, *self._mc_args(),
-                               tiles_per_cta=args.mc_tiles)
+                               tiles_per_cta=self.mc_tiles)
         self.red_remote = ctx.compile(mc(slots="remote"))
         self.red_own = ctx.compile(mc(slots="own"))
 
@@ -1133,7 +1146,7 @@ class Allreduce2D(_Base):
                                      ctx.world_size, self.lws, tl_dtype, m)))
             self.pub_k.append(ctx.compile(
                 mc_bcast_kernel(*self._mc_args(), slots="all",
-                                tiles_per_cta=args.mc_tiles, node_slot=m)))
+                                tiles_per_cta=self.mc_tiles, node_slot=m)))
 
         self.inp_mc, self.inp = ctx.mcast_tensor((numel,), torch_dtype)
         self.out_mc, self.out = ctx.mcast_tensor((numel,), torch_dtype)
