@@ -27,8 +27,8 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     torch.manual_seed(1234 + rank)
     device = f"cuda:{local_rank}"
     x = torch.randn(args.tokens, args.hidden, dtype=torch.bfloat16, device=device)
-    topk_idx = torch.randint(0, args.experts, (args.tokens, args.topk), device=device)
-    topk_weights = torch.rand(args.tokens, args.topk, device=device)
+    topk_idx, topk_weights = reference.make_topk(
+        args.tokens, args.topk, args.experts, device, args.masked_ratio)
 
     buf = Buffer(
         group=group,
@@ -54,8 +54,11 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     expert_out = reference.simulate_expert_compute(recv_x, recv_topk_idx, recv_topk_weights)
     combined = buf.combine(expert_out, handle)
-    expected = reference.reference_combined(x, topk_weights)
-    rel_l2 = (combined.float() - expected.float()).norm().item() / expected.float().norm().item()
+    expected = reference.reference_combined(x, topk_weights, topk_idx)
+    err = (combined.float() - expected.float()).norm().item()
+    denom = expected.float().norm().item()
+    # `denom` is zero only when every selection was masked off.
+    rel_l2 = err / denom if denom > 0 else err
     passed = rel_l2 < 0.05
     print(f"rank {rank}: rel_l2_error={rel_l2:.6f} passed={passed}")
     assert passed, f"rank {rank}: mismatch, rel_l2_error={rel_l2}"
@@ -67,6 +70,8 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--num-processes", type=int, default=8)
+    # Fraction of top-k selections marked unselected (-1), DeepEP's marker.
+    parser.add_argument("--masked-ratio", type=float, default=0.0)
     parser.add_argument("--tokens", type=int, default=8192)
     parser.add_argument("--hidden", type=int, default=7168)
     parser.add_argument("--topk", type=int, default=8)

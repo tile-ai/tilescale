@@ -180,6 +180,26 @@ computation that consumes it.
 DeepEP's figures are GPU time only; this port's are whole Python calls,
 including ~9 µs of host work.
 
+## Not implemented
+
+DeepEP intranode features this port does not cover. None of them is blocked by
+a design decision here -- each would be an additive parameter or output:
+
+| | |
+|---|---|
+| `handle=` on dispatch | reuse a cached layout and skip the notify phase entirely |
+| `do_expand` / expanded layout | one slot per (expert, token) instead of dedup per rank, with the per-expert prefix sum that comes with it |
+| `expert_alignment` | round each local expert's received count up to a multiple |
+| `kAllowMultipleReduction` | combine-side local sum across several experts on one rank |
+| combine `topk_weights` | carry the gate weights back as a side output |
+| combine `bias` | 0, 1 or 2 bias tensors added to the output |
+| `cumulative_local_expert_recv_stats` | per-expert receive counts for load-balance monitoring |
+| `deterministic` mode | DeepEP has a separate prologue for it |
+| `use_tma_aligned_col_major_sf` | column-major scale-factor layout for a downstream GEMM |
+
+Out of scope by design: RDMA/scaleout (`num_qps`), the low-latency decode path,
+and Engram/PP/CP.
+
 ## Running
 
 ```bash

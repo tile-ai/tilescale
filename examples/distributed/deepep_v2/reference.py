@@ -25,9 +25,31 @@ def simulate_expert_compute(recv_x: torch.Tensor, recv_topk_idx: torch.Tensor, r
     return recv_x * weight_sum.to(recv_x.dtype)
 
 
-def reference_combined(x: torch.Tensor, topk_weights: torch.Tensor) -> torch.Tensor:
-    """Expected combine output: every token's full top-k weight sum applied once."""
-    return x * topk_weights.sum(dim=-1, keepdim=True).to(x.dtype)
+def reference_combined(x: torch.Tensor, topk_weights: torch.Tensor,
+                       topk_idx: torch.Tensor | None = None) -> torch.Tensor:
+    """Expected combine output: every token's top-k weight sum applied once.
+
+    Entries with `topk_idx < 0` are unselected and contribute nothing, so a
+    token with no selections at all comes back as zero.
+    """
+    w = topk_weights
+    if topk_idx is not None:
+        w = torch.where(topk_idx >= 0, w, torch.zeros_like(w))
+    return x * w.sum(dim=-1, keepdim=True).to(x.dtype)
+
+
+def make_topk(num_tokens: int, topk: int, num_experts: int, device, masked_ratio: float = 0.0):
+    """Routing inputs, with `masked_ratio` of the selections marked unselected.
+
+    `-1` is DeepEP's "no selection" marker and reaches dispatch's dedup and
+    slot-claiming as a destination of -1, so it needs exercising rather than
+    assuming.
+    """
+    idx = torch.randint(0, num_experts, (num_tokens, topk), device=device)
+    weights = torch.rand(num_tokens, topk, device=device)
+    if masked_ratio > 0:
+        idx = idx.masked_fill(torch.rand_like(idx, dtype=torch.float) < masked_ratio, -1)
+    return idx, weights
 
 
 # ---------------------------------------------------------------------------

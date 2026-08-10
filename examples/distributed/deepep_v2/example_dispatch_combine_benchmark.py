@@ -94,8 +94,8 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     torch.manual_seed(1234 + rank)
     device = f"cuda:{local_rank}"
     x = torch.randn(args.tokens, args.hidden, dtype=torch.bfloat16, device=device)
-    topk_idx = torch.randint(0, args.experts, (args.tokens, args.topk), device=device)
-    topk_weights = torch.rand(args.tokens, args.topk, device=device)
+    topk_idx, topk_weights = reference.make_topk(
+        args.tokens, args.topk, args.experts, device, args.masked_ratio)
 
     buf = Buffer(
         group=group,
@@ -149,6 +149,8 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--num-processes", type=int, default=8)
+    # Fraction of top-k selections marked unselected (-1), DeepEP's marker.
+    parser.add_argument("--masked-ratio", type=float, default=0.0)
     parser.add_argument("--tokens", type=int, default=8192)
     parser.add_argument("--hidden", type=int, default=7168)
     parser.add_argument("--topk", type=int, default=8)

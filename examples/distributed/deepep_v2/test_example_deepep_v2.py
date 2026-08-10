@@ -24,14 +24,14 @@ import reference
 _BF16_REL_L2_THRESHOLD = 0.05
 
 
-def _run(local_rank: int, num_ranks: int, num_tokens: int, hidden: int, topk: int, num_experts: int, num_sms: int):
+def _run(local_rank: int, num_ranks: int, num_tokens: int, hidden: int, topk: int, num_experts: int,
+         num_sms: int, masked_ratio: float = 0.0):
     rank, num_ranks, group = init_dist(local_rank, num_ranks)
 
     torch.manual_seed(1234 + rank)
     device = f"cuda:{local_rank}"
     x = torch.randn(num_tokens, hidden, dtype=torch.bfloat16, device=device)
-    topk_idx = torch.randint(0, num_experts, (num_tokens, topk), device=device)
-    topk_weights = torch.rand(num_tokens, topk, device=device)
+    topk_idx, topk_weights = reference.make_topk(num_tokens, topk, num_experts, device, masked_ratio)
 
     buf = Buffer(
         group=group,
@@ -51,8 +51,11 @@ def _run(local_rank: int, num_ranks: int, num_tokens: int, hidden: int, topk: in
         expert_out = reference.simulate_expert_compute(recv_x, recv_topk_idx, recv_topk_weights)
         combined = buf.combine(expert_out, handle)
 
-        expected = reference.reference_combined(x, topk_weights)
-        rel_l2 = (combined.float() - expected.float()).norm().item() / expected.float().norm().item()
+        expected = reference.reference_combined(x, topk_weights, topk_idx)
+        err = (combined.float() - expected.float()).norm().item()
+        denom = expected.float().norm().item()
+        # `denom` is zero only when every selection was masked off.
+        rel_l2 = err / denom if denom > 0 else err
         assert rel_l2 < _BF16_REL_L2_THRESHOLD, f"rank {rank}: rel_l2_error={rel_l2} exceeds {_BF16_REL_L2_THRESHOLD}"
     finally:
         buf.close()
@@ -70,6 +73,15 @@ def test_dispatch_combine_smoke(local_rank: int, num_ranks: int):
 def test_dispatch_combine_v3_shape(local_rank: int, num_ranks: int):
     """DeepEP's own headline benchmark shape: 8K tokens, hidden=7168, top-8, 256 experts."""
     _run(local_rank, num_ranks, num_tokens=8192, hidden=7168, topk=8, num_experts=256, num_sms=64)
+
+
+@tilelang.testing.requires_cuda
+@distributed_test(nprocs=8)
+def test_dispatch_combine_masked(local_rank: int, num_ranks: int):
+    """Half the selections unset: dispatch must route -1 nowhere, and a token
+    with no selections at all must combine back to zero."""
+    _run(local_rank, num_ranks, num_tokens=1024, hidden=1024, topk=8, num_experts=256,
+         num_sms=32, masked_ratio=0.5)
 
 
 if __name__ == "__main__":
