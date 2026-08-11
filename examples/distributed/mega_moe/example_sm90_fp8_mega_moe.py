@@ -166,30 +166,20 @@ def device_barrier_kernel(num_ranks: int):
 
 def finalize_routes_kernel(
     num_tokens: int,
-    hidden: int,
     num_experts: int,
     num_topk: int,
     num_ranks: int,
-    capacity: int,
     threads: int = 128,
 ):
     num_experts_per_rank = num_experts // num_ranks
-    num_scale_groups = hidden // SCALE_GRANULARITY
     num_routes = num_tokens * num_topk
     num_work_items = max(num_routes, num_experts_per_rank)
 
     @T.prim_func
     def main(
-        x_sf: T.Tensor((num_tokens, num_scale_groups), T.float32),
         topk_idx: T.Tensor((num_tokens, num_topk), T.int32),
-        topk_weights: T.Tensor((num_tokens, num_topk), T.float32),
         route_counts: T.Tensor((num_ranks, num_experts), T.int32),
         recv_counts: T.Tensor((num_experts_per_rank,), T.int32),
-        recv_x_sf: T.Tensor((num_experts_per_rank, capacity, num_scale_groups), T.float32),
-        recv_weights: T.Tensor((num_experts_per_rank, capacity), T.float32),
-        src_ranks: T.Tensor((num_experts_per_rank, capacity), T.int32),
-        src_tokens: T.Tensor((num_experts_per_rank, capacity), T.int32),
-        src_topk: T.Tensor((num_experts_per_rank, capacity), T.int32),
         route_slots: T.Tensor((num_tokens, num_topk), T.int32),
     ):
         with T.Kernel(T.ceildiv(num_work_items, threads), threads=threads) as bx:
@@ -214,19 +204,6 @@ def finalize_routes_kernel(
                         if peer_rank < src_rank[0]:
                             slot += route_counts[peer_rank, expert_idx]
                     route_slots[token_idx, topk_slot] = slot
-                    if slot < capacity:
-                        dst_rank = expert_idx // num_experts_per_rank
-                        local_expert = expert_idx % num_experts_per_rank
-                        T.st(recv_weights[local_expert, slot], topk_weights[token_idx, topk_slot], dst_pe=dst_rank)
-                        T.st(src_ranks[local_expert, slot], src_rank[0], dst_pe=dst_rank)
-                        T.st(src_tokens[local_expert, slot], token_idx, dst_pe=dst_rank)
-                        T.st(src_topk[local_expert, slot], topk_slot, dst_pe=dst_rank)
-                        for scale_idx in T.serial(num_scale_groups):
-                            T.st(
-                                recv_x_sf[local_expert, slot, scale_idx],
-                                x_sf[token_idx, scale_idx],
-                                dst_pe=dst_rank,
-                            )
 
     return main
 
@@ -242,15 +219,26 @@ def dispatch_tokens_kernel(
     threads: int = 128,
 ):
     num_experts_per_rank = num_experts // num_ranks
+    num_scale_groups = hidden // SCALE_GRANULARITY
 
     @T.prim_func
     def main(
         x: T.Tensor((num_tokens, hidden), T.float8_e4m3fn),
+        x_sf: T.Tensor((num_tokens, num_scale_groups), T.float32),
         topk_idx: T.Tensor((num_tokens, num_topk), T.int32),
+        topk_weights: T.Tensor((num_tokens, num_topk), T.float32),
         route_slots: T.Tensor((num_tokens, num_topk), T.int32),
         recv_x: T.Tensor((num_experts_per_rank, capacity, hidden), T.float8_e4m3fn),
+        recv_x_sf: T.Tensor((num_experts_per_rank, capacity, num_scale_groups), T.float32),
+        recv_weights: T.Tensor((num_experts_per_rank, capacity), T.float32),
+        src_ranks: T.Tensor((num_experts_per_rank, capacity), T.int32),
+        src_tokens: T.Tensor((num_experts_per_rank, capacity), T.int32),
+        src_topk: T.Tensor((num_experts_per_rank, capacity), T.int32),
     ):
         with T.Kernel(T.ceildiv(hidden, block_h), num_tokens * num_topk, threads=threads) as (bx, by):
+            src_rank = T.alloc_local((1,), T.int32)
+            src_rank[0] = T.get_rank()
+            tx = T.get_thread_binding()
             token_idx = by // num_topk
             topk_slot = by % num_topk
             expert_idx = topk_idx[token_idx, topk_slot]
@@ -264,7 +252,18 @@ def dispatch_tokens_kernel(
                     dst_pe=dst_rank,
                     disable_tma=True,
                 )
-                T.fence_sys()
+                if bx == 0 and num_scale_groups > 0:
+                    T.copy(
+                        x_sf[token_idx, :],
+                        recv_x_sf[local_expert, slot, :],
+                        dst_pe=dst_rank,
+                        disable_tma=True,
+                    )
+                    if tx == 0 and src_rank[0] < num_ranks:
+                        T.st(recv_weights[local_expert, slot], topk_weights[token_idx, topk_slot], dst_pe=dst_rank)
+                        T.st(src_ranks[local_expert, slot], src_rank[0], dst_pe=dst_rank)
+                        T.st(src_tokens[local_expert, slot], token_idx, dst_pe=dst_rank)
+                        T.st(src_topk[local_expert, slot], topk_slot, dst_pe=dst_rank)
 
     return main
 
@@ -408,7 +407,6 @@ def scatter_outputs_kernel(
                         dst_pe=dst_rank,
                         disable_tma=True,
                     )
-                    T.fence_sys()
 
     return main
 
@@ -571,7 +569,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         assign_local_routes_kernel(num_tokens, num_experts, num_topk, num_ranks),
         publish_route_counts_kernel(num_experts, num_ranks),
         device_barrier_kernel(num_ranks),
-        finalize_routes_kernel(num_tokens, hidden, num_experts, num_topk, num_ranks, capacity),
+        finalize_routes_kernel(num_tokens, num_experts, num_topk, num_ranks),
         dispatch_tokens_kernel(num_tokens, hidden, num_experts, num_topk, num_ranks, capacity),
         fp8_grouped_gemm_kernel(num_experts_per_rank, capacity, 2 * intermediate_hidden, hidden),
         swiglu_quant_kernel(
@@ -684,19 +682,24 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         publish_route_counts(route_counts)
         device_barrier(barrier)
         finalize_routes(
+            topk_idx,
+            route_counts,
+            recv_counts,
+            route_slots,
+        )
+        dispatch_tokens(
+            x,
             x_sf,
             topk_idx,
             topk_weights,
-            route_counts,
-            recv_counts,
+            route_slots,
+            recv_x,
             recv_x_sf,
             recv_weights,
             src_ranks,
             src_tokens,
             src_topk,
-            route_slots,
         )
-        dispatch_tokens(x, topk_idx, route_slots, recv_x)
         device_barrier(barrier)
         if check_capacity:
             local_max = recv_counts.max()
