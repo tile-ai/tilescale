@@ -27,8 +27,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     torch.manual_seed(1234 + rank)
     device = f"cuda:{local_rank}"
     x = torch.randn(args.tokens, args.hidden, dtype=torch.bfloat16, device=device)
-    topk_idx, topk_weights = reference.make_topk(
-        args.tokens, args.topk, args.experts, device, args.masked_ratio)
+    topk_idx, topk_weights = reference.make_topk(args.tokens, args.topk, args.experts, device, args.masked_ratio)
 
     buf = Buffer(
         group=group,

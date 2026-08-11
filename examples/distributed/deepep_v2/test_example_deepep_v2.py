@@ -24,8 +24,9 @@ import reference
 _BF16_REL_L2_THRESHOLD = 0.05
 
 
-def _run(local_rank: int, num_ranks: int, num_tokens: int, hidden: int, topk: int, num_experts: int,
-         num_sms: int, masked_ratio: float = 0.0):
+def _run(
+    local_rank: int, num_ranks: int, num_tokens: int, hidden: int, topk: int, num_experts: int, num_sms: int, masked_ratio: float = 0.0
+):
     rank, num_ranks, group = init_dist(local_rank, num_ranks)
 
     torch.manual_seed(1234 + rank)
@@ -80,8 +81,7 @@ def test_dispatch_combine_v3_shape(local_rank: int, num_ranks: int):
 def test_dispatch_combine_masked(local_rank: int, num_ranks: int):
     """Half the selections unset: dispatch must route -1 nowhere, and a token
     with no selections at all must combine back to zero."""
-    _run(local_rank, num_ranks, num_tokens=1024, hidden=1024, topk=8, num_experts=256,
-         num_sms=32, masked_ratio=0.5)
+    _run(local_rank, num_ranks, num_tokens=1024, hidden=1024, topk=8, num_experts=256, num_sms=32, masked_ratio=0.5)
 
 
 if __name__ == "__main__":

@@ -25,8 +25,7 @@ def simulate_expert_compute(recv_x: torch.Tensor, recv_topk_idx: torch.Tensor, r
     return recv_x * weight_sum.to(recv_x.dtype)
 
 
-def reference_combined(x: torch.Tensor, topk_weights: torch.Tensor,
-                       topk_idx: torch.Tensor | None = None) -> torch.Tensor:
+def reference_combined(x: torch.Tensor, topk_weights: torch.Tensor, topk_idx: torch.Tensor | None = None) -> torch.Tensor:
     """Expected combine output: every token's top-k weight sum applied once.
 
     Entries with `topk_idx < 0` are unselected and contribute nothing, so a

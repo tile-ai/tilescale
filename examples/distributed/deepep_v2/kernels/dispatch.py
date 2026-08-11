@@ -256,9 +256,6 @@ def dispatch_kernel(
                 slot = -1
                 if leader == 1 and dst_rank >= 0:
                     slot = T.atom_add(slot_counter[dst_rank], 1, scope="gpu")
-                # The final compact index on the destination -- known here only
-                # because phase 2 handed every rank the full count matrix.
-                idx = T.alloc_var(T.int32, init=send_base[dst_rank] + slot)
 
                 for k in range(topk):
                     dst_k = T.alloc_var(T.int32)
@@ -266,6 +263,9 @@ def dispatch_kernel(
                     dst_k = T.shfl_sync(dst_rank, k)
                     slot_k = T.shfl_sync(slot, k)
                     if slot_k >= 0:
+                        # The final compact index on the destination -- known
+                        # here only because phase 2 handed every rank the full
+                        # count matrix.
                         idx_k = T.alloc_var(T.int32, init=send_base[dst_k] + slot_k)
                         T.put_warp(
                             src=T.address_of(x[token, 0]),
@@ -288,7 +288,9 @@ def dispatch_kernel(
                             if dst_k * experts_per_rank <= expert and expert < (dst_k + 1) * experts_per_rank:
                                 local_expert = expert - dst_k * experts_per_rank
                             T.st(recv_topk_idx[idx_k * topk + lane], local_expert, scope="sys", sem="relaxed", dst_pe=dst_k)
-                            T.st(recv_topk_weights[idx_k * topk + lane], topk_weights[token, lane], scope="sys", sem="relaxed", dst_pe=dst_k)
+                            T.st(
+                                recv_topk_weights[idx_k * topk + lane], topk_weights[token, lane], scope="sys", sem="relaxed", dst_pe=dst_k
+                            )
 
             T.barrier_blocks(barrier[num_ranks])
 

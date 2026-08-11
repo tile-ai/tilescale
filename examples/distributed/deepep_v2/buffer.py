@@ -68,7 +68,19 @@ class EPHandle:
             `combine` reduces back into.
     """
 
-    def __init__(self, num_experts, num_max_tokens_per_rank, num_sms, topk_idx, num_recv, psum_recv_count, recv_src_rank, recv_src_token, num_tokens, finish_event=None):
+    def __init__(
+        self,
+        num_experts,
+        num_max_tokens_per_rank,
+        num_sms,
+        topk_idx,
+        num_recv,
+        psum_recv_count,
+        recv_src_rank,
+        recv_src_token,
+        num_tokens,
+        finish_event=None,
+    ):
         self.num_experts = num_experts
         self.num_max_tokens_per_rank = num_max_tokens_per_rank
         self.num_sms = num_sms
@@ -211,15 +223,15 @@ class Buffer:
         # bytes and viewed. Nothing in the kernel cares -- `put_warp` moves
         # 16-byte vectors either way -- and the view is what the caller sees.
         self._recv_x_storage = tilelang.tensor(
-            (self.total_capacity, hidden), torch.uint8 if self.is_fp8 else dtype,
-            allocator=self.allocator)
+            (self.total_capacity, hidden), torch.uint8 if self.is_fp8 else dtype, allocator=self.allocator
+        )
         self.recv_x = self._recv_x_storage.view(dtype) if self.is_fp8 else self._recv_x_storage
         self.recv_x_flat = self.recv_x.view(-1)
         # Only the FP8 path has scales; on BF16 both of these are 1x1
         # stand-ins matching the kernel's degenerate argument shapes.
         self.recv_x_scales = tilelang.tensor(
-            (self.total_capacity, self.scale_dim) if self.is_fp8 else (1, 1),
-            torch.float32, allocator=self.allocator)
+            (self.total_capacity, self.scale_dim) if self.is_fp8 else (1, 1), torch.float32, allocator=self.allocator
+        )
         self._no_scales = torch.zeros((1, 1), dtype=torch.float32, device=f"cuda:{local_rank}")
         self.recv_src_rank = tilelang.tensor((self.total_capacity,), torch.int32, allocator=self.allocator)
         self.recv_src_token = tilelang.tensor((self.total_capacity,), torch.int32, allocator=self.allocator)
@@ -269,8 +281,15 @@ class Buffer:
     def _get_dispatch_kernel(self, num_tokens: int):
         if num_tokens not in self._dispatch_kernels:
             kernel = dispatch_kernel(
-                num_tokens, self.num_ranks, self.num_experts, self.num_topk, self.hidden,
-                self.num_max_tokens_per_rank, self.num_sms, self.dispatch_threads, self.tl_dtype,
+                num_tokens,
+                self.num_ranks,
+                self.num_experts,
+                self.num_topk,
+                self.hidden,
+                self.num_max_tokens_per_rank,
+                self.num_sms,
+                self.dispatch_threads,
+                self.tl_dtype,
                 self.scale_dim,
             )
             kernel.compile_group = self.group
@@ -281,16 +300,22 @@ class Buffer:
     def _get_combine_kernel(self, num_tokens: int):
         if num_tokens not in self._combine_kernels:
             kernel = combine_kernel(
-                num_tokens, self.num_ranks, self.hidden, self.num_max_tokens_per_rank,
-                self.total_capacity, self.num_sms, self.combine_threads, self.reduce_threads, self.tl_combine_dtype,
+                num_tokens,
+                self.num_ranks,
+                self.hidden,
+                self.num_max_tokens_per_rank,
+                self.total_capacity,
+                self.num_sms,
+                self.combine_threads,
+                self.reduce_threads,
+                self.tl_combine_dtype,
             )
             kernel.compile_group = self.group
             kernel.initialize(allocator=self.allocator)
             self._combine_kernels[num_tokens] = kernel
         return self._combine_kernels[num_tokens]
 
-    def dispatch(self, x, topk_idx: torch.Tensor, topk_weights: torch.Tensor,
-                 num_sms: int = 0, async_finish: bool = False):
+    def dispatch(self, x, topk_idx: torch.Tensor, topk_weights: torch.Tensor, num_sms: int = 0, async_finish: bool = False):
         """Scatter `x` to the ranks owning each token's top-k experts.
 
         `x` is `(values, scales)` when the buffer's dtype is FP8 and a plain
@@ -306,8 +331,7 @@ class Buffer:
         # because it is fused into the previous layer's epilogue in practice.
         if self.is_fp8:
             x, x_scales = x
-            assert x_scales.shape[1] == self.scale_dim, \
-                f"expected {self.scale_dim} scales per token, got {x_scales.shape[1]}"
+            assert x_scales.shape[1] == self.scale_dim, f"expected {self.scale_dim} scales per token, got {x_scales.shape[1]}"
             x_scales = x_scales.float().contiguous()
         else:
             x_scales = self._no_scales
@@ -331,12 +355,26 @@ class Buffer:
             # own entry `barrier_blocks` provides it, which is why no collective
             # is needed here. See kernels/dispatch.py.
             kernel(
-                x, x_scales, topk_idx_i32, topk_weights_f32,
-                self.notify_done, self.exchange_done, self.send_count, self.count_matrix,
-                self.send_base, self.psum_recv_count, self.num_recv, self.slot_counter,
-                self.send_rank_mask[:num_tokens], self.barrier,
-                self.recv_x_flat, self.recv_x_scales.view(-1), self.recv_src_rank, self.recv_src_token,
-                self.recv_topk_idx.view(-1), self.recv_topk_weights.view(-1),
+                x,
+                x_scales,
+                topk_idx_i32,
+                topk_weights_f32,
+                self.notify_done,
+                self.exchange_done,
+                self.send_count,
+                self.count_matrix,
+                self.send_base,
+                self.psum_recv_count,
+                self.num_recv,
+                self.slot_counter,
+                self.send_rank_mask[:num_tokens],
+                self.barrier,
+                self.recv_x_flat,
+                self.recv_x_scales.view(-1),
+                self.recv_src_rank,
+                self.recv_src_token,
+                self.recv_topk_idx.view(-1),
+                self.recv_topk_weights.view(-1),
             )
 
             # No device-to-host read of `num_recv`: it cost ~33us and nothing
@@ -363,10 +401,16 @@ class Buffer:
             compute_stream.wait_stream(self.comm_stream)
 
         handle = EPHandle(
-            self.num_experts, self.num_max_tokens_per_rank, num_sms,
-            topk_idx_i32, num_recv, psum_recv_count,
-            self.recv_src_rank, self.recv_src_token,
-            num_tokens, finish_event if async_finish else None,
+            self.num_experts,
+            self.num_max_tokens_per_rank,
+            num_sms,
+            topk_idx_i32,
+            num_recv,
+            psum_recv_count,
+            self.recv_src_rank,
+            self.recv_src_token,
+            num_tokens,
+            finish_event if async_finish else None,
         )
         recv = (self.recv_x, self.recv_x_scales) if self.is_fp8 else self.recv_x
         return (recv, self.recv_topk_idx, self.recv_topk_weights, handle)
@@ -383,8 +427,14 @@ class Buffer:
         with torch.cuda.stream(self.comm_stream):
             kernel = self._get_combine_kernel(num_tokens)
             kernel(
-                x_flat, self.recv_src_rank, self.recv_src_token, handle.num_recv,
-                self.send_rank_mask[:num_tokens], self.barrier, self.comm_x, self.combined[:num_tokens],
+                x_flat,
+                self.recv_src_rank,
+                self.recv_src_token,
+                handle.num_recv,
+                self.send_rank_mask[:num_tokens],
+                self.barrier,
+                self.comm_x,
+                self.combined[:num_tokens],
             )
         compute_stream.wait_stream(self.comm_stream)
         # No pipeline bound here, unlike `dispatch`, and the asymmetry is not

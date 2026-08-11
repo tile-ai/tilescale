@@ -94,8 +94,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     torch.manual_seed(1234 + rank)
     device = f"cuda:{local_rank}"
     x = torch.randn(args.tokens, args.hidden, dtype=torch.bfloat16, device=device)
-    topk_idx, topk_weights = reference.make_topk(
-        args.tokens, args.topk, args.experts, device, args.masked_ratio)
+    topk_idx, topk_weights = reference.make_topk(args.tokens, args.topk, args.experts, device, args.masked_ratio)
 
     buf = Buffer(
         group=group,
@@ -128,7 +127,9 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     with _ClockProbe(local_rank) as probe:
         dispatch_ms = do_bench(run_dispatch, warmup=args.warmup, rep=args.rep, group=group)
     if rank == 0:
-        print(f"dispatch: {dispatch_ms * 1000:.1f} us, {dispatch_bytes / (dispatch_ms * 1e-3) / 1e9:.1f} GB/s (recv-side, this rank)  [{probe.summary()}]")
+        print(
+            f"dispatch: {dispatch_ms * 1000:.1f} us, {dispatch_bytes / (dispatch_ms * 1e-3) / 1e9:.1f} GB/s (recv-side, this rank)  [{probe.summary()}]"
+        )
 
     expert_out = reference.simulate_expert_compute(recv_x, recv_topk_idx, recv_topk_weights)
 
@@ -140,7 +141,9 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     with _ClockProbe(local_rank) as probe:
         combine_ms = do_bench(run_combine, warmup=args.warmup, rep=args.rep, group=group)
     if rank == 0:
-        print(f"combine: {combine_ms * 1000:.1f} us, {dispatch_bytes / (combine_ms * 1e-3) / 1e9:.1f} GB/s (send-side, this rank)  [{probe.summary()}]")
+        print(
+            f"combine: {combine_ms * 1000:.1f} us, {dispatch_bytes / (combine_ms * 1e-3) / 1e9:.1f} GB/s (send-side, this rank)  [{probe.summary()}]"
+        )
 
     buf.close()
     dist.destroy_process_group()
