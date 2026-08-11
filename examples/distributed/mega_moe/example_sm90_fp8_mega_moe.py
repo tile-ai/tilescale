@@ -1,9 +1,8 @@
 """Multi-GPU FP8 Mega MoE for SM90 using TileScale distributed primitives.
 
-This correctness-first implementation uses symmetric VMM buffers for expert
-dispatch and combine. The two FP8 GEMMs use per-token/per-128 activation scales
-and per-(128, 128) weight scales. Host barriers separate the communication
-phases for now; later variants can overlap those phases with persistent kernels.
+This implementation uses symmetric VMM buffers for expert dispatch and combine.
+The two FP8 GEMMs use per-token/per-128 activation scales and per-(128, 128)
+weight scales. Device-side system barriers order the communication phases.
 """
 
 from __future__ import annotations
@@ -119,6 +118,19 @@ def assign_local_routes_kernel(
     return main
 
 
+def reset_route_counts_kernel(num_experts: int, num_ranks: int, threads: int = 128):
+    @T.prim_func
+    def main(route_counts: T.Tensor((num_ranks, num_experts), T.int32)):
+        with T.Kernel(T.ceildiv(num_experts, threads), threads=threads) as bx:
+            src_rank = T.alloc_local((1,), T.int32)
+            src_rank[0] = T.get_rank()
+            expert_idx = bx * threads + T.get_thread_binding()
+            if src_rank[0] < num_ranks and expert_idx < num_experts:
+                route_counts[src_rank[0], expert_idx] = 0
+
+    return main
+
+
 def publish_route_counts_kernel(num_experts: int, num_ranks: int, threads: int = 128):
     @T.prim_func
     def main(route_counts: T.Tensor((num_ranks, num_experts), T.int32)):
@@ -135,6 +147,19 @@ def publish_route_counts_kernel(num_experts: int, num_ranks: int, threads: int =
                         route_counts[src_rank[0], expert_idx],
                         dst_pe=dst_rank,
                     )
+
+    return main
+
+
+def device_barrier_kernel(num_ranks: int):
+    @T.prim_func
+    def main(barrier: T.Tensor((num_ranks,), T.int32)):
+        with T.Kernel(1, threads=32):
+            rank = T.alloc_local((1,), T.int32)
+            rank[0] = T.get_rank()
+            if rank[0] < num_ranks:
+                T.barrier_blocks(barrier[0])
+                T.fence_sys()
 
     return main
 
@@ -542,8 +567,10 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     )
 
     kernel_specs = [
+        reset_route_counts_kernel(num_experts, num_ranks),
         assign_local_routes_kernel(num_tokens, num_experts, num_topk, num_ranks),
         publish_route_counts_kernel(num_experts, num_ranks),
+        device_barrier_kernel(num_ranks),
         finalize_routes_kernel(num_tokens, hidden, num_experts, num_topk, num_ranks, capacity),
         dispatch_tokens_kernel(num_tokens, hidden, num_experts, num_topk, num_ranks, capacity),
         fp8_grouped_gemm_kernel(num_experts_per_rank, capacity, 2 * intermediate_hidden, hidden),
@@ -561,8 +588,10 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     for kernel in kernels:
         kernel.initialize(allocator=allocator)
     (
+        reset_route_counts,
         assign_local_routes,
         publish_route_counts,
+        device_barrier,
         finalize_routes,
         dispatch_tokens,
         l1_gemm,
@@ -609,6 +638,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     l2_sf = allocator_tensor(l2_sf_src.shape, l2_sf_src.dtype, allocator=allocator).copy_(l2_sf_src)
 
     route_counts = allocator_tensor((num_ranks, num_experts), torch.int32, allocator=allocator)
+    barrier = allocator_tensor((num_ranks,), torch.int32, allocator=allocator)
     recv_counts = allocator_tensor((num_experts_per_rank,), torch.int32, allocator=allocator)
     recv_x = allocator_tensor((num_experts_per_rank, capacity, hidden), torch.float8_e4m3fn, allocator=allocator)
     recv_x_sf = allocator_tensor(
@@ -636,6 +666,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     def reset_state():
         route_counts.zero_()
+        barrier.zero_()
         recv_counts.zero_()
         recv_x.zero_()
         recv_x_sf.zero_()
@@ -646,10 +677,10 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         dist.barrier(group=group)
 
     def run_pipeline(check_capacity: bool = False):
+        reset_route_counts(route_counts)
         assign_local_routes(topk_idx, route_counts, route_slots)
         publish_route_counts(route_counts)
-        torch.cuda.synchronize()
-        dist.barrier(group=group)
+        device_barrier(barrier)
         finalize_routes(
             x_sf,
             topk_idx,
@@ -664,8 +695,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             route_slots,
         )
         dispatch_tokens(x, topk_idx, route_slots, recv_x)
-        torch.cuda.synchronize()
-        dist.barrier(group=group)
+        device_barrier(barrier)
         if check_capacity:
             local_max = recv_counts.max()
             dist.all_reduce(local_max, op=dist.ReduceOp.MAX, group=group)
@@ -676,8 +706,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         swiglu_quant(l1_out, recv_weights, recv_counts, l2_x, l2_x_sf)
         l2_gemm(l2_x, l2_fp8, l2_x_sf, l2_sf, recv_counts, l2_out)
         scatter_outputs(l2_out, recv_counts, src_ranks, src_tokens, src_topk, combine)
-        torch.cuda.synchronize()
-        dist.barrier(group=group)
+        device_barrier(barrier)
         reduce_topk(combine, out)
         return out
 
