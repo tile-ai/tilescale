@@ -626,6 +626,9 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     l2_fp8_src, l2_sf_src = block_cast_to_fp8(l2_bf16)
     del scores, l1_bf16, l2_bf16
 
+    # barrier_blocks currently lowers its byte offset as int32, so keep this
+    # allocation before the multi-gigabyte Pro-model weights.
+    barrier = allocator_tensor((num_ranks,), torch.int32, allocator=allocator)
     x = allocator_tensor(x_fp8_src.shape, x_fp8_src.dtype, allocator=allocator).copy_(x_fp8_src)
     x_sf = allocator_tensor(x_sf_src.shape, x_sf_src.dtype, allocator=allocator).copy_(x_sf_src)
     topk_idx = allocator_tensor(topk_idx_src.shape, topk_idx_src.dtype, allocator=allocator).copy_(topk_idx_src)
@@ -638,7 +641,6 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     l2_sf = allocator_tensor(l2_sf_src.shape, l2_sf_src.dtype, allocator=allocator).copy_(l2_sf_src)
 
     route_counts = allocator_tensor((num_ranks, num_experts), torch.int32, allocator=allocator)
-    barrier = allocator_tensor((num_ranks,), torch.int32, allocator=allocator)
     recv_counts = allocator_tensor((num_experts_per_rank,), torch.int32, allocator=allocator)
     recv_x = allocator_tensor((num_experts_per_rank, capacity, hidden), torch.float8_e4m3fn, allocator=allocator)
     recv_x_sf = allocator_tensor(
