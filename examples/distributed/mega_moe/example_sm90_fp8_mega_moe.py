@@ -303,6 +303,7 @@ def fused_l1_swiglu_manual_warp_kernel(
     num_compute_tiles = num_experts_per_rank * num_m_blocks * num_n_blocks
     num_k_blocks = hidden // block_k
     dispatch_thread = 0
+    route_threads = 256
 
     @T.prim_func
     def main(
@@ -350,15 +351,15 @@ def fused_l1_swiglu_manual_warp_kernel(
             stage_barriers = T.alloc_barrier([64] * pipeline_stages + [256] * pipeline_stages)
 
             if bid == 0:
-                if tx < 64:
-                    for reset_wave in T.serial(ceil_div(num_experts, 64)):
-                        reset_expert = tx + reset_wave * 64
+                if tx < route_threads:
+                    for reset_wave in T.serial(ceil_div(num_experts, route_threads)):
+                        reset_expert = tx + reset_wave * route_threads
                         if reset_expert < num_experts:
                             route_counts[src_rank[0], reset_expert] = 0
-                    T.sync_threads(7, 64)
+                    T.sync_threads(7, route_threads)
 
-                    for assign_wave in T.serial(ceil_div(num_routes, 64)):
-                        assign_route = tx + assign_wave * 64
+                    for assign_wave in T.serial(ceil_div(num_routes, route_threads)):
+                        assign_route = tx + assign_wave * route_threads
                         if assign_route < num_routes:
                             assign_token = assign_route // num_topk
                             assign_topk = assign_route % num_topk
@@ -372,10 +373,10 @@ def fused_l1_swiglu_manual_warp_kernel(
                                 )
                             else:
                                 route_slots[assign_token, assign_topk] = -1
-                    T.sync_threads(7, 64)
+                    T.sync_threads(7, route_threads)
 
-                    for publish_wave in T.serial(ceil_div(num_experts * num_ranks, 64)):
-                        publish_idx = tx + publish_wave * 64
+                    for publish_wave in T.serial(ceil_div(num_experts * num_ranks, route_threads)):
+                        publish_idx = tx + publish_wave * route_threads
                         if publish_idx < num_experts * num_ranks:
                             publish_rank = publish_idx // num_experts
                             publish_expert = publish_idx % num_experts
@@ -388,7 +389,7 @@ def fused_l1_swiglu_manual_warp_kernel(
 
                 T.barrier_blocks(barrier[0])
 
-                if tx < 64:
+                if tx < route_threads:
                     if tx < num_experts_per_rank:
                         recv_count = T.alloc_var(T.int32, init=0)
                         recv_expert = src_rank[0] * num_experts_per_rank + tx
@@ -396,8 +397,8 @@ def fused_l1_swiglu_manual_warp_kernel(
                             recv_count += route_counts[count_rank, recv_expert]
                         recv_counts[tx] = recv_count
 
-                    for prefix_wave in T.serial(ceil_div(num_routes, 64)):
-                        prefix_route = tx + prefix_wave * 64
+                    for prefix_wave in T.serial(ceil_div(num_routes, route_threads)):
+                        prefix_route = tx + prefix_wave * route_threads
                         if prefix_route < num_routes:
                             prefix_token = prefix_route // num_topk
                             prefix_topk = prefix_route % num_topk
