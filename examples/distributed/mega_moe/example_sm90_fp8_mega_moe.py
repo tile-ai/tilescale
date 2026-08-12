@@ -332,6 +332,7 @@ def fused_l1_swiglu_manual_warp_kernel(
         ),
         barrier: T.Tensor((num_ranks,), T.int32),
     ):
+        T.annotate_pass_configs({tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True})
         with T.Kernel(num_sms, threads=threads) as bid:
             tx = T.get_thread_binding()
             src_rank = T.alloc_local((1,), T.int32)
