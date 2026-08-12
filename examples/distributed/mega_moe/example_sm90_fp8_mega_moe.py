@@ -293,7 +293,7 @@ def fused_l1_swiglu_manual_warp_kernel(
     block_n: int = 256,
     block_k: int = 128,
     threads: int = 384,
-    pipeline_stages: int = 3,
+    pipeline_stages: int = 5,
 ):
     num_experts_per_rank = num_experts // num_ranks
     num_scale_groups = hidden // SCALE_GRANULARITY
@@ -418,64 +418,80 @@ def fused_l1_swiglu_manual_warp_kernel(
             else:
                 T.inc_max_nreg(208)
 
+            dispatch_warp = tx // 32
+            dispatch_lane = tx % 32
             if tx < 64:
-                dispatch_warp = tx // 32
-                dispatch_lane = tx % 32
-                for dispatch_wave in T.serial(ceil_div(num_routes, num_sms * 2)):
-                    dispatch_route = bid * 2 + dispatch_warp + dispatch_wave * num_sms * 2
-                    if dispatch_route < num_routes:
-                        dispatch_token = dispatch_route // num_topk
-                        dispatch_topk = dispatch_route % num_topk
-                        dispatch_expert = topk_idx[dispatch_token, dispatch_topk]
-                        dispatch_slot = route_slots[dispatch_token, dispatch_topk]
-                        if dispatch_expert >= 0 and dispatch_slot >= 0 and dispatch_slot < capacity and num_scale_groups > 0 and hidden > 0:
-                            dispatch_rank = dispatch_expert // num_experts_per_rank
-                            dispatch_local_expert = dispatch_expert % num_experts_per_rank
-                            T.put_warp(
-                                T.address_of(x[dispatch_token, 0]),
-                                T.address_of(recv_x[dispatch_local_expert, dispatch_slot, 0]),
-                                hidden,
-                                dst_pe=dispatch_rank,
+                for metadata_wave in T.serial(ceil_div(num_routes, num_sms * 64)):
+                    metadata_route = bid * 64 + tx + metadata_wave * num_sms * 64
+                    if metadata_route < num_routes:
+                        metadata_token = metadata_route // num_topk
+                        metadata_topk = metadata_route % num_topk
+                        metadata_expert = topk_idx[metadata_token, metadata_topk]
+                        metadata_slot = route_slots[metadata_token, metadata_topk]
+                        if metadata_expert >= 0 and metadata_slot >= 0 and metadata_slot < capacity:
+                            metadata_rank = metadata_expert // num_experts_per_rank
+                            metadata_local_expert = metadata_expert % num_experts_per_rank
+                            T.st(
+                                recv_weights[metadata_local_expert, metadata_slot],
+                                topk_weights[metadata_token, metadata_topk],
+                                dst_pe=metadata_rank,
                             )
-                            T.put_warp(
-                                T.address_of(x_sf[dispatch_token, 0]),
-                                T.address_of(recv_x_sf[dispatch_local_expert, dispatch_slot, 0]),
-                                num_scale_groups,
-                                dst_pe=dispatch_rank,
+                            T.st(
+                                src_tokens[metadata_local_expert, metadata_slot],
+                                metadata_token,
+                                dst_pe=metadata_rank,
                             )
-                            if dispatch_lane == dispatch_thread:
-                                T.st(
-                                    recv_weights[dispatch_local_expert, dispatch_slot],
-                                    topk_weights[dispatch_token, dispatch_topk],
-                                    dst_pe=dispatch_rank,
-                                )
-                                T.st(
-                                    src_ranks[dispatch_local_expert, dispatch_slot],
-                                    src_rank[0],
-                                    dst_pe=dispatch_rank,
-                                )
-                                T.st(
-                                    src_tokens[dispatch_local_expert, dispatch_slot],
-                                    dispatch_token,
-                                    dst_pe=dispatch_rank,
-                                )
-                                T.st(
-                                    src_topk[dispatch_local_expert, dispatch_slot],
-                                    dispatch_topk,
-                                    dst_pe=dispatch_rank,
-                                )
-                            T.sync_warp()
-                            if dispatch_lane == dispatch_thread:
-                                T.fence_sys()
-                                T.atomic_add(
-                                    arrivals[
-                                        dispatch_local_expert,
-                                        dispatch_slot // block_m,
-                                    ],
-                                    1,
-                                    memory_order="relaxed",
-                                    dst_pe=dispatch_rank,
-                                )
+                            T.st(
+                                src_topk[metadata_local_expert, metadata_slot],
+                                metadata_topk,
+                                dst_pe=metadata_rank,
+                            )
+                            T.st(
+                                src_ranks[metadata_local_expert, metadata_slot],
+                                src_rank[0],
+                                scope="sys",
+                                sem="release",
+                                dst_pe=metadata_rank,
+                            )
+
+            if tx < 64:
+                for pull_wave in T.serial(ceil_div(num_experts_per_rank * capacity, num_sms * 2)):
+                    pull_idx = bid * 2 + dispatch_warp + pull_wave * num_sms * 2
+                    pull_expert = pull_idx // capacity
+                    pull_slot = pull_idx % capacity
+                    if pull_expert < num_experts_per_rank and pull_slot < recv_counts[pull_expert]:
+                        if dispatch_lane == dispatch_thread:
+                            T.wait_ge(
+                                src_ranks[pull_expert, pull_slot],
+                                0,
+                                scope=T.WaitScope.SYS,
+                                semantics=T.WaitSemantics.ACQUIRE,
+                            )
+                        T.sync_warp()
+                        pull_rank = src_ranks[pull_expert, pull_slot]
+                        pull_token = src_tokens[pull_expert, pull_slot]
+                        T.get_warp(
+                            T.address_of(x[pull_token, 0]),
+                            T.address_of(recv_x[pull_expert, pull_slot, 0]),
+                            hidden,
+                            src_pe=pull_rank,
+                            unroll_factor=8,
+                        )
+                        T.get_warp(
+                            T.address_of(x_sf[pull_token, 0]),
+                            T.address_of(recv_x_sf[pull_expert, pull_slot, 0]),
+                            num_scale_groups,
+                            src_pe=pull_rank,
+                            unroll_factor=8,
+                        )
+                        T.sync_warp()
+                        if dispatch_lane == dispatch_thread:
+                            T.atom_add(
+                                arrivals[pull_expert, pull_slot // block_m],
+                                1,
+                                scope="gpu",
+                                sem="release",
+                            )
 
             if tx >= 64 and tx < 128:
                 producer_step = T.alloc_var(T.int32, init=0)
@@ -494,7 +510,7 @@ def fused_l1_swiglu_manual_warp_kernel(
                                 T.wait_ge(
                                     arrivals[producer_expert, producer_m],
                                     producer_arrivals,
-                                    scope=T.WaitScope.SYS,
+                                    scope=T.WaitScope.GPU,
                                     semantics=T.WaitSemantics.ACQUIRE,
                                 )
                             T.sync_threads(5, 64)
