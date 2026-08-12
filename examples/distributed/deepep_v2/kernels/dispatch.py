@@ -90,6 +90,7 @@ def dispatch_kernel(
     dtype=T.bfloat16,
     scale_dim: int = 0,
     row_bytes: int = 0,
+    collect_expert_stats: bool = False,
 ):
     assert threads % 32 == 0
     assert num_experts % num_ranks == 0
@@ -120,6 +121,10 @@ def dispatch_kernel(
     else:
         row_width = hidden
         row_dtype = dtype
+
+    # Another trace-time branch: off, the tally below is absent from the
+    # generated code and the argument degenerates to a one-element stand-in.
+    stats_dim = experts_per_rank if collect_expert_stats else 1
 
     @T.prim_func
     def main(
@@ -152,6 +157,11 @@ def dispatch_kernel(
         recv_src_token: T.Tensor((total_capacity,), T.int32),
         recv_topk_idx: T.Tensor((total_capacity * topk,), T.int32),
         recv_topk_weights: T.Tensor((total_capacity * topk,), T.float32),
+        # DeepEP's `cumulative_local_expert_recv_stats`: tokens received per
+        # *local* expert, accumulated across calls. uint32 for `atom_add`, as
+        # with `send_count`. Never reset here -- the caller owns the window
+        # it is accumulating over.
+        recv_expert_stats: T.Tensor((stats_dim,), T.uint32),
     ):
         # A single persistent grid: the phases rendezvous through global
         # counters, so every block has to be resident at once. `num_sms`
@@ -329,6 +339,27 @@ def dispatch_kernel(
             # duplicate (src_rank, src_token) rows. DeepEP's `gpu_barrier` uses
             # `this_grid().sync()` for exactly this.
             T.sync_grid()
+
+            # ---------------- Per-expert receive stats (optional) ----------------
+            # Counted here, on the receiver, rather than exchanged like the rank
+            # counts: `recv_topk_idx` already holds the local expert for every
+            # received (row, top-k slot) and -1 elsewhere, so the answer is a
+            # local scan of something this rank was going to be handed anyway.
+            # DeepEP derives it in notify instead, from a per-expert count
+            # vector it already exchanges -- it has one because the expanded
+            # layout needs per-expert offsets. This port's layout does not, and
+            # widening the exchange from `num_ranks` to `num_experts` entries
+            # per rank to avoid a scan that costs microseconds is a bad trade.
+            #
+            # Behind the exit barrier and `sync_grid`, so every peer's stores
+            # have landed and this rank's own blocks are past the scatter.
+            if collect_expert_stats:
+                n_recv = T.alloc_var(T.int32, init=num_recv[0])
+                for i in T.serial(bx * threads + tid, n_recv * topk, num_sms * threads):
+                    local_expert = T.alloc_var(T.int32, init=recv_topk_idx[i])
+                    if local_expert >= 0:
+                        T.atom_add(recv_expert_stats[local_expert], 1, scope="gpu")
+
             if bx == 0:
                 if tid < num_ranks:
                     send_count[tid] = 0

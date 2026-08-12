@@ -127,8 +127,10 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     # Combine always moves bf16 (see buffer.py) regardless of dispatch's dtype.
     combine_bytes = num_recv_tokens * args.hidden * 2
 
+    expert_stats = torch.zeros(args.experts // num_local_ranks, dtype=torch.uint32, device=device) if args.expert_stats else None
+
     def run_dispatch():
-        buf.dispatch(dispatch_x, topk_idx, topk_weights)
+        buf.dispatch(dispatch_x, topk_idx, topk_weights, cumulative_local_expert_recv_stats=expert_stats)
 
     _warm_clocks(args.clock_warmup_sec, device)
     dist.barrier(group)
@@ -164,6 +166,8 @@ if __name__ == "__main__":
     parser.add_argument("--masked-ratio", type=float, default=0.0)
     # Dispatch payload dtype; combine is always bf16 (see buffer.py).
     parser.add_argument("--fp8", action="store_true")
+    # Accumulate DeepEP's per-local-expert receive counts during dispatch.
+    parser.add_argument("--expert-stats", action="store_true")
     parser.add_argument("--tokens", type=int, default=8192)
     parser.add_argument("--hidden", type=int, default=7168)
     parser.add_argument("--topk", type=int, default=8)

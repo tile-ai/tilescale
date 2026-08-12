@@ -13,6 +13,12 @@ kernel launches:
 Gate weights are *not* applied here. Like DeepEP, weighting and the local sum
 across several experts on one rank belong to the expert epilogue; ``x`` is
 already the per-compact-row contribution.
+
+Up to two bias tensors may be added to the output, DeepEP's ``bias_0``/
+``bias_1``. They seed the reduce accumulator rather than being added to it
+afterwards, which costs nothing: the accumulator had to be written once
+either way, and seeding replaces the clear. A token with no contributions at
+all still gets its bias, which is what makes bias-only tokens behave.
 """
 
 import tilelang
@@ -30,8 +36,10 @@ def combine_kernel(
     threads: int = 256,
     reduce_threads: int = 0,
     dtype=T.bfloat16,
+    num_bias: int = 0,
 ):
     assert threads % 32 == 0
+    assert 0 <= num_bias <= 2, f"DeepEP takes at most two bias tensors, got {num_bias}"
     reduce_threads = reduce_threads or threads
     assert reduce_threads % 32 == 0
     warps_per_cta = threads // 32
@@ -42,6 +50,12 @@ def combine_kernel(
     # whatever row count the last dispatch produced.
     num_elems = T.symbolic("num_elems")
 
+    # Trace-time, like dispatch's `scale_dim`: an unused bias degenerates to a
+    # one-row stand-in and every reference to it is absent from the generated
+    # code, not predicated in it.
+    n_bias_0 = num_tokens if num_bias >= 1 else 1
+    n_bias_1 = num_tokens if num_bias >= 2 else 1
+
     @T.prim_func
     def main(
         x: T.Tensor((num_elems,), dtype),
@@ -51,6 +65,8 @@ def combine_kernel(
         send_rank_mask: T.Tensor((num_tokens,), T.int32),
         barrier: T.Tensor((4 * num_ranks,), T.int32),
         comm_x: T.Tensor((num_ranks * cap * hidden,), dtype),
+        bias_0: T.Tensor((n_bias_0, hidden), dtype),
+        bias_1: T.Tensor((n_bias_1, hidden), dtype),
         combined: T.Tensor((num_tokens, hidden), dtype),
     ):
         with T.Kernel(num_sms, threads=threads) as bx:
@@ -106,7 +122,17 @@ def combine_kernel(
             # so there is no slack to overlap into.
             acc = T.alloc_fragment((hidden,), T.float32)
             mask = send_rank_mask[token]
-            T.clear(acc)
+            # Seed with the biases instead of clearing -- same number of
+            # writes to `acc`, and it keeps a token whose every selection was
+            # masked off from losing its bias.
+            if num_bias >= 1:
+                for i in T.Parallel(hidden):
+                    acc[i] = bias_0[token, i]
+            else:
+                T.clear(acc)
+            if num_bias >= 2:
+                for i in T.Parallel(hidden):
+                    acc[i] += bias_1[token, i]
             for r in range(num_ranks):
                 if ((mask >> r) & 1) == 1:
                     base = (r * cap + token) * hidden

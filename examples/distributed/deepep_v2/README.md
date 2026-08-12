@@ -92,6 +92,20 @@ expert computation — `reference.per_token_cast_back` does this.
 puts a `finish_event` on the handle; nothing returned may be read until that
 event is waited on.
 
+`dispatch(..., cumulative_local_expert_recv_stats=t)` adds this rank's received
+token count per local expert into `t`, a `[num_experts // num_ranks]` uint32
+tensor -- DeepEP's load-balance counter. It accumulates rather than overwrites,
+so the caller decides the window by choosing when to zero it. Costs ~25 µs of
+dispatch's ~896 (2.8%) and compiles its own kernel variant, so the default path
+does not pay for it. DeepEP gets the same number for free because its expanded
+layout already exchanges per-expert counts; this port has no such exchange and
+counts locally instead, which is why it is not free here.
+
+`combine(..., bias=b)` adds one tensor, or `bias=(b0, b1)` two, to the output --
+DeepEP's `bias_0`/`bias_1`, each `[num_tokens, hidden]`. They seed the reduce
+accumulator instead of being added after it, so they cost nothing measurable,
+and a token whose every selection was masked off still comes back as its bias.
+
 Knobs worth tuning: `num_sms`, `dispatch_threads`, `combine_threads`, and
 `reduce_threads` (separate because the reduce wants `hidden / reduce_threads` to
 be a whole number of 128-bit loads). The thread defaults are wide (1024) because
@@ -208,14 +222,18 @@ a design decision here -- each would be an additive parameter or output:
 | `do_expand` / expanded layout | one slot per (expert, token) instead of dedup per rank, with the per-expert prefix sum that comes with it |
 | `expert_alignment` | round each local expert's received count up to a multiple |
 | `kAllowMultipleReduction` | combine-side local sum across several experts on one rank |
-| combine `topk_weights` | carry the gate weights back as a side output |
-| combine `bias` | 0, 1 or 2 bias tensors added to the output |
-| `cumulative_local_expert_recv_stats` | per-expert receive counts for load-balance monitoring |
 | `deterministic` mode | DeepEP has a separate prologue for it |
 | `use_tma_aligned_col_major_sf` | column-major scale-factor layout for a downstream GEMM |
 
 Out of scope by design: RDMA/scaleout (`num_qps`), the low-latency decode path,
 and Engram/PP/CP.
+
+Also deliberately absent: combine's `topk_weights` side output. DeepEP carries
+the gate weights back through combine because its *expanded* layout reorders
+them, so the source rank cannot reconstruct which weight went with which slot.
+In this port's rank layout the source rank is the one that produced
+`topk_weights` and still holds it in its original order, so the output would be
+a collective that returns its own input.
 
 ## Running
 

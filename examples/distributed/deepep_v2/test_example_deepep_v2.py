@@ -43,6 +43,7 @@ def _run(
     num_sms: int,
     masked_ratio: float = 0.0,
     dtype: torch.dtype = torch.bfloat16,
+    num_bias: int = 0,
 ):
     rank, num_ranks, group = init_dist(local_rank, num_ranks)
 
@@ -73,9 +74,14 @@ def _run(
         recv_topk_idx, recv_topk_weights = recv_topk_idx[:n], recv_topk_weights[:n]
         recv_x = reference.per_token_cast_back(recv[:n], hidden) if is_fp8 else recv[:n]
         expert_out = reference.simulate_expert_compute(recv_x, recv_topk_idx, recv_topk_weights)
-        combined = buf.combine(expert_out, handle)
+        # Deliberately the same magnitude as the combined output, so a dropped
+        # or double-applied bias moves rel_l2 well past the threshold.
+        biases = [torch.randn(num_tokens, hidden, dtype=torch.bfloat16, device=device) for _ in range(num_bias)]
+        combined = buf.combine(expert_out, handle, bias=biases or None)
 
         expected = reference.reference_combined(x, topk_weights, topk_idx)
+        for b in biases:
+            expected = expected + b
         err = (combined.float() - expected.float()).norm().item()
         denom = expected.float().norm().item()
         # `denom` is zero only when every selection was masked off.
@@ -114,11 +120,77 @@ def test_dispatch_combine_v3_shape_fp8(local_rank: int, num_ranks: int):
 
 
 @tilelang.testing.requires_cuda
+@distributed_test(nprocs=2)
+def test_combine_bias(local_rank: int, num_ranks: int):
+    """DeepEP's `bias_0`/`bias_1`, one and two of them."""
+    for num_bias in (1, 2):
+        _run(local_rank, num_ranks, num_tokens=64, hidden=128, topk=2, num_experts=8, num_sms=2, num_bias=num_bias)
+
+
+@tilelang.testing.requires_cuda
+@distributed_test(nprocs=8)
+def test_combine_bias_masked(local_rank: int, num_ranks: int):
+    """Bias with half the selections masked off: a token with no contributions
+    at all must still come back as its bias, not as zero."""
+    _run(local_rank, num_ranks, num_tokens=1024, hidden=1024, topk=8, num_experts=256, num_sms=32, masked_ratio=0.5, num_bias=2)
+
+
+@tilelang.testing.requires_cuda
 @distributed_test(nprocs=8)
 def test_dispatch_combine_masked(local_rank: int, num_ranks: int):
     """Half the selections unset: dispatch must route -1 nowhere, and a token
     with no selections at all must combine back to zero."""
     _run(local_rank, num_ranks, num_tokens=1024, hidden=1024, topk=8, num_experts=256, num_sms=32, masked_ratio=0.5)
+
+
+@tilelang.testing.requires_cuda
+@distributed_test(nprocs=8)
+def test_cumulative_local_expert_recv_stats(local_rank: int, num_ranks: int):
+    """Per-expert receive counts, against an all-gathered torch reference.
+
+    Three dispatches into the same counter, and a quarter of the top-k entries
+    masked off, so the test covers the accumulate-don't-overwrite contract and
+    the -1 entries the scan has to skip.
+    """
+    rank, num_ranks, group = init_dist(local_rank, num_ranks)
+    device = torch.device(f"cuda:{local_rank}")
+    torch.manual_seed(1234 + rank)
+
+    num_tokens, hidden, topk, num_experts, num_calls = 512, 512, 4, 32, 3
+    experts_per_rank = num_experts // num_ranks
+    x = torch.randn(num_tokens, hidden, dtype=torch.bfloat16, device=device)
+    topk_idx, topk_weights = reference.make_topk(num_tokens, topk, num_experts, device, 0.25)
+
+    buf = Buffer(
+        group=group,
+        local_rank=local_rank,
+        num_local_ranks=num_ranks,
+        num_max_tokens_per_rank=num_tokens,
+        hidden=hidden,
+        num_topk=topk,
+        num_experts=num_experts,
+        dtype=torch.bfloat16,
+        num_sms=8,
+    )
+    try:
+        stats = torch.zeros(experts_per_rank, dtype=torch.uint32, device=device)
+        for _ in range(num_calls):
+            buf.dispatch(x, topk_idx, topk_weights, cumulative_local_expert_recv_stats=stats)
+
+        # What every rank sent to each expert, summed -- my counters are the
+        # columns belonging to my own experts.
+        sent = torch.zeros(num_experts, dtype=torch.int64, device=device)
+        selected = topk_idx[topk_idx >= 0]
+        sent.scatter_add_(0, selected.long(), torch.ones_like(selected, dtype=torch.int64))
+        per_rank = [torch.zeros_like(sent) for _ in range(num_ranks)]
+        dist.all_gather(per_rank, sent, group)
+        expected = torch.stack(per_rank).sum(0)[rank * experts_per_rank : (rank + 1) * experts_per_rank] * num_calls
+
+        got = stats.to(torch.int64)
+        assert torch.equal(got, expected), f"rank {rank}: got {got.tolist()}, expected {expected.tolist()}"
+    finally:
+        buf.close()
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

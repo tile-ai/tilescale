@@ -140,6 +140,8 @@ class Buffer:
         self.hidden = hidden
         self.num_topk = num_topk
         self.num_experts = num_experts
+        assert num_experts % num_local_ranks == 0, f"num_experts={num_experts} is not a multiple of {num_local_ranks} ranks"
+        self.experts_per_rank = num_experts // num_local_ranks
         # `dtype` is the *dispatch payload* type. Combine always moves bf16:
         # what it carries is the expert output, which is not quantised.
         self.dtype = dtype
@@ -218,6 +220,11 @@ class Buffer:
         self.notify_done = tilelang.tensor((1,), torch.uint32, allocator=self.allocator)
         self.exchange_done = tilelang.tensor((1,), torch.uint32, allocator=self.allocator)
         self.slot_counter = tilelang.tensor((self.num_ranks,), torch.uint32, allocator=self.allocator)
+        # Stand-in for the degenerate `recv_expert_stats` argument when the
+        # caller did not ask for per-expert stats; see `dispatch`.
+        self._no_expert_stats = tilelang.tensor((1,), torch.uint32, allocator=self.allocator)
+        # Likewise for combine's unused bias arguments; see `combine`.
+        self._no_bias = tilelang.tensor((1, hidden), self.combine_dtype, allocator=self.allocator)
         # int32 (signed): -1 is the "not yet published" sentinel every rank
         # spins on while the count matrix fills in.
         self.count_matrix = tilelang.tensor((self.num_ranks * self.num_ranks,), torch.int32, allocator=self.allocator)
@@ -281,8 +288,9 @@ class Buffer:
         self._dispatch_kernels = {}
         self._combine_kernels = {}
 
-    def _get_dispatch_kernel(self, num_tokens: int):
-        if num_tokens not in self._dispatch_kernels:
+    def _get_dispatch_kernel(self, num_tokens: int, collect_expert_stats: bool = False):
+        key = (num_tokens, collect_expert_stats)
+        if key not in self._dispatch_kernels:
             kernel = dispatch_kernel(
                 num_tokens,
                 self.num_ranks,
@@ -295,14 +303,16 @@ class Buffer:
                 self.tl_dtype,
                 self.scale_dim,
                 self.row_bytes or 0,
+                collect_expert_stats,
             )
             kernel.compile_group = self.group
             kernel.initialize(allocator=self.allocator)
-            self._dispatch_kernels[num_tokens] = kernel
-        return self._dispatch_kernels[num_tokens]
+            self._dispatch_kernels[key] = kernel
+        return self._dispatch_kernels[key]
 
-    def _get_combine_kernel(self, num_tokens: int):
-        if num_tokens not in self._combine_kernels:
+    def _get_combine_kernel(self, num_tokens: int, num_bias: int = 0):
+        key = (num_tokens, num_bias)
+        if key not in self._combine_kernels:
             kernel = combine_kernel(
                 num_tokens,
                 self.num_ranks,
@@ -313,13 +323,22 @@ class Buffer:
                 self.combine_threads,
                 self.reduce_threads,
                 self.tl_combine_dtype,
+                num_bias,
             )
             kernel.compile_group = self.group
             kernel.initialize(allocator=self.allocator)
-            self._combine_kernels[num_tokens] = kernel
-        return self._combine_kernels[num_tokens]
+            self._combine_kernels[key] = kernel
+        return self._combine_kernels[key]
 
-    def dispatch(self, x, topk_idx: torch.Tensor, topk_weights: torch.Tensor, num_sms: int = 0, async_finish: bool = False):
+    def dispatch(
+        self,
+        x,
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+        num_sms: int = 0,
+        async_finish: bool = False,
+        cumulative_local_expert_recv_stats: torch.Tensor = None,
+    ):
         """Scatter `x` to the ranks owning each token's top-k experts.
 
         `x` is the packed `(values, scale)` buffer `reference.per_token_cast_to_fp8`
@@ -332,7 +351,22 @@ class Buffer:
         the caller's stream is *not* joined to the communication stream: nothing
         the call returns may be read until that event is waited on. The default
         joins the streams before returning, so the result is usable immediately.
+
+        `cumulative_local_expert_recv_stats` is DeepEP's load-balance counter:
+        a `[num_experts // num_ranks]` uint32 tensor this rank's received token
+        count per local expert is *added into*. The caller owns it and decides
+        when to zero it, so it can accumulate over a step, a batch or a whole
+        run. Passing it compiles a separate kernel variant -- the tally is
+        absent from the default one, not merely skipped.
         """
+        collect_expert_stats = cumulative_local_expert_recv_stats is not None
+        if collect_expert_stats:
+            stats = cumulative_local_expert_recv_stats
+            assert stats.dtype == torch.uint32 and stats.shape == (self.experts_per_rank,), (
+                f"expected a ({self.experts_per_rank},) uint32 tensor, got {tuple(stats.shape)} {stats.dtype}"
+            )
+        else:
+            stats = self._no_expert_stats
         if self.is_fp8:
             assert x.dtype == torch.uint8 and x.shape[1] == self.row_bytes, (
                 f"expected a packed (*, {self.row_bytes}) uint8 buffer from reference.per_token_cast_to_fp8, got {tuple(x.shape)} {x.dtype}"
@@ -351,7 +385,7 @@ class Buffer:
             topk_idx_i32 = topk_idx.to(torch.int32).contiguous()
             topk_weights_f32 = topk_weights.to(torch.float32).contiguous()
 
-            kernel = self._get_dispatch_kernel(num_tokens)
+            kernel = self._get_dispatch_kernel(num_tokens, collect_expert_stats)
             # No `dist.barrier` on either side. The reset above is peer-visible
             # state, so it does need ordering against peers -- but the kernel's
             # own entry `barrier_blocks` provides it, which is why no collective
@@ -375,6 +409,7 @@ class Buffer:
                 self.recv_src_token,
                 self.recv_topk_idx.view(-1),
                 self.recv_topk_weights.view(-1),
+                stats,
             )
 
             # No device-to-host read of `num_recv`: it cost ~33us and nothing
@@ -415,7 +450,30 @@ class Buffer:
         # FP8: the packed uint8 buffer, unpacked with `reference.per_token_cast_back`.
         return (self.recv_x, self.recv_topk_idx, self.recv_topk_weights, handle)
 
-    def combine(self, x: torch.Tensor, handle: EPHandle, num_sms: int = 0):
+    def combine(self, x: torch.Tensor, handle: EPHandle, num_sms: int = 0, bias=None):
+        """Reduce every rank's contribution back into this rank's token order.
+
+        `bias` is DeepEP's `bias_0`/`bias_1`: `None`, one `[num_tokens, hidden]`
+        tensor, or a pair of them, added to the output. As in DeepEP they are
+        added once per output token rather than once per contribution, and a
+        token with no contributions still receives them. Each distinct count
+        compiles its own kernel variant.
+        """
+        if bias is None:
+            biases = ()
+        elif torch.is_tensor(bias):
+            biases = (bias,)
+        else:
+            biases = tuple(bias)
+        assert len(biases) <= 2, f"DeepEP takes at most two bias tensors, got {len(biases)}"
+        for b in biases:
+            assert b.shape == (handle.num_tokens, self.hidden) and b.dtype == self.combine_dtype, (
+                f"expected a ({handle.num_tokens}, {self.hidden}) {self.combine_dtype} bias, got {tuple(b.shape)} {b.dtype}"
+            )
+        # The kernel always takes both arguments; unused ones are one-row
+        # stand-ins nothing in the generated code reads. See kernels/combine.py.
+        bias_args = tuple(biases) + tuple(self._no_bias for _ in range(2 - len(biases)))
+
         # Read the caller's contribution (see kernels/combine.py) in place --
         # `combine_kernel` takes its length as a symbolic extent, so no copy
         # into a fixed-shape buffer is needed.
@@ -425,7 +483,7 @@ class Buffer:
         compute_stream = torch.cuda.current_stream()
         self.comm_stream.wait_stream(compute_stream)
         with torch.cuda.stream(self.comm_stream):
-            kernel = self._get_combine_kernel(num_tokens)
+            kernel = self._get_combine_kernel(num_tokens, len(biases))
             kernel(
                 x_flat,
                 self.recv_src_rank,
@@ -434,6 +492,7 @@ class Buffer:
                 self.send_rank_mask[:num_tokens],
                 self.barrier,
                 self.comm_x,
+                *bias_args,
                 self.combined[:num_tokens],
             )
         compute_stream.wait_stream(self.comm_stream)
