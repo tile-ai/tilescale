@@ -63,6 +63,8 @@ class EPHandle:
             wait on before reading anything the call returned; `None` otherwise.
         psum_recv_count: inclusive prefix sum of deduplicated received counts per
             sender rank, `[num_ranks]` -- DeepEP's `psum_num_recv_tokens_per_scaleup_rank`.
+            Meaningless in the expanded layout, which groups by expert rather
+            than by sender: use `expert_count`/`expert_offset` there.
         recv_src_rank, recv_src_token: per-compact-row source (rank, token) --
             a simplified, unpacked form of DeepEP's single encoded `recv_src_metadata`.
         num_tokens: how many tokens this rank dispatched, i.e. how many rows
@@ -81,6 +83,9 @@ class EPHandle:
         recv_src_token,
         num_tokens,
         finish_event=None,
+        expert_count=None,
+        expert_offset=None,
+        expand_overflow=None,
     ):
         self.num_experts = num_experts
         self.num_max_tokens_per_rank = num_max_tokens_per_rank
@@ -94,7 +99,29 @@ class EPHandle:
         # Set only for `async_finish` dispatches: nothing the call returned may
         # be read until this is waited on.
         self.finish_event = finish_event
+        # Expanded layout only, `None` otherwise: local expert `e` owns rows
+        # `[expert_offset[e], expert_offset[e + 1])` of the received tensor, of
+        # which the first `expert_count[e]` are real and the rest is alignment
+        # padding, zeroed unless `zero_padding=False`. See kernels/dispatch.py.
+        self.expert_count = expert_count
+        self.expert_offset = expert_offset
+        self._expand_overflow = expand_overflow
         self._num_recv_tokens = None
+
+    @property
+    def expand_overflow(self) -> int:
+        """Rows the expanded layout needed beyond capacity, 0 if it fit.
+
+        Non-zero means dispatch *skipped* this rank rather than writing past
+        its buffer, so everything the call returned is meaningless: re-create
+        the `Buffer` with `expand_factor` at least this over `recv_capacity`.
+        Reads back to the host, like `num_recv_tokens`.
+        """
+        if self._expand_overflow is None:
+            return 0
+        if self.finish_event is not None:
+            self.finish_event.synchronize()
+        return int(self._expand_overflow[0].item())
 
     @property
     def num_recv_tokens(self) -> int:
@@ -132,6 +159,10 @@ class Buffer:
         combine_threads: int = 1024,
         reduce_threads: int = 256,
         pipeline_depth: int = 2,
+        do_expand: bool = False,
+        expert_alignment: int = 1,
+        zero_padding: bool = True,
+        expand_factor: float = 1.0,
     ):
         self.group = group
         self.rank_idx = local_rank
@@ -190,10 +221,34 @@ class Buffer:
         self.cap = num_max_tokens_per_rank
         self.total_capacity = self.cap * self.num_ranks
 
+        # DeepEP's `do_expand`: one received row per (token, expert), grouped
+        # by local expert, which is the layout a grouped GEMM wants. See
+        # kernels/dispatch.py for how the sender computes the index and
+        # `reference.expanded_layout` for what the result should look like.
+        self.do_expand = do_expand
+        self.expert_alignment = expert_alignment if do_expand else 1
+        self.zero_padding = zero_padding
+        # Deduplicated, `total_capacity` cannot be exceeded. Expanded it can:
+        # the hard bound is `min(num_topk, experts_per_rank)` times higher, for
+        # routing that puts every one of a token's experts on one rank, which
+        # at the V3 shape is 7 GiB of receive buffer against 0.88. Balanced
+        # routing needs `expand_factor=1`, so that is the default and dispatch
+        # raises `expand_overflow` rather than corrupting memory if a call
+        # exceeds it. Raise the factor (up to the hard bound) for skewed
+        # routing.
+        self.expand_factor = expand_factor
+        if do_expand:
+            hard_bound = self.total_capacity * min(num_topk, self.experts_per_rank)
+            self.recv_capacity = min(int(self.total_capacity * expand_factor), hard_bound)
+            aligned_slack = self.experts_per_rank * (self.expert_alignment - 1)
+            self.recv_capacity = min(self.recv_capacity + aligned_slack, hard_bound + aligned_slack)
+        else:
+            self.recv_capacity = self.total_capacity
+
         itemsize = torch.empty((), dtype=dtype).element_size()
         comm_bytes = self.num_ranks * self.cap * hidden * 2  # combine is always bf16
         row_bytes = self.row_bytes if self.is_fp8 else hidden * itemsize
-        compact_bytes = self.total_capacity * (row_bytes + 4 + 4 + num_topk * 4 + num_topk * 4)
+        compact_bytes = self.recv_capacity * (row_bytes + 4 + 4 + num_topk * 4 + num_topk * 4)
         combined_bytes = num_max_tokens_per_rank * (hidden * 2 + 4) + self.num_ranks * self.cap * 4
         total = comm_bytes + compact_bytes + combined_bytes
         self.allocator = get_allocator(
@@ -215,20 +270,26 @@ class Buffer:
         # instead of hanging. DeepEP separates its tags for the same reason.
         self.barrier = tilelang.tensor((4 * self.num_ranks,), torch.int32, allocator=self.allocator)
         # uint32: atom_add's PTX intrinsic requires an unsigned target.
-        self.send_count = tilelang.tensor((self.num_ranks,), torch.uint32, allocator=self.allocator)
+        n_dst = num_experts if do_expand else self.num_ranks
+        self.send_count = tilelang.tensor((n_dst,), torch.uint32, allocator=self.allocator)
         # Grid-wide rendezvous counters for dispatch's three phases.
         self.notify_done = tilelang.tensor((1,), torch.uint32, allocator=self.allocator)
         self.exchange_done = tilelang.tensor((1,), torch.uint32, allocator=self.allocator)
-        self.slot_counter = tilelang.tensor((self.num_ranks,), torch.uint32, allocator=self.allocator)
+        self.slot_counter = tilelang.tensor((n_dst,), torch.uint32, allocator=self.allocator)
         # Stand-in for the degenerate `recv_expert_stats` argument when the
         # caller did not ask for per-expert stats; see `dispatch`.
         self._no_expert_stats = tilelang.tensor((1,), torch.uint32, allocator=self.allocator)
+        # Expanded-layout outputs. One element each unless expanding, matching
+        # the kernel's degenerate argument shapes.
+        self.expert_count = tilelang.tensor((self.experts_per_rank if self.do_expand else 1,), torch.int32, allocator=self.allocator)
+        self.expert_offset = tilelang.tensor((self.experts_per_rank + 1 if self.do_expand else 1,), torch.int32, allocator=self.allocator)
+        self.expand_overflow = tilelang.tensor((1,), torch.int32, allocator=self.allocator)
         # Likewise for combine's unused bias arguments; see `combine`.
         self._no_bias = tilelang.tensor((1, hidden), self.combine_dtype, allocator=self.allocator)
         # int32 (signed): -1 is the "not yet published" sentinel every rank
         # spins on while the count matrix fills in.
-        self.count_matrix = tilelang.tensor((self.num_ranks * self.num_ranks,), torch.int32, allocator=self.allocator)
-        self.send_base = tilelang.tensor((self.num_ranks,), torch.int32, allocator=self.allocator)
+        self.count_matrix = tilelang.tensor((self.num_ranks * n_dst,), torch.int32, allocator=self.allocator)
+        self.send_base = tilelang.tensor((n_dst,), torch.int32, allocator=self.allocator)
         self.psum_recv_count = tilelang.tensor((self.num_ranks,), torch.int32, allocator=self.allocator)
         self.num_recv = tilelang.tensor((1,), torch.int32, allocator=self.allocator)
         self.send_rank_mask = tilelang.tensor((num_max_tokens_per_rank,), torch.int32, allocator=self.allocator)
@@ -238,15 +299,15 @@ class Buffer:
         # `reference.per_token_cast_back`. BF16: `hidden` elements of `dtype`,
         # unchanged.
         self.recv_x = tilelang.tensor(
-            (self.total_capacity, self.row_bytes if self.is_fp8 else hidden),
+            (self.recv_capacity, self.row_bytes if self.is_fp8 else hidden),
             torch.uint8 if self.is_fp8 else dtype,
             allocator=self.allocator,
         )
         self.recv_x_flat = self.recv_x.view(-1)
-        self.recv_src_rank = tilelang.tensor((self.total_capacity,), torch.int32, allocator=self.allocator)
-        self.recv_src_token = tilelang.tensor((self.total_capacity,), torch.int32, allocator=self.allocator)
-        self.recv_topk_idx = tilelang.tensor((self.total_capacity, num_topk), torch.int32, allocator=self.allocator)
-        self.recv_topk_weights = tilelang.tensor((self.total_capacity, num_topk), torch.float32, allocator=self.allocator)
+        self.recv_src_rank = tilelang.tensor((self.recv_capacity,), torch.int32, allocator=self.allocator)
+        self.recv_src_token = tilelang.tensor((self.recv_capacity,), torch.int32, allocator=self.allocator)
+        self.recv_topk_idx = tilelang.tensor((self.recv_capacity, num_topk), torch.int32, allocator=self.allocator)
+        self.recv_topk_weights = tilelang.tensor((self.recv_capacity, num_topk), torch.float32, allocator=self.allocator)
 
         # Combine's staging buffer, one slot per (contributing rank, source
         # token) -- the equivalent of DeepEP's `recv_buffer` on the way back.
@@ -304,6 +365,10 @@ class Buffer:
                 self.scale_dim,
                 self.row_bytes or 0,
                 collect_expert_stats,
+                self.do_expand,
+                self.expert_alignment,
+                self.zero_padding,
+                self.recv_capacity,
             )
             kernel.compile_group = self.group
             kernel.initialize(allocator=self.allocator)
@@ -410,6 +475,9 @@ class Buffer:
                 self.recv_topk_idx.view(-1),
                 self.recv_topk_weights.view(-1),
                 stats,
+                self.expert_count,
+                self.expert_offset,
+                self.expand_overflow,
             )
 
             # No device-to-host read of `num_recv`: it cost ~33us and nothing
@@ -418,6 +486,9 @@ class Buffer:
             # capacity is `num_ranks` times that.
             num_recv = self.num_recv.clone()
             psum_recv_count = self.psum_recv_count.clone()
+            expert_count = self.expert_count.clone()
+            expert_offset = self.expert_offset.clone()
+            expand_overflow = self.expand_overflow.clone()
 
         finish_event = torch.cuda.Event()
         finish_event.record(self.comm_stream)
@@ -430,7 +501,7 @@ class Buffer:
         if async_finish:
             # These were allocated on the communication stream; the caller will
             # read them on its own, so the allocator has to know both.
-            for t in (topk_idx_i32, topk_weights_f32, num_recv, psum_recv_count):
+            for t in (topk_idx_i32, topk_weights_f32, num_recv, psum_recv_count, expert_count, expert_offset, expand_overflow):
                 t.record_stream(compute_stream)
         else:
             compute_stream.wait_stream(self.comm_stream)
@@ -446,6 +517,9 @@ class Buffer:
             self.recv_src_token,
             num_tokens,
             finish_event if async_finish else None,
+            expert_count.clone() if self.do_expand else None,
+            expert_offset.clone() if self.do_expand else None,
+            expand_overflow.clone() if self.do_expand else None,
         )
         # FP8: the packed uint8 buffer, unpacked with `reference.per_token_cast_back`.
         return (self.recv_x, self.recv_topk_idx, self.recv_topk_weights, handle)
@@ -459,6 +533,14 @@ class Buffer:
         token with no contributions still receives them. Each distinct count
         compiles its own kernel variant.
         """
+        assert not self.do_expand, (
+            "combine does not support the expanded layout yet: its store-back slot is "
+            "`comm_x[rank][src_token]`, unique only because dispatch deduplicated. Expanded, "
+            "a token with two experts on one rank produces two rows that collide there. "
+            "DeepEP's answer is `kDoExpandedSend` -- sum a token's local-expert rows before "
+            "sending -- which needs the (src_rank, src_token) -> rows inversion dispatch does "
+            "not currently record."
+        )
         if bias is None:
             biases = ()
         elif torch.is_tensor(bias):

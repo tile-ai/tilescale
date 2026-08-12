@@ -155,3 +155,71 @@ def per_token_cast_back(packed: torch.Tensor, hidden: int, group: int = 128) -> 
     values = packed[:, :hidden].view(torch.float8_e4m3fn)
     scales = packed[:, hidden : hidden + scale_dim * 4].view(torch.float32)
     return (values.view(m, -1, group).float() * scales.view(m, -1, 1)).view(m, hidden).to(torch.bfloat16)
+
+
+# ---------------------------------------------------------------------------
+# Expanded layout
+#
+# DeepEP's `do_expand`: one received row per (token, expert) rather than one
+# per (token, destination rank), and rows grouped by *local expert* so a
+# grouped GEMM can consume each expert's segment as a contiguous block.
+#
+# DeepEP expands in its receiver-side copy epilogue, which is free to bump an
+# atomic per expert because it is already reading every staged row. This port
+# has no epilogue -- rows land at their final index straight from the sender --
+# so the sender has to know the index, which means the count exchange has to
+# carry per-expert counts instead of per-rank ones. The whole layout then falls
+# out of the same three numbers dispatch already computes, one granularity
+# down:
+#
+#     segment_base[e]   exclusive prefix sum over local experts of the
+#                       *aligned* received counts -- where expert e's rows
+#                       start in the destination's output
+#     sender_base[s][e] sum over senders before s of count[s][e] -- where
+#                       sender s's rows start inside that segment
+#     slot              a local bump counter per (destination expert)
+#
+# and the destination index is the sum of the three. Each sender owns a
+# disjoint sub-range of each expert's segment, so nothing needs a remote
+# atomic, exactly as in the rank layout.
+#
+# `expert_alignment` rounds each expert's segment up, so the gap between an
+# expert's real count and its aligned one holds whatever the last call left
+# there. `zero_padding` clears it; without it a grouped GEMM would consume
+# stale rows.
+# ---------------------------------------------------------------------------
+
+
+def expanded_layout(topk_idx_per_rank, num_experts: int, num_ranks: int, expert_alignment: int = 1):
+    """The layout every rank's dispatch should produce, from every rank's routing.
+
+    `topk_idx_per_rank[s]` is sender `s`'s `[num_tokens, topk]` selection. Returns
+    `(rows, counts, offsets)`:
+
+    - `rows[r][e]` -- the `(src_rank, src_token)` pairs destination `r`'s local
+      expert `e` should receive, in the order the layout puts them: grouped by
+      sender, senders in rank order. Within one sender the order is whatever
+      its slot counter hands out, so compare these as sets per sender block.
+    - `counts[r][e]` -- unaligned received count.
+    - `offsets[r]` -- `[experts_per_rank + 1]` exclusive prefix sum of the
+      *aligned* counts: expert `e`'s segment is `[offsets[e], offsets[e + 1])`,
+      of which the first `counts[e]` rows are real and the rest is padding.
+    """
+    experts_per_rank = num_experts // num_ranks
+    rows = [[[] for _ in range(experts_per_rank)] for _ in range(num_ranks)]
+    for src_rank, topk_idx in enumerate(topk_idx_per_rank):
+        for token in range(topk_idx.shape[0]):
+            # A token reaches an expert at most once: DeepEP asserts the top-k
+            # entries of a token are distinct experts, and so does this port.
+            for expert in sorted({int(e) for e in topk_idx[token].tolist() if e >= 0}):
+                rows[expert // experts_per_rank][expert % experts_per_rank].append((src_rank, token))
+
+    counts = [[len(rows[r][e]) for e in range(experts_per_rank)] for r in range(num_ranks)]
+    offsets = []
+    for r in range(num_ranks):
+        off, acc = [0], 0
+        for e in range(experts_per_rank):
+            acc += align_up(counts[r][e], expert_alignment)
+            off.append(acc)
+        offsets.append(off)
+    return rows, counts, offsets

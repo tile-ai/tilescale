@@ -119,12 +119,21 @@ def test_dispatch_combine_v3_shape_fp8(local_rank: int, num_ranks: int):
     _run(local_rank, num_ranks, num_tokens=8192, hidden=7168, topk=8, num_experts=256, num_sms=64, dtype=torch.float8_e4m3fn)
 
 
+# One `_run` per test, like every other case here: `_run` owns the process
+# group's whole lifetime, so looping over parameters inside one test tears it
+# down and rebuilds it on the same port, which is intermittently refused.
 @tilelang.testing.requires_cuda
 @distributed_test(nprocs=2)
-def test_combine_bias(local_rank: int, num_ranks: int):
-    """DeepEP's `bias_0`/`bias_1`, one and two of them."""
-    for num_bias in (1, 2):
-        _run(local_rank, num_ranks, num_tokens=64, hidden=128, topk=2, num_experts=8, num_sms=2, num_bias=num_bias)
+def test_combine_bias_single(local_rank: int, num_ranks: int):
+    """DeepEP's `bias_0`, on its own."""
+    _run(local_rank, num_ranks, num_tokens=64, hidden=128, topk=2, num_experts=8, num_sms=2, num_bias=1)
+
+
+@tilelang.testing.requires_cuda
+@distributed_test(nprocs=2)
+def test_combine_bias_pair(local_rank: int, num_ranks: int):
+    """DeepEP's `bias_0` and `bias_1` together."""
+    _run(local_rank, num_ranks, num_tokens=64, hidden=128, topk=2, num_experts=8, num_sms=2, num_bias=2)
 
 
 @tilelang.testing.requires_cuda
@@ -188,6 +197,78 @@ def test_cumulative_local_expert_recv_stats(local_rank: int, num_ranks: int):
 
         got = stats.to(torch.int64)
         assert torch.equal(got, expected), f"rank {rank}: got {got.tolist()}, expected {expected.tolist()}"
+    finally:
+        buf.close()
+        dist.destroy_process_group()
+
+
+@tilelang.testing.requires_cuda
+@distributed_test(nprocs=8)
+def test_dispatch_expanded_layout(local_rank: int, num_ranks: int):
+    """DeepEP's `do_expand`: one row per (token, expert), grouped by expert.
+
+    Checked against `reference.expanded_layout` -- per-expert counts, the
+    aligned segment offsets, the exact set of (src_rank, src_token) in each
+    segment, the payload of every row, and that the alignment padding is
+    zeroed and marked unoccupied.
+    """
+    rank, num_ranks, group = init_dist(local_rank, num_ranks)
+    device = torch.device(f"cuda:{local_rank}")
+    torch.manual_seed(1234 + rank)
+
+    num_tokens, hidden, topk, num_experts, alignment = 128, 256, 4, 32, 8
+    experts_per_rank = num_experts // num_ranks
+    # Distinct experts per token, which is what DeepEP asserts and real top-k
+    # routing produces; -1 marks an unselected slot.
+    idx = torch.stack([torch.randperm(num_experts, device=device)[:topk] for _ in range(num_tokens)]).int()
+    idx = idx.masked_fill(torch.rand_like(idx, dtype=torch.float) < 0.25, -1)
+    weights = torch.rand(num_tokens, topk, device=device)
+    # A token's identity, so a misrouted row is obvious rather than plausible.
+    x = torch.arange(num_tokens, device=device, dtype=torch.bfloat16).view(-1, 1).repeat(1, hidden)
+    x = x + rank * 1000
+
+    buf = Buffer(
+        group=group,
+        local_rank=local_rank,
+        num_local_ranks=num_ranks,
+        num_max_tokens_per_rank=num_tokens,
+        hidden=hidden,
+        num_topk=topk,
+        num_experts=num_experts,
+        dtype=torch.bfloat16,
+        num_sms=8,
+        do_expand=True,
+        expert_alignment=alignment,
+        expand_factor=float(min(topk, experts_per_rank)),
+    )
+    try:
+        all_idx = [torch.zeros_like(idx) for _ in range(num_ranks)]
+        dist.all_gather(all_idx, idx, group)
+        exp_rows, exp_counts, exp_offsets = reference.expanded_layout([t.cpu() for t in all_idx], num_experts, num_ranks, alignment)
+
+        recv_x, _, _, handle = buf.dispatch(x, idx, weights)
+        assert handle.expand_overflow == 0, f"rank {rank}: overflowed by {handle.expand_overflow}"
+
+        counts = handle.expert_count.cpu().tolist()
+        offsets = handle.expert_offset.cpu().tolist()
+        assert counts == exp_counts[rank], f"rank {rank}: counts {counts} != {exp_counts[rank]}"
+        assert offsets == exp_offsets[rank], f"rank {rank}: offsets {offsets} != {exp_offsets[rank]}"
+
+        src_rank = buf.recv_src_rank.cpu()
+        src_token = buf.recv_src_token.cpu()
+        rows = recv_x.cpu()
+        for e in range(experts_per_rank):
+            begin, end = offsets[e], offsets[e] + counts[e]
+            got = sorted(zip(src_rank[begin:end].tolist(), src_token[begin:end].tolist()))
+            assert got == sorted(exp_rows[rank][e]), f"rank {rank} expert {e}: {got} != {sorted(exp_rows[rank][e])}"
+            # Every row carries its origin, so the payload pins down routing.
+            for i in range(begin, end):
+                want = float(src_token[i]) + float(src_rank[i]) * 1000
+                assert torch.all(rows[i] == want), f"rank {rank} row {i}: payload {rows[i][0]} != {want}"
+            # Alignment padding: zeroed, and owned by nobody.
+            for i in range(end, offsets[e + 1]):
+                assert torch.all(rows[i] == 0), f"rank {rank} pad row {i} not zeroed"
+                assert src_rank[i] == -1 and src_token[i] == -1, f"rank {rank} pad row {i} marked occupied"
     finally:
         buf.close()
         dist.destroy_process_group()

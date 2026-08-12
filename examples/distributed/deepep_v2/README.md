@@ -101,6 +101,31 @@ does not pay for it. DeepEP gets the same number for free because its expanded
 layout already exchanges per-expert counts; this port has no such exchange and
 counts locally instead, which is why it is not free here.
 
+`dispatch` produces DeepEP's **expanded layout** when the buffer is built with
+`do_expand=True`: one received row per (token, expert) instead of one per
+(token, rank), and rows grouped by local expert, so each expert's rows are the
+contiguous block a grouped GEMM wants. `handle.expert_offset` gives the segment
+bounds and `handle.expert_count` how many rows in each are real;
+`expert_alignment=n` rounds each segment up to a multiple of `n` and the gap is
+zeroed unless `zero_padding=False`.
+
+DeepEP expands in a receiver-side copy epilogue. This port has none -- rows land
+at their final index straight from the sender -- so instead the count exchange
+runs at expert granularity and the sender derives the index itself. That also
+makes the capacity check free: every rank computes the same layout from the same
+count matrix, so an overflow is known before any payload moves. Deduplicated,
+capacity cannot be exceeded; expanded it can, so `expand_factor` sizes the
+receive buffer (default 1.0, right for balanced routing) and `handle.expand_overflow`
+reports how many rows a call needed if it did not fit -- dispatch skips the rank
+rather than writing past it.
+
+**`combine` cannot consume an expanded dispatch yet** and asserts rather than
+returning a wrong answer. Its store-back slot is `comm_x[rank][src_token]`,
+unique only because dispatch deduplicated; expanded, a token with two experts on
+one rank has two rows that collide there. The fix is DeepEP's `kDoExpandedSend`
+-- sum a token's local-expert rows before sending -- which needs a
+(src_rank, src_token) -> rows inversion dispatch does not currently record.
+
 `combine(..., bias=b)` adds one tensor, or `bias=(b0, b1)` two, to the output --
 DeepEP's `bias_0`/`bias_1`, each `[num_tokens, hidden]`. They seed the reduce
 accumulator instead of being added after it, so they cost nothing measurable,
@@ -219,9 +244,7 @@ a design decision here -- each would be an additive parameter or output:
 | | |
 |---|---|
 | `handle=` on dispatch | reuse a cached layout and skip the notify phase entirely |
-| `do_expand` / expanded layout | one slot per (expert, token) instead of dedup per rank, with the per-expert prefix sum that comes with it |
-| `expert_alignment` | round each local expert's received count up to a multiple |
-| `kAllowMultipleReduction` | combine-side local sum across several experts on one rank |
+| `kAllowMultipleReduction` | combine-side local sum across several experts on one rank -- what combine needs before it can consume an expanded dispatch, see below |
 | `deterministic` mode | DeepEP has a separate prologue for it |
 | `use_tma_aligned_col_major_sf` | column-major scale-factor layout for a downstream GEMM |
 
