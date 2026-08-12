@@ -289,7 +289,6 @@ def fused_l1_swiglu_manual_warp_kernel(
     capacity: int,
     num_sms: int,
     activation_clamp: float = 10.0,
-    block_h: int = 256,
     block_m: int = 64,
     block_n: int = 256,
     block_k: int = 128,
@@ -299,7 +298,6 @@ def fused_l1_swiglu_manual_warp_kernel(
     num_experts_per_rank = num_experts // num_ranks
     num_scale_groups = hidden // SCALE_GRANULARITY
     num_routes = num_tokens * num_topk
-    num_hidden_blocks = ceil_div(hidden, block_h)
     num_m_blocks = ceil_div(capacity, block_m)
     num_n_blocks = ceil_div(l1_n, block_n)
     num_compute_tiles = num_experts_per_rank * num_m_blocks * num_n_blocks
@@ -315,6 +313,7 @@ def fused_l1_swiglu_manual_warp_kernel(
         route_counts: T.Tensor((num_ranks, num_experts), T.int32),
         recv_counts: T.Tensor((num_experts_per_rank,), T.int32),
         route_slots: T.Tensor((num_tokens, num_topk), T.int32),
+        arrivals: T.Tensor((num_experts_per_rank, num_m_blocks), T.uint32),
         recv_x: T.Tensor((num_experts_per_rank, capacity, hidden), T.float8_e4m3fn),
         recv_x_sf: T.Tensor((num_experts_per_rank, capacity, num_scale_groups), T.float32),
         recv_weights: T.Tensor((num_experts_per_rank, capacity), T.float32),
@@ -420,8 +419,10 @@ def fused_l1_swiglu_manual_warp_kernel(
                 T.inc_max_nreg(208)
 
             if tx < 64:
-                for dispatch_wave in T.serial(ceil_div(num_routes, num_sms)):
-                    dispatch_route = bid + dispatch_wave * num_sms
+                dispatch_warp = tx // 32
+                dispatch_lane = tx % 32
+                for dispatch_wave in T.serial(ceil_div(num_routes, num_sms * 2)):
+                    dispatch_route = bid * 2 + dispatch_warp + dispatch_wave * num_sms * 2
                     if dispatch_route < num_routes:
                         dispatch_token = dispatch_route // num_topk
                         dispatch_topk = dispatch_route % num_topk
@@ -430,27 +431,19 @@ def fused_l1_swiglu_manual_warp_kernel(
                         if dispatch_expert >= 0 and dispatch_slot >= 0 and dispatch_slot < capacity and num_scale_groups > 0 and hidden > 0:
                             dispatch_rank = dispatch_expert // num_experts_per_rank
                             dispatch_local_expert = dispatch_expert % num_experts_per_rank
-                            for dispatch_h in T.serial(num_hidden_blocks):
-                                T.copy(
-                                    x[
-                                        dispatch_token,
-                                        dispatch_h * block_h : (dispatch_h + 1) * block_h,
-                                    ],
-                                    recv_x[
-                                        dispatch_local_expert,
-                                        dispatch_slot,
-                                        dispatch_h * block_h : (dispatch_h + 1) * block_h,
-                                    ],
-                                    dst_pe=dispatch_rank,
-                                    disable_tma=True,
-                                )
-                            T.copy(
-                                x_sf[dispatch_token, :],
-                                recv_x_sf[dispatch_local_expert, dispatch_slot, :],
+                            T.put_warp(
+                                T.address_of(x[dispatch_token, 0]),
+                                T.address_of(recv_x[dispatch_local_expert, dispatch_slot, 0]),
+                                hidden,
                                 dst_pe=dispatch_rank,
-                                disable_tma=True,
                             )
-                            if tx == dispatch_thread:
+                            T.put_warp(
+                                T.address_of(x_sf[dispatch_token, 0]),
+                                T.address_of(recv_x_sf[dispatch_local_expert, dispatch_slot, 0]),
+                                num_scale_groups,
+                                dst_pe=dispatch_rank,
+                            )
+                            if dispatch_lane == dispatch_thread:
                                 T.st(
                                     recv_weights[dispatch_local_expert, dispatch_slot],
                                     topk_weights[dispatch_token, dispatch_topk],
@@ -471,11 +464,18 @@ def fused_l1_swiglu_manual_warp_kernel(
                                     dispatch_topk,
                                     dst_pe=dispatch_rank,
                                 )
-                T.fence_sys()
-            T.sync_grid()
-            if bid == 0:
-                T.barrier_blocks(barrier[0])
-            T.sync_grid()
+                            T.sync_warp()
+                            if dispatch_lane == dispatch_thread:
+                                T.fence_sys()
+                                T.atomic_add(
+                                    arrivals[
+                                        dispatch_local_expert,
+                                        dispatch_slot // block_m,
+                                    ],
+                                    1,
+                                    memory_order="relaxed",
+                                    dst_pe=dispatch_rank,
+                                )
 
             if tx >= 64 and tx < 128:
                 producer_step = T.alloc_var(T.int32, init=0)
@@ -486,6 +486,18 @@ def fused_l1_swiglu_manual_warp_kernel(
                         producer_m = (producer_tile // num_n_blocks) % num_m_blocks
                         producer_expert = producer_tile // (num_n_blocks * num_m_blocks)
                         if producer_n * block_n < l1_n and producer_m * block_m < recv_counts[producer_expert]:
+                            producer_arrivals = T.min(
+                                block_m,
+                                recv_counts[producer_expert] - producer_m * block_m,
+                            )
+                            if tx == 64:
+                                T.wait_ge(
+                                    arrivals[producer_expert, producer_m],
+                                    producer_arrivals,
+                                    scope=T.WaitScope.SYS,
+                                    semantics=T.WaitSemantics.ACQUIRE,
+                                )
+                            T.sync_threads(5, 64)
                             for producer_k in T.serial(num_k_blocks):
                                 producer_stage = (producer_step + producer_k) % pipeline_stages
                                 producer_phase = ((producer_step + producer_k) // pipeline_stages) & 1
@@ -1274,6 +1286,12 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     src_tokens = allocator_tensor((num_experts_per_rank, capacity), torch.int32, allocator=allocator)
     src_topk = allocator_tensor((num_experts_per_rank, capacity), torch.int32, allocator=allocator)
     route_slots = allocator_tensor((num_tokens, num_topk), torch.int32, allocator=allocator)
+    if use_fused:
+        arrivals = allocator_tensor(
+            (num_experts_per_rank, ceil_div(capacity, 64)),
+            torch.uint32,
+            allocator=allocator,
+        )
     if not use_fused:
         l1_out = allocator_tensor(
             (num_experts_per_rank, capacity, 2 * intermediate_hidden),
@@ -1299,6 +1317,8 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         route_counts.zero_()
         barrier.zero_()
         recv_counts.zero_()
+        if use_fused:
+            arrivals.zero_()
         recv_x.zero_()
         recv_x_sf.zero_()
         recv_weights.zero_()
@@ -1317,6 +1337,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                 route_counts,
                 recv_counts,
                 route_slots,
+                arrivals,
                 recv_x,
                 recv_x_sf,
                 recv_weights,
@@ -1400,9 +1421,13 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     if args.rep > 0:
         reset_state()
+        # Stateful synchronization counters must be reset between warmup iterations.
+        for _ in range(args.warmup):
+            run_pipeline()
+            reset_state()
         latency = do_bench(
             run_pipeline,
-            warmup=args.warmup,
+            warmup=0,
             rep=args.rep,
             post_fn=reset_state,
             group=group,
