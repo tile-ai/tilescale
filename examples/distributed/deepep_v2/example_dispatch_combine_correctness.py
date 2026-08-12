@@ -43,7 +43,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         combine_threads=args.combine_threads,
     )
 
-    recv_x, recv_topk_idx, recv_topk_weights, handle = buf.dispatch(x, topk_idx, topk_weights)
+    recv_x, recv_topk_idx, recv_topk_weights, handle, _ = buf.dispatch(x, topk_idx, topk_weights)
     # `dispatch` returns the full receive capacity; the reference only wants
     # the rows that were actually written. Reading the count synchronises.
     n = handle.num_recv_tokens
@@ -52,7 +52,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         print(f"num_recv_tokens={handle.num_recv_tokens} total_capacity={buf.total_capacity}")
 
     expert_out = reference.simulate_expert_compute(recv_x, recv_topk_idx, recv_topk_weights)
-    combined = buf.combine(expert_out, handle)
+    combined, _ = buf.combine(expert_out, handle)
     expected = reference.reference_combined(x, topk_weights, topk_idx)
     err = (combined.float() - expected.float()).norm().item()
     denom = expected.float().norm().item()

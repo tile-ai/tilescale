@@ -50,6 +50,55 @@ _TL_DTYPES = {
 FP8_GROUP = 128
 
 
+class EventOverlap:
+    """DeepEP's `EventOverlap`: a comm-stream event, plus what it must outlive.
+
+    `dispatch` and `combine` return one whether or not they were asked to run
+    asynchronously; synchronously it wraps `None`, so `with event:` is a no-op
+    and callers do not branch.
+
+    `extra_tensors` is DeepEP's mechanism and its reason is worth repeating:
+    the obvious way to keep a comm-stream tensor alive until the compute stream
+    is done with it is `Tensor.record_stream`, but that is incompatible with
+    CUDA graph capture. Holding a reference here instead ties the tensors'
+    lifetime to the event object, which the caller drops after waiting.
+    """
+
+    def __init__(self, event: torch.cuda.Event | None = None, extra_tensors: tuple = ()):
+        self.event = event
+        self.extra_tensors = extra_tensors
+        self._release_handle_by_call = False
+
+    def current_stream_wait(self, release_handle: bool = False) -> None:
+        """Make the current stream wait for the comm kernels, without blocking the host."""
+        assert self.event is not None, "no event: this call was not made with async_finish=True"
+        torch.cuda.current_stream().wait_event(self.event)
+        if release_handle:
+            self.event = None
+            self.extra_tensors = ()
+
+    def __call__(self, release_handle: bool = False) -> "EventOverlap":
+        self._release_handle_by_call = release_handle
+        return self
+
+    def __enter__(self) -> "EventOverlap":
+        """Overlap whatever the block enqueues with the communication.
+
+        ```python
+        recv_x, _, _, handle, event = buf.dispatch(x, topk_idx, topk_weights, async_finish=True)
+        with event:
+            unrelated_work_on_the_current_stream()
+        # leaving the block, the current stream waits: `recv_x` is now readable
+        ```
+        """
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        if self.event is not None:
+            self.current_stream_wait(release_handle=self._release_handle_by_call)
+        self._release_handle_by_call = False
+
+
 class EPHandle:
     """Communication handle returned by ``Buffer.dispatch``, consumed by ``Buffer.combine``.
 
@@ -63,8 +112,8 @@ class EPHandle:
             wait on before reading anything the call returned; `None` otherwise.
         psum_recv_count: inclusive prefix sum of deduplicated received counts per
             sender rank, `[num_ranks]` -- DeepEP's `psum_num_recv_tokens_per_scaleup_rank`.
-            Meaningless in the expanded layout, which groups by expert rather
-            than by sender: use `expert_count`/`expert_offset` there.
+            `None` in the expanded layout, which groups by expert rather than by
+            sender and so never computes it: use `expert_count`/`expert_offset`.
         recv_src_rank, recv_src_token: per-compact-row source (rank, token) --
             a simplified, unpacked form of DeepEP's single encoded `recv_src_metadata`.
         num_tokens: how many tokens this rank dispatched, i.e. how many rows
@@ -343,6 +392,10 @@ class Buffer:
         # ends in a cross-rank barrier, so a rank queued N calls behind stalls
         # everyone inside it. 1, 2 and 4 all measure ~680-685 GB/s; 2 had no
         # low outlier.
+        # 0 disables the throttle, which is what an `async_finish` caller
+        # driving its own overlap usually wants: the `synchronize` it does
+        # blocks the *host*, so a bounded run-ahead and a fully asynchronous
+        # call are not the same thing.
         self.pipeline_depth = pipeline_depth
         self._in_flight: deque = deque()
 
@@ -401,7 +454,9 @@ class Buffer:
         topk_idx: torch.Tensor,
         topk_weights: torch.Tensor,
         num_sms: int = 0,
+        previous_event: EventOverlap = None,
         async_finish: bool = False,
+        allocate_on_comm_stream: bool = False,
         cumulative_local_expert_recv_stats: torch.Tensor = None,
     ):
         """Scatter `x` to the ranks owning each token's top-k experts.
@@ -412,10 +467,22 @@ class Buffer:
         token-destination pair -- see kernels/dispatch.py), and a plain tensor
         otherwise. The first return value mirrors that.
 
-        With `async_finish`, the returned handle carries a `finish_event` and
-        the caller's stream is *not* joined to the communication stream: nothing
-        the call returns may be read until that event is waited on. The default
-        joins the streams before returning, so the result is usable immediately.
+        Returns `(recv_x, recv_topk_idx, recv_topk_weights, handle, event)`.
+        The `event` is an `EventOverlap`, as in DeepEP, and is returned either
+        way -- synchronously it wraps `None`, so callers need not branch.
+
+        With `async_finish` the caller's stream is *not* joined to the
+        communication stream and nothing the call returns may be read until the
+        event is waited on (`with event:` or `event.current_stream_wait()`).
+        EPv2 spells this argument `async_with_compute_stream`; the name here
+        matches its `combine` and DeepEP's own legacy buffer.
+
+        `previous_event` starts the communication after one specific event
+        rather than after everything queued on the caller's stream, and
+        `allocate_on_comm_stream` leaves this call's temporaries owned by the
+        communication stream -- keeping them alive through the returned event
+        instead of `record_stream`, which CUDA graph capture does not allow. As
+        in DeepEP the first requires the second.
 
         `cumulative_local_expert_recv_stats` is DeepEP's load-balance counter:
         a `[num_experts // num_ranks]` uint32 tensor this rank's received token
@@ -439,7 +506,11 @@ class Buffer:
         num_tokens = x.shape[0]
         num_sms = self.num_sms if num_sms == 0 else num_sms
         compute_stream = torch.cuda.current_stream()
-        self.comm_stream.wait_stream(compute_stream)
+        if previous_event is not None:
+            assert allocate_on_comm_stream, "previous_event requires allocate_on_comm_stream"
+            self.comm_stream.wait_event(previous_event.event)
+        else:
+            self.comm_stream.wait_stream(compute_stream)
 
         with torch.cuda.stream(self.comm_stream):
             # Nothing is reset here: the kernel does it at the end of every
@@ -494,15 +565,18 @@ class Buffer:
         finish_event.record(self.comm_stream)
 
         # Keep the CPU from running arbitrarily far ahead. See `pipeline_depth`.
-        self._in_flight.append(finish_event)
-        while len(self._in_flight) > self.pipeline_depth:
-            self._in_flight.popleft().synchronize()
+        if self.pipeline_depth:
+            self._in_flight.append(finish_event)
+            while len(self._in_flight) > self.pipeline_depth:
+                self._in_flight.popleft().synchronize()
 
+        # Allocated on the communication stream, read by the caller on its
+        # own: something has to keep them alive across the handover.
+        temporaries = (topk_idx_i32, topk_weights_f32, num_recv, psum_recv_count, expert_count, expert_offset, expand_overflow)
         if async_finish:
-            # These were allocated on the communication stream; the caller will
-            # read them on its own, so the allocator has to know both.
-            for t in (topk_idx_i32, topk_weights_f32, num_recv, psum_recv_count, expert_count, expert_offset, expand_overflow):
-                t.record_stream(compute_stream)
+            if not allocate_on_comm_stream:
+                for t in temporaries:
+                    t.record_stream(compute_stream)
         else:
             compute_stream.wait_stream(self.comm_stream)
 
@@ -512,7 +586,7 @@ class Buffer:
             num_sms,
             topk_idx_i32,
             num_recv,
-            psum_recv_count,
+            None if self.do_expand else psum_recv_count,
             self.recv_src_rank,
             self.recv_src_token,
             num_tokens,
@@ -521,11 +595,30 @@ class Buffer:
             expert_offset.clone() if self.do_expand else None,
             expand_overflow.clone() if self.do_expand else None,
         )
+        event = EventOverlap(
+            finish_event if async_finish else None,
+            temporaries if async_finish and allocate_on_comm_stream else (),
+        )
         # FP8: the packed uint8 buffer, unpacked with `reference.per_token_cast_back`.
-        return (self.recv_x, self.recv_topk_idx, self.recv_topk_weights, handle)
+        return (self.recv_x, self.recv_topk_idx, self.recv_topk_weights, handle, event)
 
-    def combine(self, x: torch.Tensor, handle: EPHandle, num_sms: int = 0, bias=None):
+    def combine(
+        self,
+        x: torch.Tensor,
+        handle: EPHandle,
+        num_sms: int = 0,
+        bias=None,
+        previous_event: EventOverlap = None,
+        async_finish: bool = False,
+        allocate_on_comm_stream: bool = False,
+    ):
         """Reduce every rank's contribution back into this rank's token order.
+
+        Returns `(combined, event)`. DeepEP's third element,
+        `combined_topk_weights`, has no counterpart here -- see the README on
+        why carrying the gate weights back would return the caller its own
+        input. `previous_event`, `async_finish` and `allocate_on_comm_stream`
+        mean exactly what they do on `dispatch`.
 
         `bias` is DeepEP's `bias_0`/`bias_1`: `None`, one `[num_tokens, hidden]`
         tensor, or a pair of them, added to the output. As in DeepEP they are
@@ -559,11 +652,16 @@ class Buffer:
         # Read the caller's contribution (see kernels/combine.py) in place --
         # `combine_kernel` takes its length as a symbolic extent, so no copy
         # into a fixed-shape buffer is needed.
-        x_flat = x.reshape(-1) if x.is_contiguous() else x.contiguous().reshape(-1)
+        x_contig = x if x.is_contiguous() else x.contiguous()
+        x_flat = x_contig.reshape(-1)
         num_sms = handle.num_sms if num_sms == 0 else num_sms
         num_tokens = handle.num_tokens
         compute_stream = torch.cuda.current_stream()
-        self.comm_stream.wait_stream(compute_stream)
+        if previous_event is not None:
+            assert allocate_on_comm_stream, "previous_event requires allocate_on_comm_stream"
+            self.comm_stream.wait_event(previous_event.event)
+        else:
+            self.comm_stream.wait_stream(compute_stream)
         with torch.cuda.stream(self.comm_stream):
             kernel = self._get_combine_kernel(num_tokens, len(biases))
             kernel(
@@ -577,12 +675,27 @@ class Buffer:
                 *bias_args,
                 self.combined[:num_tokens],
             )
-        compute_stream.wait_stream(self.comm_stream)
+        finish_event = torch.cuda.Event()
+        finish_event.record(self.comm_stream)
+        # Only a `contiguous()` copy belongs to this call; a reshape view of
+        # the caller's own tensor does not, and the output is buffer-owned and
+        # outlives any single call.
+        temporaries = () if x_contig is x else (x_contig,)
+        if async_finish:
+            if not allocate_on_comm_stream:
+                for t in temporaries:
+                    t.record_stream(compute_stream)
+        else:
+            compute_stream.wait_stream(self.comm_stream)
         # No pipeline bound here, unlike `dispatch`, and the asymmetry is not
         # understood: bounding dispatch is worth 634 -> 530 -> 460 GB/s over
         # successive runs, bounding this one costs 626 -> 610. Measured, not
         # reasoned; re-measure over several runs before changing either.
-        return self.combined[:num_tokens]
+        event = EventOverlap(
+            finish_event if async_finish else None,
+            temporaries if async_finish and allocate_on_comm_stream else (),
+        )
+        return self.combined[:num_tokens], event
 
     def close(self):
         self.allocator.close()

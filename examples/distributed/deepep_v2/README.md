@@ -75,12 +75,12 @@ buf = Buffer(
 
 # bf16: x is [num_tokens, hidden]
 # fp8:  x is (values, scales) from reference.per_token_cast_to_fp8
-recv_x, recv_topk_idx, recv_topk_weights, handle = buf.dispatch(x, topk_idx, topk_weights)
+recv_x, recv_topk_idx, recv_topk_weights, handle, event = buf.dispatch(x, topk_idx, topk_weights)
 
 n = handle.num_recv_tokens          # device-to-host read; call outside timed regions
 expert_out = my_expert_compute(recv_x[:n], recv_topk_idx[:n], recv_topk_weights[:n])
 
-combined = buf.combine(expert_out, handle)   # [num_tokens, hidden] bf16
+combined, event = buf.combine(expert_out, handle)   # [num_tokens, hidden] bf16
 ```
 
 `dispatch` returns views over the **full receive capacity**; slice with
@@ -88,9 +88,48 @@ combined = buf.combine(expert_out, handle)   # [num_tokens, hidden] bf16
 first return value is `(values, scales)` and the caller casts back before the
 expert computation — `reference.per_token_cast_back` does this.
 
-`dispatch(..., async_finish=True)` skips joining the communication stream and
-puts a `finish_event` on the handle; nothing returned may be read until that
-event is waited on.
+### Overlapping
+
+Both collectives return an `EventOverlap` as their last value, DeepEP's wrapper
+around the communication-stream event. It comes back either way -- synchronously
+it wraps `None` -- so a caller can write `with event:` without knowing which
+mode it asked for.
+
+```python
+recv_x, recv_topk_idx, recv_topk_weights, handle, event = buf.dispatch(
+    x, topk_idx, topk_weights, async_finish=True, allocate_on_comm_stream=True
+)
+with event:                       # runs on the compute stream, overlapping the dispatch
+    something_else()
+# leaving the block, the current stream waits: recv_x is readable
+
+combined, event = buf.combine(
+    expert_out, handle, previous_event=event, async_finish=True, allocate_on_comm_stream=True
+)
+event.current_stream_wait()
+```
+
+`async_finish` leaves the caller's stream unjoined from the communication
+stream; nothing returned may be read until the event is waited on. EPv2 spells
+this `async_with_compute_stream` on dispatch; the name here follows its
+`combine` and DeepEP's legacy buffer.
+
+`previous_event` starts the communication after one specific event instead of
+after everything queued on the caller's stream. `allocate_on_comm_stream` keeps
+this call's temporaries owned by the communication stream and alive through the
+returned event, rather than `Tensor.record_stream`, which CUDA graph capture
+does not permit -- the reason DeepEP carries `extra_tensors` on its event. As in
+DeepEP, `previous_event` requires `allocate_on_comm_stream`.
+
+One asymmetry with DeepEP worth knowing: `Buffer.pipeline_depth` (default 2)
+bounds how far the CPU may run ahead by blocking the *host* on an event a few
+calls back. It exists because a rank queued several calls behind stalls every
+other rank inside the kernel's cross-rank barrier, and it is orthogonal to
+`async_finish` -- so an asynchronous call can still block the host. Pass
+`pipeline_depth=0` to turn it off when driving the overlap yourself.
+
+DeepEP's `combine` returns a third value, `combined_topk_weights`, which has no
+counterpart here for the reason given under *Not implemented*.
 
 `dispatch(..., cumulative_local_expert_recv_stats=t)` adds this rank's received
 token count per local expert into `t`, a `[num_experts // num_ranks]` uint32

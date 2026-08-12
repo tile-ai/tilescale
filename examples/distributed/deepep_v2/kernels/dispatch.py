@@ -263,7 +263,6 @@ def dispatch_kernel(
             for token in T.serial(warp, num_tokens, total_warps):
                 expert = T.alloc_var(T.int32)
                 dst_rank = T.alloc_var(T.int32)
-                dst = T.alloc_var(T.int32)
                 expert = -1
                 if lane < topk:
                     expert = topk_idx[token, lane]
@@ -410,7 +409,6 @@ def dispatch_kernel(
             for token in T.serial(warp, num_tokens, total_warps):
                 expert = T.alloc_var(T.int32)
                 dst_rank = T.alloc_var(T.int32)
-                dst = T.alloc_var(T.int32)
                 slot = T.alloc_var(T.int32)
                 expert = -1
                 if lane < topk:
@@ -421,18 +419,14 @@ def dispatch_kernel(
                 dst = expert if do_expand else dst_rank
                 leader = T.alloc_var(T.int32, init=_dedup_leader(dst, lane))
                 # Every destination of this token claims its slot at once, one
-                # atomic per owning lane. Expanding, `send_base[dst] < 0` marks
-                # a destination phase 2 found would overflow; deduplicated no
-                # destination can overflow, so the extra load stays out of the
-                # generated code rather than sitting in the scatter's inner
-                # loop.
+                # atomic per owning lane. `send_base[dst] < 0` marks a
+                # destination phase 2 found would overflow, which only the
+                # expanded layout can hit -- deduplicated, capacity is a hard
+                # bound -- but the condition is the same either way and
+                # `send_base` is eight hot integers.
                 slot = -1
-                if do_expand:
-                    if leader == 1 and dst >= 0 and send_base[dst] >= 0:
-                        slot = T.atom_add(slot_counter[dst], 1, scope="gpu")
-                else:
-                    if leader == 1 and dst >= 0:
-                        slot = T.atom_add(slot_counter[dst], 1, scope="gpu")
+                if leader == 1 and dst >= 0 and send_base[dst] >= 0:
+                    slot = T.atom_add(slot_counter[dst], 1, scope="gpu")
 
                 for k in range(topk):
                     dst_k = T.alloc_var(T.int32)

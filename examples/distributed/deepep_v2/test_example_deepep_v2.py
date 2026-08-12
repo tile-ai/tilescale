@@ -12,6 +12,7 @@ per-128-element quantisation step on top, hence the wider threshold.
 
 from __future__ import annotations
 
+import pytest
 import torch
 import torch.distributed as dist
 
@@ -69,7 +70,7 @@ def _run(
         num_sms=num_sms,
     )
     try:
-        recv, recv_topk_idx, recv_topk_weights, handle = buf.dispatch(dispatch_x, topk_idx, topk_weights)
+        recv, recv_topk_idx, recv_topk_weights, handle, _ = buf.dispatch(dispatch_x, topk_idx, topk_weights)
         n = handle.num_recv_tokens
         recv_topk_idx, recv_topk_weights = recv_topk_idx[:n], recv_topk_weights[:n]
         recv_x = reference.per_token_cast_back(recv[:n], hidden) if is_fp8 else recv[:n]
@@ -77,7 +78,7 @@ def _run(
         # Deliberately the same magnitude as the combined output, so a dropped
         # or double-applied bias moves rel_l2 well past the threshold.
         biases = [torch.randn(num_tokens, hidden, dtype=torch.bfloat16, device=device) for _ in range(num_bias)]
-        combined = buf.combine(expert_out, handle, bias=biases or None)
+        combined, _ = buf.combine(expert_out, handle, bias=biases or None)
 
         expected = reference.reference_combined(x, topk_weights, topk_idx)
         for b in biases:
@@ -246,7 +247,7 @@ def test_dispatch_expanded_layout(local_rank: int, num_ranks: int):
         dist.all_gather(all_idx, idx, group)
         exp_rows, exp_counts, exp_offsets = reference.expanded_layout([t.cpu() for t in all_idx], num_experts, num_ranks, alignment)
 
-        recv_x, _, _, handle = buf.dispatch(x, idx, weights)
+        recv_x, _, _, handle, _ = buf.dispatch(x, idx, weights)
         assert handle.expand_overflow == 0, f"rank {rank}: overflowed by {handle.expand_overflow}"
 
         counts = handle.expert_count.cpu().tolist()
@@ -269,6 +270,113 @@ def test_dispatch_expanded_layout(local_rank: int, num_ranks: int):
             for i in range(end, offsets[e + 1]):
                 assert torch.all(rows[i] == 0), f"rank {rank} pad row {i} not zeroed"
                 assert src_rank[i] == -1 and src_token[i] == -1, f"rank {rank} pad row {i} marked occupied"
+    finally:
+        buf.close()
+        dist.destroy_process_group()
+
+
+@tilelang.testing.requires_cuda
+@distributed_test(nprocs=8)
+def test_async_finish_round_trip(local_rank: int, num_ranks: int):
+    """The same round trip run asynchronously must give the same answer.
+
+    Both collectives run with `async_finish=True` and real work is enqueued on
+    the compute stream inside the `with event:` block, so the test fails if the
+    event does not actually order the two streams -- reading `recv_x` before
+    the dispatch landed gives whatever the previous iteration left.
+
+    `allocate_on_comm_stream=True` on the dispatch exercises the path that
+    keeps this call's temporaries alive through the event rather than
+    `record_stream`, and `previous_event` chains the combine behind that same
+    event instead of behind the whole compute stream.
+    """
+    rank, num_ranks, group = init_dist(local_rank, num_ranks)
+    device = f"cuda:{local_rank}"
+    torch.manual_seed(1234 + rank)
+
+    num_tokens, hidden, topk, num_experts = 512, 512, 4, 32
+    x = torch.randn(num_tokens, hidden, dtype=torch.bfloat16, device=device)
+    topk_idx, topk_weights = reference.make_topk(num_tokens, topk, num_experts, device, 0.25)
+
+    buf = Buffer(
+        group=group,
+        local_rank=local_rank,
+        num_local_ranks=num_ranks,
+        num_max_tokens_per_rank=num_tokens,
+        hidden=hidden,
+        num_topk=topk,
+        num_experts=num_experts,
+        dtype=torch.bfloat16,
+        num_sms=8,
+        # Otherwise every third dispatch blocks the host, which is not what a
+        # caller driving its own overlap asked for. See `Buffer.pipeline_depth`.
+        pipeline_depth=0,
+    )
+    try:
+        recv, recv_topk_idx, recv_topk_weights, handle, dispatch_event = buf.dispatch(
+            x, topk_idx, topk_weights, async_finish=True, allocate_on_comm_stream=True
+        )
+        # Something real on the compute stream, overlapping the dispatch.
+        filler = torch.randn(1024, 1024, device=device, dtype=torch.bfloat16)
+        with dispatch_event:
+            filler = filler @ filler
+
+        n = handle.num_recv_tokens
+        expert_out = reference.simulate_expert_compute(recv[:n], recv_topk_idx[:n], recv_topk_weights[:n])
+        combined, combine_event = buf.combine(
+            expert_out, handle, previous_event=dispatch_event, async_finish=True, allocate_on_comm_stream=True
+        )
+        combine_event.current_stream_wait()
+
+        expected = reference.reference_combined(x, topk_weights, topk_idx)
+        err = (combined.float() - expected.float()).norm().item()
+        denom = expected.float().norm().item()
+        rel_l2 = err / denom if denom > 0 else err
+        assert rel_l2 < _BF16_REL_L2_THRESHOLD, f"rank {rank}: rel_l2_error={rel_l2} exceeds {_BF16_REL_L2_THRESHOLD}"
+        assert filler.isfinite().all(), f"rank {rank}: overlapped work was corrupted"
+    finally:
+        buf.close()
+        dist.destroy_process_group()
+
+
+@tilelang.testing.requires_cuda
+@distributed_test(nprocs=2)
+def test_event_overlap_is_returned_when_synchronous(local_rank: int, num_ranks: int):
+    """Synchronous calls still return an `EventOverlap`, wrapping `None`.
+
+    That is what lets a caller write `with event:` without knowing which mode
+    it asked for, so it is part of the contract rather than an accident.
+    """
+    rank, num_ranks, group = init_dist(local_rank, num_ranks)
+    device = f"cuda:{local_rank}"
+    torch.manual_seed(1234 + rank)
+
+    num_tokens, hidden, topk, num_experts = 64, 128, 2, 8
+    x = torch.randn(num_tokens, hidden, dtype=torch.bfloat16, device=device)
+    topk_idx, topk_weights = reference.make_topk(num_tokens, topk, num_experts, device)
+
+    buf = Buffer(
+        group=group,
+        local_rank=local_rank,
+        num_local_ranks=num_ranks,
+        num_max_tokens_per_rank=num_tokens,
+        hidden=hidden,
+        num_topk=topk,
+        num_experts=num_experts,
+        dtype=torch.bfloat16,
+        num_sms=2,
+    )
+    try:
+        recv, recv_topk_idx, recv_topk_weights, handle, event = buf.dispatch(x, topk_idx, topk_weights)
+        assert event.event is None
+        with event:  # a no-op, but it must not raise
+            pass
+        n = handle.num_recv_tokens
+        expert_out = reference.simulate_expert_compute(recv[:n], recv_topk_idx[:n], recv_topk_weights[:n])
+        _, combine_event = buf.combine(expert_out, handle)
+        assert combine_event.event is None
+        with pytest.raises(AssertionError):
+            combine_event.current_stream_wait()
     finally:
         buf.close()
         dist.destroy_process_group()

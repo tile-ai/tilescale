@@ -117,7 +117,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     )
 
     itemsize = 1 if args.fp8 else 2  # fp8 payload byte, not counting the small per-128 scale
-    recv, recv_topk_idx, recv_topk_weights, handle = buf.dispatch(dispatch_x, topk_idx, topk_weights)
+    recv, recv_topk_idx, recv_topk_weights, handle, _ = buf.dispatch(dispatch_x, topk_idx, topk_weights)
     # Outside every timed region: this is the one host read of the count.
     num_recv_tokens = handle.num_recv_tokens
     recv_topk_idx = recv_topk_idx[:num_recv_tokens]
