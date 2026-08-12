@@ -3,21 +3,21 @@
 Names and call shape mirror DeepEP EPv2's real ``ElasticBuffer``/``EPHandle``
 (see ``deep_ep/buffers/elastic.py`` in the DeepEP submodule) as closely as this
 port's scope allows. Deliberately dropped: RDMA/hybrid mode, low-latency
-decode path, Engram/PP/AGRS, FP8/scale-factor dispatch, expert-alignment and
-expand-layout (no fused grouped GEMM in scope, so there's nothing to align or
-expand for), and handle-cached "skip renotify" reuse (DeepEP's decode-replay
-optimization -- a real simplification, not attempted here yet).
+decode path, Engram/PP/AGRS, expert-alignment and expand-layout (no fused
+grouped GEMM in scope, so there's nothing to align or expand for), and
+handle-cached "skip renotify" reuse (DeepEP's decode-replay optimization --
+a real simplification, not attempted here yet).
 
 What *is* aligned with DeepEP's real design (see ``kernels/dispatch.py`` and
 ``kernels/combine.py`` for the detailed mapping): per-(token, destination-rank)
 dedup, GPU-side notify with a real cross-rank count exchange, local (not
 remote) atomic slot claiming into a fixed per-sender receive slice sized
 exactly `num_max_tokens_per_rank * num_ranks` (a hard capacity bound once
-deduped, not a statistical headroom guess), a PDL-chained compaction epilogue,
-and a combine that stores back into unique per-(rank, token) slots and reduces
-locally instead of pushing remote atomics. `dispatch_threads`/`combine_threads`
-control warps per block independently; several warps per SM, like DeepEP
-itself, is what actually uses NVLink's per-SM bandwidth.
+deduped, not a statistical headroom guess), and a combine that stores back
+into unique per-(rank, token) slots and reduces locally instead of pushing
+remote atomics. `dispatch_threads`/`combine_threads` control warps per block
+independently; several warps per SM, like DeepEP itself, is what actually
+uses NVLink's per-SM bandwidth.
 
 Dispatch writes straight into the compact output, so it needs no staging buffer
 at all (see ``kernels/dispatch.py``); ``comm_x`` is combine's, holding one slot
@@ -35,6 +35,7 @@ from tilelang.distributed.allocator import get_allocator
 
 from kernels.dispatch import dispatch_kernel
 from kernels.combine import combine_kernel
+from reference import packed_row_bytes
 
 _TL_DTYPES = {
     torch.bfloat16: T.bfloat16,
@@ -147,6 +148,12 @@ class Buffer:
         if self.is_fp8:
             assert hidden % FP8_GROUP == 0, f"hidden={hidden} is not a multiple of {FP8_GROUP}"
         self.scale_dim = hidden // FP8_GROUP if self.is_fp8 else 0
+        # The row dispatch actually moves: for FP8, payload bytes followed by
+        # the per-group fp32 scale packed right after -- so the scatter needs
+        # one remote store per token-destination pair instead of two -- padded
+        # to `put_warp`'s preferred boundary. `reference.packed_row_bytes` owns
+        # the formula and the reasoning; kernels/dispatch.py mirrors it.
+        self.row_bytes = packed_row_bytes(hidden, FP8_GROUP) if self.is_fp8 else None
         self.combine_dtype = torch.bfloat16 if self.is_fp8 else dtype
         self.tl_combine_dtype = _TL_DTYPES[self.combine_dtype]
         # Wide blocks at both ends of the SM range: at 64 SMs 1024 threads
@@ -183,8 +190,8 @@ class Buffer:
 
         itemsize = torch.empty((), dtype=dtype).element_size()
         comm_bytes = self.num_ranks * self.cap * hidden * 2  # combine is always bf16
-        scale_bytes = (hidden // FP8_GROUP) * 4 if dtype == torch.float8_e4m3fn else 0
-        compact_bytes = self.total_capacity * (hidden * itemsize + scale_bytes + 4 + 4 + num_topk * 4 + num_topk * 4)
+        row_bytes = self.row_bytes if self.is_fp8 else hidden * itemsize
+        compact_bytes = self.total_capacity * (row_bytes + 4 + 4 + num_topk * 4 + num_topk * 4)
         combined_bytes = num_max_tokens_per_rank * (hidden * 2 + 4) + self.num_ranks * self.cap * 4
         total = comm_bytes + compact_bytes + combined_bytes
         self.allocator = get_allocator(
@@ -219,20 +226,16 @@ class Buffer:
         self.num_recv = tilelang.tensor((1,), torch.int32, allocator=self.allocator)
         self.send_rank_mask = tilelang.tensor((num_max_tokens_per_rank,), torch.int32, allocator=self.allocator)
 
-        # The symmetric allocator has no FP8 dtype, so the payload is held as
-        # bytes and viewed. Nothing in the kernel cares -- `put_warp` moves
-        # 16-byte vectors either way -- and the view is what the caller sees.
-        self._recv_x_storage = tilelang.tensor(
-            (self.total_capacity, hidden), torch.uint8 if self.is_fp8 else dtype, allocator=self.allocator
+        # FP8: raw `row_bytes` per slot (payload followed by scale, packed --
+        # see `row_bytes` above), opaque to the caller until unpacked with
+        # `reference.per_token_cast_back`. BF16: `hidden` elements of `dtype`,
+        # unchanged.
+        self.recv_x = tilelang.tensor(
+            (self.total_capacity, self.row_bytes if self.is_fp8 else hidden),
+            torch.uint8 if self.is_fp8 else dtype,
+            allocator=self.allocator,
         )
-        self.recv_x = self._recv_x_storage.view(dtype) if self.is_fp8 else self._recv_x_storage
         self.recv_x_flat = self.recv_x.view(-1)
-        # Only the FP8 path has scales; on BF16 both of these are 1x1
-        # stand-ins matching the kernel's degenerate argument shapes.
-        self.recv_x_scales = tilelang.tensor(
-            (self.total_capacity, self.scale_dim) if self.is_fp8 else (1, 1), torch.float32, allocator=self.allocator
-        )
-        self._no_scales = torch.zeros((1, 1), dtype=torch.float32, device=f"cuda:{local_rank}")
         self.recv_src_rank = tilelang.tensor((self.total_capacity,), torch.int32, allocator=self.allocator)
         self.recv_src_token = tilelang.tensor((self.total_capacity,), torch.int32, allocator=self.allocator)
         self.recv_topk_idx = tilelang.tensor((self.total_capacity, num_topk), torch.int32, allocator=self.allocator)
@@ -247,7 +250,7 @@ class Buffer:
         # `combine` only ever reads slots dispatch actually wrote, but zeroing
         # once keeps a first-use read of never-written memory from producing
         # NaNs in the (unused) tail of the compact output.
-        self._recv_x_storage.zero_()
+        self.recv_x.zero_()
         self.send_rank_mask.zero_()
         # The kernel resets these at the end of every call; this is only about
         # the first call finding them defined. `barrier` is the exception --
@@ -291,6 +294,7 @@ class Buffer:
                 self.dispatch_threads,
                 self.tl_dtype,
                 self.scale_dim,
+                self.row_bytes or 0,
             )
             kernel.compile_group = self.group
             kernel.initialize(allocator=self.allocator)
@@ -318,23 +322,21 @@ class Buffer:
     def dispatch(self, x, topk_idx: torch.Tensor, topk_weights: torch.Tensor, num_sms: int = 0, async_finish: bool = False):
         """Scatter `x` to the ranks owning each token's top-k experts.
 
-        `x` is `(values, scales)` when the buffer's dtype is FP8 and a plain
-        tensor otherwise; the first return value mirrors that.
+        `x` is the packed `(values, scale)` buffer `reference.per_token_cast_to_fp8`
+        produces when the buffer's dtype is FP8 (payload bytes followed by the
+        per-group fp32 scale, so the scatter moves both in one remote store per
+        token-destination pair -- see kernels/dispatch.py), and a plain tensor
+        otherwise. The first return value mirrors that.
 
         With `async_finish`, the returned handle carries a `finish_event` and
         the caller's stream is *not* joined to the communication stream: nothing
         the call returns may be read until that event is waited on. The default
         joins the streams before returning, so the result is usable immediately.
         """
-        # FP8 arrives already quantised, as `(values, scales)` -- the same
-        # shape DeepEP's `dispatch` takes. Quantising is the caller's job
-        # because it is fused into the previous layer's epilogue in practice.
         if self.is_fp8:
-            x, x_scales = x
-            assert x_scales.shape[1] == self.scale_dim, f"expected {self.scale_dim} scales per token, got {x_scales.shape[1]}"
-            x_scales = x_scales.float().contiguous()
-        else:
-            x_scales = self._no_scales
+            assert x.dtype == torch.uint8 and x.shape[1] == self.row_bytes, (
+                f"expected a packed (*, {self.row_bytes}) uint8 buffer from reference.per_token_cast_to_fp8, got {tuple(x.shape)} {x.dtype}"
+            )
         num_tokens = x.shape[0]
         num_sms = self.num_sms if num_sms == 0 else num_sms
         compute_stream = torch.cuda.current_stream()
@@ -356,7 +358,6 @@ class Buffer:
             # is needed here. See kernels/dispatch.py.
             kernel(
                 x,
-                x_scales,
                 topk_idx_i32,
                 topk_weights_f32,
                 self.notify_done,
@@ -370,7 +371,6 @@ class Buffer:
                 self.send_rank_mask[:num_tokens],
                 self.barrier,
                 self.recv_x_flat,
-                self.recv_x_scales.view(-1),
                 self.recv_src_rank,
                 self.recv_src_token,
                 self.recv_topk_idx.view(-1),
@@ -412,8 +412,8 @@ class Buffer:
             num_tokens,
             finish_event if async_finish else None,
         )
-        recv = (self.recv_x, self.recv_x_scales) if self.is_fp8 else self.recv_x
-        return (recv, self.recv_topk_idx, self.recv_topk_weights, handle)
+        # FP8: the packed uint8 buffer, unpacked with `reference.per_token_cast_back`.
+        return (self.recv_x, self.recv_topk_idx, self.recv_topk_weights, handle)
 
     def combine(self, x: torch.Tensor, handle: EPHandle, num_sms: int = 0):
         # Read the caller's contribution (see kernels/combine.py) in place --

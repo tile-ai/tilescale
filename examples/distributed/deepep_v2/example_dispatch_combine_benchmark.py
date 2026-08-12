@@ -96,6 +96,12 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     x = torch.randn(args.tokens, args.hidden, dtype=torch.bfloat16, device=device)
     topk_idx, topk_weights = reference.make_topk(args.tokens, args.topk, args.experts, device, args.masked_ratio)
 
+    dtype = torch.float8_e4m3fn if args.fp8 else torch.bfloat16
+    # Quantising is the caller's job (see buffer.py's `dispatch` docstring);
+    # only the dispatch call itself sees fp8, everything downstream of the
+    # cast-back (expert compute, combine) stays bf16.
+    dispatch_x = reference.per_token_cast_to_fp8(x) if args.fp8 else x
+
     buf = Buffer(
         group=group,
         local_rank=local_rank,
@@ -104,23 +110,25 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         hidden=args.hidden,
         num_topk=args.topk,
         num_experts=args.experts,
-        dtype=torch.bfloat16,
+        dtype=dtype,
         num_sms=args.num_sms,
         dispatch_threads=args.dispatch_threads,
         combine_threads=args.combine_threads,
     )
 
-    itemsize = 2  # bf16
-    recv_x, recv_topk_idx, recv_topk_weights, handle = buf.dispatch(x, topk_idx, topk_weights)
+    itemsize = 1 if args.fp8 else 2  # fp8 payload byte, not counting the small per-128 scale
+    recv, recv_topk_idx, recv_topk_weights, handle = buf.dispatch(dispatch_x, topk_idx, topk_weights)
     # Outside every timed region: this is the one host read of the count.
     num_recv_tokens = handle.num_recv_tokens
-    recv_x = recv_x[:num_recv_tokens]
     recv_topk_idx = recv_topk_idx[:num_recv_tokens]
     recv_topk_weights = recv_topk_weights[:num_recv_tokens]
+    recv_x = reference.per_token_cast_back(recv[:num_recv_tokens], args.hidden) if args.fp8 else recv[:num_recv_tokens]
     dispatch_bytes = num_recv_tokens * args.hidden * itemsize
+    # Combine always moves bf16 (see buffer.py) regardless of dispatch's dtype.
+    combine_bytes = num_recv_tokens * args.hidden * 2
 
     def run_dispatch():
-        buf.dispatch(x, topk_idx, topk_weights)
+        buf.dispatch(dispatch_x, topk_idx, topk_weights)
 
     _warm_clocks(args.clock_warmup_sec, device)
     dist.barrier(group)
@@ -142,7 +150,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         combine_ms = do_bench(run_combine, warmup=args.warmup, rep=args.rep, group=group)
     if rank == 0:
         print(
-            f"combine: {combine_ms * 1000:.1f} us, {dispatch_bytes / (combine_ms * 1e-3) / 1e9:.1f} GB/s (send-side, this rank)  [{probe.summary()}]"
+            f"combine: {combine_ms * 1000:.1f} us, {combine_bytes / (combine_ms * 1e-3) / 1e9:.1f} GB/s (send-side, this rank)  [{probe.summary()}]"
         )
 
     buf.close()
@@ -154,6 +162,8 @@ if __name__ == "__main__":
     parser.add_argument("--num-processes", type=int, default=8)
     # Fraction of top-k selections marked unselected (-1), DeepEP's marker.
     parser.add_argument("--masked-ratio", type=float, default=0.0)
+    # Dispatch payload dtype; combine is always bf16 (see buffer.py).
+    parser.add_argument("--fp8", action="store_true")
     parser.add_argument("--tokens", type=int, default=8192)
     parser.add_argument("--hidden", type=int, default=7168)
     parser.add_argument("--topk", type=int, default=8)

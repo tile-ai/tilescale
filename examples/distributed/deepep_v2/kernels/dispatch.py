@@ -2,7 +2,8 @@
 
 Follows DeepEP EPv2's ``impls/dispatch.cuh``, intranode/NVLink only: no RDMA,
 no expert alignment, no expand layout. Payload may be bf16 or fp8 (per-token,
-per-128-element scales, DeepEP's ``per_token_cast_to_fp8`` layout).
+per-128-element scales, DeepEP's ``per_token_cast_to_fp8`` layout, packed
+right after the payload -- see below).
 
 Three phases in one kernel, no host round trip between them:
 
@@ -36,6 +37,28 @@ against 563.5 GB/s at 512 threads, 518.9 against 520.4 at 256 -- inside the
 noise). ``cp.async.bulk`` has no global-to-global form, so a TMA store must
 stage through shared memory, trading that round trip for the issue slots
 ``put_warp`` spends.
+
+**Why FP8's scale is packed into the same row as the payload, not a second
+buffer.** It used to be a second ``put_warp`` per token-destination pair.
+Measured: 566.9us with it, 493.1us without -- the payload copy alone already
+scales cleanly with bytes (493.1us is almost exactly half of bf16's ~895us,
+matching fp8's half-size payload), and a *large* transfer split into two
+``put_warp`` calls costs nothing extra (901.8us against a 894.8us single-call
+baseline, same total bytes). So the ~74us is not "a second call" in general --
+it is a second call for something this small. Whatever fixed cost a remote
+store pays regardless of size (peer-address translation, warp-level setup, an
+NVLink round trip) is noise against a 7168-byte payload and dominates a
+224-byte scale. Packing scale bytes right after the payload -- what
+``reference.per_token_cast_to_fp8`` produces -- turns two stores into one and
+costs nothing extra upstream: quantisation already has to write its output
+somewhere.
+
+Fused, the real number is ~522us against the two-store 547-580us -- a win,
+but not the full ~74us the isolated single-call-vs-two-call comparison above
+suggested, because the fused call also moves the 224 scale bytes the no-scale
+test did not (7392 against 7168) and then the row padding on top of that.
+How wide to pad is its own measured tradeoff, and `reference.packed_row_bytes`
+owns it; `row_bytes` arrives here already decided.
 """
 
 import tilelang
@@ -66,6 +89,7 @@ def dispatch_kernel(
     threads: int = 256,
     dtype=T.bfloat16,
     scale_dim: int = 0,
+    row_bytes: int = 0,
 ):
     assert threads % 32 == 0
     assert num_experts % num_ranks == 0
@@ -76,17 +100,30 @@ def dispatch_kernel(
     cap = num_max_tokens_per_rank
     total_capacity = cap * num_ranks
 
-    # `scale_dim` is a Python int, so the `if scale_dim:` guards are resolved
-    # while tracing: on bf16 the scale moves are absent, not predicated, and
-    # these shapes degenerate so the caller passes a 1x1 stand-in.
-    sdim = max(scale_dim, 1)
-    n_scale_rows = num_tokens if scale_dim else 1
-    n_recv_scales = total_capacity * scale_dim if scale_dim else 1
+    # `scale_dim` is a Python int, so this branch is resolved while tracing.
+    # FP8's `x`/`recv_x` is the *packed* row `reference.per_token_cast_to_fp8`
+    # produces: `hidden` payload bytes followed by the per-group fp32 scale,
+    # then padding, moved as one opaque `uint8` region so the scatter needs
+    # one `put_warp` per token-destination pair instead of two -- see the
+    # module docstring. `row_bytes` is `reference.packed_row_bytes`'s result,
+    # passed in by `buffer.py` rather than recomputed here: which padding is
+    # fastest is a measured, size-dependent call and wants one owner (see
+    # that function's docstring for the numbers).
+    # bf16 (`scale_dim == 0`) is untouched: `row_width`/`row_dtype` degenerate
+    # to exactly what they were before this existed.
+    if scale_dim:
+        assert row_bytes >= hidden * (dtype.bits // 8) + scale_dim * 4, (
+            f"row_bytes={row_bytes} cannot hold {hidden} payload + {scale_dim} scales"
+        )
+        row_width = row_bytes
+        row_dtype = T.uint8
+    else:
+        row_width = hidden
+        row_dtype = dtype
 
     @T.prim_func
     def main(
-        x: T.Tensor((num_tokens, hidden), dtype),
-        x_scales: T.Tensor((n_scale_rows, sdim), T.float32),
+        x: T.Tensor((num_tokens, row_width), row_dtype),
         topk_idx: T.Tensor((num_tokens, topk), T.int32),
         topk_weights: T.Tensor((num_tokens, topk), T.float32),
         # `notify_done` counts arriving blocks in phase 1; `exchange_done`
@@ -110,8 +147,7 @@ def dispatch_kernel(
         # on a buffer with a large row stride trips "Can't fetch the lanes of a
         # scalable vector" in `StorageRewrite`; `st` only accepts single-index
         # buffer loads at all.
-        recv_x: T.Tensor((total_capacity * hidden,), dtype),
-        recv_x_scales: T.Tensor((n_recv_scales,), T.float32),
+        recv_x: T.Tensor((total_capacity * row_width,), row_dtype),
         recv_src_rank: T.Tensor((total_capacity,), T.int32),
         recv_src_token: T.Tensor((total_capacity,), T.int32),
         recv_topk_idx: T.Tensor((total_capacity * topk,), T.int32),
@@ -126,7 +162,6 @@ def dispatch_kernel(
             lane = tid % 32
             local_warp = tid // 32
             warp = bx * warps_per_cta + local_warp
-            # Through a local scalar rather than inline: an inline
             # Through a variable, not `T.get_rank()` inline: inline leaves the
             # index range unknown, so bounds checking wraps every
             # `buf[my_rank ...]` in an `if_then_else` that `address_of` rejects.
@@ -269,17 +304,10 @@ def dispatch_kernel(
                         idx_k = T.alloc_var(T.int32, init=send_base[dst_k] + slot_k)
                         T.put_warp(
                             src=T.address_of(x[token, 0]),
-                            dst=T.address_of(recv_x[idx_k * hidden]),
-                            size=hidden,
+                            dst=T.address_of(recv_x[idx_k * row_width]),
+                            size=row_width,
                             dst_pe=dst_k,
                         )
-                        if scale_dim:
-                            T.put_warp(
-                                src=T.address_of(x_scales[token, 0]),
-                                dst=T.address_of(recv_x_scales[idx_k * scale_dim]),
-                                size=scale_dim,
-                                dst_pe=dst_k,
-                            )
                         if lane == 0:
                             T.st(recv_src_rank[idx_k], my_rank, scope="sys", sem="relaxed", dst_pe=dst_k)
                             T.st(recv_src_token[idx_k], token, scope="sys", sem="relaxed", dst_pe=dst_k)

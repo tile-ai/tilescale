@@ -100,13 +100,26 @@ that measured at least as fast at every SM count tried.
 ## Performance
 
 8× B200, full NVLink mesh, 8192 tokens/rank, hidden 7168, top-8, 256 experts,
-64 SMs. Bandwidth is the bottleneck rank's, over bytes that cross NVLink.
+64 SMs. Bandwidth is the bottleneck rank's, over payload bytes that cross
+NVLink. Four samples per row, every one taken in a verified-idle window --
+node14 is shared, and another user's job landing mid-run costs 1.5–2× without
+showing up anywhere in the output.
 
 | | dispatch | combine |
 |---|---|---|
-| bf16, whole call | **680–685 GB/s** | **631–637 GB/s** |
+| bf16, whole call | **686–688 GB/s** (896–899 µs) | **623–625 GB/s** (985–989 µs) |
 | bf16, kernel only | 694 GB/s | — |
-| fp8, whole call | **618–625 GB/s** | 629–633 GB/s |
+| fp8, whole call | **589–591 GB/s** (522–524 µs) | 624–625 GB/s (986–987 µs) |
+
+Combine is bf16 whichever dtype dispatch used, and measures the same either
+way, as it should.
+
+FP8's rate is below bf16's partly as an accounting artifact: it counts the
+7168 payload bytes a row carries, but the row that crosses NVLink is 7680 --
+the per-128 fp32 scales packed in alongside, plus alignment padding (see
+`reference.packed_row_bytes`). On the wire that is ~632 GB/s. The rest of the
+gap is the kernel's fixed phases -- notify, dedup, count exchange, metadata
+stores -- costing the same in absolute terms against a payload half the size.
 
 Where the time goes in a bf16 dispatch (887µs kernel, 897µs call):
 
@@ -124,10 +137,10 @@ Fewer SMs, same shape:
 
 | #SMs | dispatch | combine |
 |---|---|---|
-| 64 | 681–692 GB/s | 635–642 GB/s |
-| 24 | 589–599 GB/s | 557–562 GB/s |
+| 64 | 686–688 GB/s | 623–625 GB/s |
+| 24 | 598 GB/s | 545–546 GB/s |
 
-That is −13% / −12% against DeepEP's −11% / −9% over the same range. At 24 SMs
+That is −13% / −13% against DeepEP's −11% / −9% over the same range. At 24 SMs
 each block already carries 16 warps, past the point where `put_warp` saturates,
 so widening blocks does not help (1024 threads against 512 is ~1% at either
 end): what runs out is SM count itself.
@@ -145,7 +158,7 @@ dispatch epilogue at all, so the honest comparison is the sum.
 |---|---|---|
 | main kernel | 442 µs (735 GB/s) | — |
 | epilogue | 110–129 µs | none |
-| **end to end** | **~562 µs** | **517 µs** |
+| **end to end** | **~562 µs** | **522–524 µs** |
 
 **combine** (bf16 both sides):
 
@@ -153,16 +166,20 @@ dispatch epilogue at all, so the honest comparison is the sum.
 |---|---|---|
 | store-back | 839 µs (745 GB/s) | 850 µs (723 GB/s) |
 | reduce | 155 µs | 125 µs |
-| **end to end** | **994 µs** | **968–977 µs** |
+| **end to end** | **994 µs** | **985–989 µs** |
+
+This port's two component rows come from a separate profiling pass and do not
+re-add to its end-to-end row exactly; the end-to-end figure is the measured
+whole call and is the one to trust.
 
 **A whole layer's collectives** -- what a plain dispatch → expert → combine
 loop actually pays, since neither epilogue has anything to hide behind there:
 
 | | DeepEP | this port |
 |---|---|---|
-| dispatch | 442 + 129 µs | 510–518 µs |
-| combine | 839 + 156 µs | 965–974 µs |
-| **total** | **~1566 µs** | **1475–1492 µs** |
+| dispatch | 442 + 129 µs | 522–524 µs |
+| combine | 839 + 156 µs | 985–989 µs |
+| **total** | **~1566 µs** | **1507–1513 µs** |
 
 DeepEP is ahead on the cross-rank movement itself -- 745 against 723 GB/s on
 combine's store-back, which is this port's roofline for `put_warp`. It gives
