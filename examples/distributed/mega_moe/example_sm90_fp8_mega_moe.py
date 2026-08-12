@@ -882,7 +882,9 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                                 T.mbarrier_arrive(stage_barriers[pipeline_stages + consumer_stage])
                             consumer_step += num_k_blocks
                             T.copy(accum, out_shared)
-                            for row in T.serial(block_m):
+                            scatter_warp = (tx - 128) // 32
+                            for row_in_warp in T.serial(block_m // 8):
+                                row = scatter_warp * (block_m // 8) + row_in_warp
                                 pool_row = consumer_m * block_m + row
                                 if pool_row < recv_counts[consumer_expert]:
                                     dst_rank = src_ranks[consumer_expert, pool_row]
@@ -896,15 +898,18 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                                         and dst_topk >= 0
                                         and dst_topk < num_topk
                                     ):
-                                        T.copy(
-                                            out_shared[row, :],
-                                            combine[
-                                                dst_token,
-                                                dst_topk,
-                                                consumer_n * block_n : (consumer_n + 1) * block_n,
-                                            ],
+                                        T.put_warp(
+                                            T.address_of(out_shared[row, 0]),
+                                            T.address_of(
+                                                combine[
+                                                    dst_token,
+                                                    dst_topk,
+                                                    consumer_n * block_n,
+                                                ]
+                                            ),
+                                            block_n,
                                             dst_pe=dst_rank,
-                                            disable_tma=True,
+                                            unroll_factor=1,
                                         )
 
             T.fence_sys()
