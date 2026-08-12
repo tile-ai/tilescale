@@ -1,9 +1,8 @@
 """Multi-GPU FP8 Mega MoE for SM90 using TileScale distributed primitives.
 
-The Flash configuration uses two persistent kernels: one for routing, dispatch,
-L1 GEMM, and SwiGLU quantization, and one for L2 GEMM, scatter, and reduction.
-The Pro configuration retains the multi-kernel path until its four-warpgroup L1
-kernel is ready.
+The fused implementation uses two persistent kernels: one for routing,
+dispatch, L1 GEMM, and SwiGLU quantization, and one for L2 GEMM, scatter, and
+reduction. Both model configurations use manually selected warp counts.
 """
 
 from __future__ import annotations
@@ -302,6 +301,13 @@ def fused_l1_swiglu_manual_warp_kernel(
     num_n_blocks = ceil_div(l1_n, block_n)
     num_compute_tiles = num_experts_per_rank * num_m_blocks * num_n_blocks
     num_k_blocks = hidden // block_k
+    num_math_threads = threads - 128
+    num_output_scale_groups = block_n // (2 * SCALE_GRANULARITY)
+    num_l1_scale_groups = l1_n // (2 * SCALE_GRANULARITY)
+    tma_block_n = min(block_n, 256)
+    num_tma_n_blocks = block_n // tma_block_n
+    frontend_registers = 32 if num_math_threads == 512 else 48
+    math_registers = 112 if num_math_threads == 512 else 208
     dispatch_thread = 0
     route_threads = 256
 
@@ -348,7 +354,9 @@ def fused_l1_swiglu_manual_warp_kernel(
                 T.float8_e4m3fn,
             )
             out_shared = T.alloc_shared((block_m, block_n // 2), T.float8_e4m3fn)
-            stage_barriers = T.alloc_barrier([64] * pipeline_stages + [256] * pipeline_stages)
+            stage_barriers = T.alloc_barrier(
+                [64] * pipeline_stages + [num_math_threads] * pipeline_stages
+            )
 
             if bid == 0:
                 if tx < route_threads:
@@ -416,9 +424,9 @@ def fused_l1_swiglu_manual_warp_kernel(
             T.sync_grid()
 
             if tx < 128:
-                T.dec_max_nreg(48)
+                T.dec_max_nreg(frontend_registers)
             else:
-                T.inc_max_nreg(208)
+                T.inc_max_nreg(math_registers)
 
             dispatch_warp = tx // 32
             dispatch_lane = tx % 32
@@ -532,15 +540,23 @@ def fused_l1_swiglu_manual_warp_kernel(
                                     a_shared[producer_stage, :, :],
                                     barrier=stage_barriers[producer_stage],
                                 )
-                                T.tma_copy(
-                                    l1_weight[
-                                        producer_expert,
-                                        producer_n * block_n : (producer_n + 1) * block_n,
-                                        producer_k * block_k : (producer_k + 1) * block_k,
-                                    ],
-                                    b_shared[producer_stage, :, :],
-                                    barrier=stage_barriers[producer_stage],
-                                )
+                                for producer_n_block in T.serial(num_tma_n_blocks):
+                                    T.tma_copy(
+                                        l1_weight[
+                                            producer_expert,
+                                            producer_n * block_n
+                                            + producer_n_block * tma_block_n : producer_n * block_n
+                                            + (producer_n_block + 1) * tma_block_n,
+                                            producer_k * block_k : (producer_k + 1) * block_k,
+                                        ],
+                                        b_shared[
+                                            producer_stage,
+                                            producer_n_block
+                                            * tma_block_n : (producer_n_block + 1) * tma_block_n,
+                                            :,
+                                        ],
+                                        barrier=stage_barriers[producer_stage],
+                                    )
                                 T.mbarrier_arrive(stage_barriers[producer_stage])
                             producer_step += num_k_blocks
 
@@ -548,12 +564,16 @@ def fused_l1_swiglu_manual_warp_kernel(
                 partial = T.alloc_fragment((block_m, block_n), T.float32)
                 accum = T.alloc_fragment((block_m, block_n), T.bfloat16)
                 gate = T.alloc_fragment((block_m, block_n // 2), T.float32)
+                gate_grouped = T.reshape(
+                    gate,
+                    (block_m, num_output_scale_groups, SCALE_GRANULARITY),
+                )
                 up = T.alloc_fragment((block_m, block_n // 2), T.float32)
-                amax = T.alloc_fragment((block_m,), T.float32)
-                scale = T.alloc_fragment((block_m,), T.float32)
+                amax = T.alloc_fragment((block_m, num_output_scale_groups), T.float32)
+                scale = T.alloc_fragment((block_m, num_output_scale_groups), T.float32)
                 quant_fp8 = T.alloc_fragment((block_m, block_n // 2), T.float8_e4m3fn)
                 act_scale = T.alloc_fragment((block_m,), T.float32)
-                weight_scale = T.alloc_local((2,), T.float32)
+                weight_scale = T.alloc_local((2 * num_output_scale_groups,), T.float32)
                 consumer_step = T.alloc_var(T.int32, init=0)
 
                 for consumer_wave in T.serial(ceil_div(num_compute_tiles, num_sms)):
@@ -584,17 +604,28 @@ def fused_l1_swiglu_manual_warp_kernel(
                                         consumer_m * block_m + i,
                                         consumer_k,
                                     ]
-                                weight_scale[0] = l1_weight_sf[consumer_expert, consumer_n, consumer_k]
-                                weight_scale[1] = l1_weight_sf[
-                                    consumer_expert,
-                                    consumer_n + num_n_blocks,
-                                    consumer_k,
-                                ]
+                                for scale_group in T.serial(num_output_scale_groups):
+                                    weight_scale[2 * scale_group] = l1_weight_sf[
+                                        consumer_expert,
+                                        consumer_n * num_output_scale_groups + scale_group,
+                                        consumer_k,
+                                    ]
+                                    weight_scale[2 * scale_group + 1] = l1_weight_sf[
+                                        consumer_expert,
+                                        num_l1_scale_groups
+                                        + consumer_n * num_output_scale_groups
+                                        + scale_group,
+                                        consumer_k,
+                                    ]
                                 for i, j in T.Parallel(block_m, block_n):
                                     accum[i, j] = (
                                         T.cast(partial[i, j], T.bfloat16)
                                         * T.cast(
-                                            act_scale[i] * weight_scale[(j % 16) // 8],
+                                            act_scale[i]
+                                            * weight_scale[
+                                                2 * (j // (2 * SCALE_GRANULARITY))
+                                                + (j % 16) // 8
+                                            ],
                                             T.bfloat16,
                                         )
                                         + accum[i, j]
@@ -619,17 +650,20 @@ def fused_l1_swiglu_manual_warp_kernel(
                                         consumer_m * block_m + i,
                                     ]
                                 )
-                            T.reduce_absmax(gate, amax, dim=1)
-                            for i in T.Parallel(block_m):
-                                scale[i] = T.max(amax[i], 1e-4) / FP8_MAX
+                            T.reduce_absmax(gate_grouped, amax, dim=2)
+                            for i, scale_group in T.Parallel(
+                                block_m,
+                                num_output_scale_groups,
+                            ):
+                                scale[i, scale_group] = T.max(amax[i, scale_group], 1e-4) / FP8_MAX
                                 l2_x_sf[
                                     consumer_expert,
                                     consumer_m * block_m + i,
-                                    consumer_n,
-                                ] = scale[i]
+                                    consumer_n * num_output_scale_groups + scale_group,
+                                ] = scale[i, scale_group]
                             for i, j in T.Parallel(block_m, block_n // 2):
                                 gate[i, j] = T.clamp(
-                                    gate[i, j] / scale[i],
+                                    gate[i, j] / scale[i, j // SCALE_GRANULARITY],
                                     -FP8_MAX,
                                     FP8_MAX,
                                 )
@@ -1160,7 +1194,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     num_topk = model["num_topk"]
     num_tokens = args.num_tokens
     activation_clamp = args.activation_clamp
-    use_fused = args.model_config != "pro"
+    use_fused = args.implementation == "fused"
 
     assert num_experts % num_local_ranks == 0
     assert hidden % 256 == 0 and intermediate_hidden % 128 == 0
@@ -1189,6 +1223,11 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     )
 
     if use_fused:
+        l1_config = (
+            {"block_n": 256, "threads": 384, "pipeline_stages": 4}
+            if args.model_config == "pro"
+            else {}
+        )
         kernel_specs = [
             fused_l1_swiglu_manual_warp_kernel(
                 num_tokens,
@@ -1200,6 +1239,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                 capacity,
                 num_sms,
                 activation_clamp=activation_clamp,
+                **l1_config,
             ),
             fused_l2_scatter_reduce_manual_warp_kernel(
                 num_tokens,
@@ -1470,6 +1510,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--num-processes", type=int, default=8)
     parser.add_argument("--model-config", choices=tuple(MODEL_CONFIGS), default="smoke")
+    parser.add_argument("--implementation", choices=("fused", "multi-kernel"), default="fused")
     parser.add_argument("--num-tokens", type=int, default=64)
     parser.add_argument("--capacity", type=int, default=None)
     parser.add_argument("--activation-clamp", type=float, default=10.0)
