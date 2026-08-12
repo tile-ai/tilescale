@@ -1,14 +1,14 @@
 """Multi-GPU FP8 Mega MoE for SM90 using TileScale distributed primitives.
 
-This implementation uses symmetric VMM buffers for expert dispatch and combine.
-The two FP8 GEMMs use per-token/per-128 activation scales and per-(128, 128)
-weight scales. Device-side system barriers order the communication phases.
+The Flash configuration uses two persistent kernels: one for routing, dispatch,
+L1 GEMM, and SwiGLU quantization, and one for L2 GEMM, scatter, and reduction.
+The Pro configuration retains the multi-kernel path until its four-warpgroup L1
+kernel is ready.
 """
 
 from __future__ import annotations
 
 import argparse
-import math
 import os
 from typing import Tuple
 
@@ -65,6 +65,14 @@ def block_cast_to_fp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     scale = amax / FP8_MAX
     x_fp8 = (x_view / scale.unsqueeze(-1).unsqueeze(-3)).to(torch.float8_e4m3fn)
     return x_fp8.view(groups, n, k).contiguous(), scale.contiguous()
+
+
+def interleave_gate_up_weights(weight: torch.Tensor, granularity: int = 8) -> torch.Tensor:
+    groups, n, k = weight.shape
+    half = n // 2
+    gate = weight[:, :half].view(groups, half // granularity, granularity, k)
+    up = weight[:, half:].view(groups, half // granularity, granularity, k)
+    return torch.stack((gate, up), dim=2).reshape(groups, n, k).contiguous()
 
 
 def dequantize_per_token(x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
@@ -229,7 +237,10 @@ def dispatch_tokens_kernel(
         topk_weights: T.Tensor((num_tokens, num_topk), T.float32),
         route_slots: T.Tensor((num_tokens, num_topk), T.int32),
         recv_x: T.Tensor((num_experts_per_rank, capacity, hidden), T.float8_e4m3fn),
-        recv_x_sf: T.Tensor((num_experts_per_rank, capacity, num_scale_groups), T.float32),
+        recv_x_sf: T.Tensor(
+            (num_experts_per_rank, capacity, num_scale_groups),
+            T.float32,
+        ),
         recv_weights: T.Tensor((num_experts_per_rank, capacity), T.float32),
         src_ranks: T.Tensor((num_experts_per_rank, capacity), T.int32),
         src_tokens: T.Tensor((num_experts_per_rank, capacity), T.int32),
@@ -264,6 +275,344 @@ def dispatch_tokens_kernel(
                         T.st(src_ranks[local_expert, slot], src_rank[0], dst_pe=dst_rank)
                         T.st(src_tokens[local_expert, slot], token_idx, dst_pe=dst_rank)
                         T.st(src_topk[local_expert, slot], topk_slot, dst_pe=dst_rank)
+
+    return main
+
+
+def fused_l1_swiglu_manual_warp_kernel(
+    num_tokens: int,
+    hidden: int,
+    l1_n: int,
+    num_experts: int,
+    num_topk: int,
+    num_ranks: int,
+    capacity: int,
+    num_sms: int,
+    activation_clamp: float = 10.0,
+    block_h: int = 256,
+    block_m: int = 64,
+    block_n: int = 256,
+    block_k: int = 128,
+    threads: int = 384,
+    pipeline_stages: int = 3,
+):
+    num_experts_per_rank = num_experts // num_ranks
+    num_scale_groups = hidden // SCALE_GRANULARITY
+    num_routes = num_tokens * num_topk
+    num_hidden_blocks = ceil_div(hidden, block_h)
+    num_m_blocks = ceil_div(capacity, block_m)
+    num_n_blocks = ceil_div(l1_n, block_n)
+    num_compute_tiles = num_experts_per_rank * num_m_blocks * num_n_blocks
+    num_k_blocks = hidden // block_k
+    dispatch_thread = 0
+
+    @T.prim_func
+    def main(
+        x: T.Tensor((num_tokens, hidden), T.float8_e4m3fn),
+        x_sf: T.Tensor((num_tokens, num_scale_groups), T.float32),
+        topk_idx: T.Tensor((num_tokens, num_topk), T.int32),
+        topk_weights: T.Tensor((num_tokens, num_topk), T.float32),
+        route_counts: T.Tensor((num_ranks, num_experts), T.int32),
+        recv_counts: T.Tensor((num_experts_per_rank,), T.int32),
+        route_slots: T.Tensor((num_tokens, num_topk), T.int32),
+        recv_x: T.Tensor((num_experts_per_rank, capacity, hidden), T.float8_e4m3fn),
+        recv_x_sf: T.Tensor((num_experts_per_rank, capacity, num_scale_groups), T.float32),
+        recv_weights: T.Tensor((num_experts_per_rank, capacity), T.float32),
+        src_ranks: T.Tensor((num_experts_per_rank, capacity), T.int32),
+        src_tokens: T.Tensor((num_experts_per_rank, capacity), T.int32),
+        src_topk: T.Tensor((num_experts_per_rank, capacity), T.int32),
+        l1_weight: T.Tensor((num_experts_per_rank, l1_n, hidden), T.float8_e4m3fn),
+        l1_weight_sf: T.Tensor(
+            (num_experts_per_rank, l1_n // SCALE_GRANULARITY, hidden // SCALE_GRANULARITY),
+            T.float32,
+        ),
+        l2_x: T.Tensor((num_experts_per_rank, capacity, l1_n // 2), T.float8_e4m3fn),
+        l2_x_sf: T.Tensor(
+            (num_experts_per_rank, capacity, l1_n // (2 * SCALE_GRANULARITY)),
+            T.float32,
+        ),
+        barrier: T.Tensor((num_ranks,), T.int32),
+    ):
+        with T.Kernel(num_sms, threads=threads) as bid:
+            tx = T.get_thread_binding()
+            src_rank = T.alloc_local((1,), T.int32)
+            src_rank[0] = T.get_rank()
+
+            a_shared = T.alloc_shared(
+                (pipeline_stages, block_m, block_k),
+                T.float8_e4m3fn,
+            )
+            b_shared = T.alloc_shared(
+                (pipeline_stages, block_n, block_k),
+                T.float8_e4m3fn,
+            )
+            out_shared = T.alloc_shared((block_m, block_n // 2), T.float8_e4m3fn)
+            stage_barriers = T.alloc_barrier([64] * pipeline_stages + [256] * pipeline_stages)
+
+            if bid == 0:
+                if tx < 64:
+                    for reset_wave in T.serial(ceil_div(num_experts, 64)):
+                        reset_expert = tx + reset_wave * 64
+                        if reset_expert < num_experts:
+                            route_counts[src_rank[0], reset_expert] = 0
+                    T.sync_threads(7, 64)
+
+                    for assign_wave in T.serial(ceil_div(num_routes, 64)):
+                        assign_route = tx + assign_wave * 64
+                        if assign_route < num_routes:
+                            assign_token = assign_route // num_topk
+                            assign_topk = assign_route % num_topk
+                            assign_expert = topk_idx[assign_token, assign_topk]
+                            if assign_expert >= 0 and assign_expert < num_experts:
+                                route_slots[assign_token, assign_topk] = T.atomic_add(
+                                    route_counts[src_rank[0], assign_expert],
+                                    1,
+                                    memory_order="relaxed",
+                                    return_prev=True,
+                                )
+                            else:
+                                route_slots[assign_token, assign_topk] = -1
+                    T.sync_threads(7, 64)
+
+                    for publish_wave in T.serial(ceil_div(num_experts * num_ranks, 64)):
+                        publish_idx = tx + publish_wave * 64
+                        if publish_idx < num_experts * num_ranks:
+                            publish_rank = publish_idx // num_experts
+                            publish_expert = publish_idx % num_experts
+                            if publish_rank != src_rank[0]:
+                                T.st(
+                                    route_counts[src_rank[0], publish_expert],
+                                    route_counts[src_rank[0], publish_expert],
+                                    dst_pe=publish_rank,
+                                )
+
+                T.barrier_blocks(barrier[0])
+
+                if tx < 64:
+                    if tx < num_experts_per_rank:
+                        recv_count = T.alloc_var(T.int32, init=0)
+                        recv_expert = src_rank[0] * num_experts_per_rank + tx
+                        for count_rank in T.serial(num_ranks):
+                            recv_count += route_counts[count_rank, recv_expert]
+                        recv_counts[tx] = recv_count
+
+                    for prefix_wave in T.serial(ceil_div(num_routes, 64)):
+                        prefix_route = tx + prefix_wave * 64
+                        if prefix_route < num_routes:
+                            prefix_token = prefix_route // num_topk
+                            prefix_topk = prefix_route % num_topk
+                            prefix_expert = topk_idx[prefix_token, prefix_topk]
+                            prefix_slot = T.alloc_var(
+                                T.int32,
+                                init=route_slots[prefix_token, prefix_topk],
+                            )
+                            if prefix_token < num_tokens and prefix_expert >= 0 and prefix_expert < num_experts and prefix_slot >= 0:
+                                for prefix_rank in T.serial(num_ranks):
+                                    if prefix_rank < src_rank[0]:
+                                        prefix_slot += route_counts[prefix_rank, prefix_expert]
+                                route_slots[prefix_token, prefix_topk] = prefix_slot
+
+            T.sync_grid()
+
+            if tx < 128:
+                T.dec_max_nreg(48)
+            else:
+                T.inc_max_nreg(208)
+
+            if tx < 64:
+                for dispatch_wave in T.serial(ceil_div(num_routes, num_sms)):
+                    dispatch_route = bid + dispatch_wave * num_sms
+                    if dispatch_route < num_routes:
+                        dispatch_token = dispatch_route // num_topk
+                        dispatch_topk = dispatch_route % num_topk
+                        dispatch_expert = topk_idx[dispatch_token, dispatch_topk]
+                        dispatch_slot = route_slots[dispatch_token, dispatch_topk]
+                        if dispatch_expert >= 0 and dispatch_slot >= 0 and dispatch_slot < capacity and num_scale_groups > 0 and hidden > 0:
+                            dispatch_rank = dispatch_expert // num_experts_per_rank
+                            dispatch_local_expert = dispatch_expert % num_experts_per_rank
+                            for dispatch_h in T.serial(num_hidden_blocks):
+                                T.copy(
+                                    x[
+                                        dispatch_token,
+                                        dispatch_h * block_h : (dispatch_h + 1) * block_h,
+                                    ],
+                                    recv_x[
+                                        dispatch_local_expert,
+                                        dispatch_slot,
+                                        dispatch_h * block_h : (dispatch_h + 1) * block_h,
+                                    ],
+                                    dst_pe=dispatch_rank,
+                                    disable_tma=True,
+                                )
+                            T.copy(
+                                x_sf[dispatch_token, :],
+                                recv_x_sf[dispatch_local_expert, dispatch_slot, :],
+                                dst_pe=dispatch_rank,
+                                disable_tma=True,
+                            )
+                            if tx == dispatch_thread:
+                                T.st(
+                                    recv_weights[dispatch_local_expert, dispatch_slot],
+                                    topk_weights[dispatch_token, dispatch_topk],
+                                    dst_pe=dispatch_rank,
+                                )
+                                T.st(
+                                    src_ranks[dispatch_local_expert, dispatch_slot],
+                                    src_rank[0],
+                                    dst_pe=dispatch_rank,
+                                )
+                                T.st(
+                                    src_tokens[dispatch_local_expert, dispatch_slot],
+                                    dispatch_token,
+                                    dst_pe=dispatch_rank,
+                                )
+                                T.st(
+                                    src_topk[dispatch_local_expert, dispatch_slot],
+                                    dispatch_topk,
+                                    dst_pe=dispatch_rank,
+                                )
+                T.fence_sys()
+            T.sync_grid()
+            if bid == 0:
+                T.barrier_blocks(barrier[0])
+            T.sync_grid()
+
+            if tx >= 64 and tx < 128:
+                producer_step = T.alloc_var(T.int32, init=0)
+                for producer_wave in T.serial(ceil_div(num_compute_tiles, num_sms)):
+                    producer_tile = bid + producer_wave * num_sms
+                    if producer_tile < num_compute_tiles:
+                        producer_n = producer_tile % num_n_blocks
+                        producer_m = (producer_tile // num_n_blocks) % num_m_blocks
+                        producer_expert = producer_tile // (num_n_blocks * num_m_blocks)
+                        if producer_n * block_n < l1_n and producer_m * block_m < recv_counts[producer_expert]:
+                            for producer_k in T.serial(num_k_blocks):
+                                producer_stage = (producer_step + producer_k) % pipeline_stages
+                                producer_phase = ((producer_step + producer_k) // pipeline_stages) & 1
+                                T.mbarrier_wait_parity(
+                                    stage_barriers[pipeline_stages + producer_stage],
+                                    producer_phase ^ 1,
+                                )
+                                T.tma_copy(
+                                    recv_x[
+                                        producer_expert,
+                                        producer_m * block_m : (producer_m + 1) * block_m,
+                                        producer_k * block_k : (producer_k + 1) * block_k,
+                                    ],
+                                    a_shared[producer_stage, :, :],
+                                    barrier=stage_barriers[producer_stage],
+                                )
+                                T.tma_copy(
+                                    l1_weight[
+                                        producer_expert,
+                                        producer_n * block_n : (producer_n + 1) * block_n,
+                                        producer_k * block_k : (producer_k + 1) * block_k,
+                                    ],
+                                    b_shared[producer_stage, :, :],
+                                    barrier=stage_barriers[producer_stage],
+                                )
+                                T.mbarrier_arrive(stage_barriers[producer_stage])
+                            producer_step += num_k_blocks
+
+            elif tx >= 128:
+                partial = T.alloc_fragment((block_m, block_n), T.float32)
+                accum = T.alloc_fragment((block_m, block_n), T.bfloat16)
+                gate = T.alloc_fragment((block_m, block_n // 2), T.float32)
+                up = T.alloc_fragment((block_m, block_n // 2), T.float32)
+                amax = T.alloc_fragment((block_m,), T.float32)
+                scale = T.alloc_fragment((block_m,), T.float32)
+                quant_fp8 = T.alloc_fragment((block_m, block_n // 2), T.float8_e4m3fn)
+                act_scale = T.alloc_fragment((block_m,), T.float32)
+                weight_scale = T.alloc_local((2,), T.float32)
+                consumer_step = T.alloc_var(T.int32, init=0)
+
+                for consumer_wave in T.serial(ceil_div(num_compute_tiles, num_sms)):
+                    consumer_tile = bid + consumer_wave * num_sms
+                    if consumer_tile < num_compute_tiles:
+                        consumer_n = consumer_tile % num_n_blocks
+                        consumer_m = (consumer_tile // num_n_blocks) % num_m_blocks
+                        consumer_expert = consumer_tile // (num_n_blocks * num_m_blocks)
+                        if consumer_n * block_n < l1_n and consumer_m * block_m < recv_counts[consumer_expert]:
+                            T.clear(partial)
+                            T.clear(accum)
+                            for consumer_k in T.serial(num_k_blocks):
+                                consumer_stage = (consumer_step + consumer_k) % pipeline_stages
+                                consumer_phase = ((consumer_step + consumer_k) // pipeline_stages) & 1
+                                T.mbarrier_wait_parity(
+                                    stage_barriers[consumer_stage],
+                                    consumer_phase,
+                                )
+                                T.gemm(
+                                    a_shared[consumer_stage, :, :],
+                                    b_shared[consumer_stage, :, :],
+                                    partial,
+                                    transpose_B=True,
+                                )
+                                for i in T.Parallel(block_m):
+                                    act_scale[i] = recv_x_sf[
+                                        consumer_expert,
+                                        consumer_m * block_m + i,
+                                        consumer_k,
+                                    ]
+                                weight_scale[0] = l1_weight_sf[consumer_expert, consumer_n, consumer_k]
+                                weight_scale[1] = l1_weight_sf[
+                                    consumer_expert,
+                                    consumer_n + num_n_blocks,
+                                    consumer_k,
+                                ]
+                                for i, j in T.Parallel(block_m, block_n):
+                                    accum[i, j] = (
+                                        T.cast(partial[i, j], T.bfloat16)
+                                        * T.cast(
+                                            act_scale[i] * weight_scale[(j % 16) // 8],
+                                            T.bfloat16,
+                                        )
+                                        + accum[i, j]
+                                    )
+                                T.clear(partial)
+                                T.mbarrier_arrive(stage_barriers[pipeline_stages + consumer_stage])
+                            consumer_step += num_k_blocks
+                            for i, j in T.Parallel(block_m, block_n // 2):
+                                gate[i, j] = accum[i, (j // 8) * 16 + j % 8]
+                            for i, j in T.Parallel(block_m, block_n // 2):
+                                up[i, j] = accum[i, (j // 8) * 16 + j % 8 + 8]
+                            for i, j in T.Parallel(block_m, block_n // 2):
+                                gate[i, j] = (
+                                    T.min(gate[i, j], activation_clamp)
+                                    * T.sigmoid(T.min(gate[i, j], activation_clamp))
+                                    * T.max(
+                                        T.min(up[i, j], activation_clamp),
+                                        -activation_clamp,
+                                    )
+                                    * recv_weights[
+                                        consumer_expert,
+                                        consumer_m * block_m + i,
+                                    ]
+                                )
+                            T.reduce_absmax(gate, amax, dim=1)
+                            for i in T.Parallel(block_m):
+                                scale[i] = T.max(amax[i], 1e-4) / FP8_MAX
+                                l2_x_sf[
+                                    consumer_expert,
+                                    consumer_m * block_m + i,
+                                    consumer_n,
+                                ] = scale[i]
+                            for i, j in T.Parallel(block_m, block_n // 2):
+                                gate[i, j] = T.clamp(
+                                    gate[i, j] / scale[i],
+                                    -FP8_MAX,
+                                    FP8_MAX,
+                                )
+                            T.copy(gate, quant_fp8)
+                            T.copy(quant_fp8, out_shared)
+                            T.copy(
+                                out_shared,
+                                l2_x[
+                                    consumer_expert,
+                                    consumer_m * block_m,
+                                    consumer_n * (block_n // 2),
+                                ],
+                            )
 
     return main
 
@@ -319,6 +668,250 @@ def fp8_grouped_gemm_kernel(
     return main
 
 
+def fused_l2_scatter_reduce_manual_warp_kernel(
+    num_tokens: int,
+    hidden: int,
+    intermediate_hidden: int,
+    num_experts_per_rank: int,
+    num_topk: int,
+    num_ranks: int,
+    capacity: int,
+    num_sms: int,
+    block_m: int = 64,
+    block_n: int = 256,
+    block_k: int = 128,
+    reduce_block_m: int = 8,
+    reduce_block_h: int = 128,
+    threads: int = 384,
+    pipeline_stages: int = 3,
+):
+    num_m_blocks = ceil_div(capacity, block_m)
+    num_n_blocks = ceil_div(hidden, block_n)
+    num_compute_tiles = num_experts_per_rank * num_m_blocks * num_n_blocks
+    num_k_blocks = intermediate_hidden // block_k
+    num_reduce_n_blocks = ceil_div(hidden, reduce_block_h)
+    num_reduce_m_blocks = ceil_div(num_tokens, reduce_block_m)
+    num_reduce_tiles = num_reduce_n_blocks * num_reduce_m_blocks
+
+    @T.prim_func
+    def main(
+        a: T.Tensor(
+            (num_experts_per_rank, capacity, intermediate_hidden),
+            T.float8_e4m3fn,
+        ),
+        b: T.Tensor(
+            (num_experts_per_rank, hidden, intermediate_hidden),
+            T.float8_e4m3fn,
+        ),
+        a_sf: T.Tensor(
+            (
+                num_experts_per_rank,
+                capacity,
+                intermediate_hidden // SCALE_GRANULARITY,
+            ),
+            T.float32,
+        ),
+        b_sf: T.Tensor(
+            (
+                num_experts_per_rank,
+                hidden // SCALE_GRANULARITY,
+                intermediate_hidden // SCALE_GRANULARITY,
+            ),
+            T.float32,
+        ),
+        recv_counts: T.Tensor((num_experts_per_rank,), T.int32),
+        src_ranks: T.Tensor((num_experts_per_rank, capacity), T.int32),
+        src_tokens: T.Tensor((num_experts_per_rank, capacity), T.int32),
+        src_topk: T.Tensor((num_experts_per_rank, capacity), T.int32),
+        combine: T.Tensor((num_tokens, num_topk, hidden), T.bfloat16),
+        barrier: T.Tensor((num_ranks,), T.int32),
+        out: T.Tensor((num_tokens, hidden), T.bfloat16),
+    ):
+        with T.Kernel(num_sms, threads=threads) as bid:
+            tx = T.get_thread_binding()
+            a_shared = T.alloc_shared(
+                (pipeline_stages, block_m, block_k),
+                T.float8_e4m3fn,
+            )
+            b_shared = T.alloc_shared(
+                (pipeline_stages, block_n, block_k),
+                T.float8_e4m3fn,
+            )
+            out_shared = T.alloc_shared((block_m, block_n), T.bfloat16)
+            reduce_shared = T.alloc_shared((reduce_block_m, reduce_block_h), T.bfloat16)
+            stage_barriers = T.alloc_barrier([64] * pipeline_stages + [256] * pipeline_stages)
+
+            if tx < 128:
+                T.dec_max_nreg(48)
+            else:
+                T.inc_max_nreg(208)
+
+            if tx >= 64 and tx < 128:
+                producer_step = T.alloc_var(T.int32, init=0)
+                for producer_wave in T.serial(ceil_div(num_compute_tiles, num_sms)):
+                    producer_tile = bid + producer_wave * num_sms
+                    if producer_tile < num_compute_tiles:
+                        producer_n = producer_tile % num_n_blocks
+                        producer_m = (producer_tile // num_n_blocks) % num_m_blocks
+                        producer_expert = producer_tile // (num_n_blocks * num_m_blocks)
+                        if (
+                            producer_expert < num_experts_per_rank
+                            and producer_n * block_n < hidden
+                            and producer_m * block_m < capacity
+                            and producer_m * block_m < recv_counts[producer_expert]
+                            and num_k_blocks * block_k == intermediate_hidden
+                        ):
+                            for producer_k in T.serial(num_k_blocks):
+                                producer_stage = (producer_step + producer_k) % pipeline_stages
+                                producer_phase = ((producer_step + producer_k) // pipeline_stages) & 1
+                                T.mbarrier_wait_parity(
+                                    stage_barriers[pipeline_stages + producer_stage],
+                                    producer_phase ^ 1,
+                                )
+                                T.tma_copy(
+                                    a[
+                                        producer_expert,
+                                        producer_m * block_m : (producer_m + 1) * block_m,
+                                        producer_k * block_k : (producer_k + 1) * block_k,
+                                    ],
+                                    a_shared[producer_stage, :, :],
+                                    barrier=stage_barriers[producer_stage],
+                                )
+                                T.tma_copy(
+                                    b[
+                                        producer_expert,
+                                        producer_n * block_n : (producer_n + 1) * block_n,
+                                        producer_k * block_k : (producer_k + 1) * block_k,
+                                    ],
+                                    b_shared[producer_stage, :, :],
+                                    barrier=stage_barriers[producer_stage],
+                                )
+                                T.mbarrier_arrive(stage_barriers[producer_stage])
+                            producer_step += num_k_blocks
+
+            elif tx >= 128:
+                partial = T.alloc_fragment((block_m, block_n), T.float32)
+                accum = T.alloc_fragment((block_m, block_n), T.bfloat16)
+                act_scale = T.alloc_fragment((block_m,), T.float32)
+                weight_scale = T.alloc_local((2,), T.float32)
+                consumer_step = T.alloc_var(T.int32, init=0)
+
+                for consumer_wave in T.serial(ceil_div(num_compute_tiles, num_sms)):
+                    consumer_tile = bid + consumer_wave * num_sms
+                    if consumer_tile < num_compute_tiles:
+                        consumer_n = consumer_tile % num_n_blocks
+                        consumer_m = (consumer_tile // num_n_blocks) % num_m_blocks
+                        consumer_expert = consumer_tile // (num_n_blocks * num_m_blocks)
+                        if (
+                            consumer_expert < num_experts_per_rank
+                            and consumer_n * block_n < hidden
+                            and consumer_m * block_m < capacity
+                            and consumer_m * block_m < recv_counts[consumer_expert]
+                            and num_k_blocks * block_k == intermediate_hidden
+                        ):
+                            T.clear(partial)
+                            T.clear(accum)
+                            for consumer_k in T.serial(num_k_blocks):
+                                consumer_stage = (consumer_step + consumer_k) % pipeline_stages
+                                consumer_phase = ((consumer_step + consumer_k) // pipeline_stages) & 1
+                                T.mbarrier_wait_parity(
+                                    stage_barriers[consumer_stage],
+                                    consumer_phase,
+                                )
+                                T.gemm(
+                                    a_shared[consumer_stage, :, :],
+                                    b_shared[consumer_stage, :, :],
+                                    partial,
+                                    transpose_B=True,
+                                )
+                                for i in T.Parallel(block_m):
+                                    act_scale[i] = a_sf[
+                                        consumer_expert,
+                                        consumer_m * block_m + i,
+                                        consumer_k,
+                                    ]
+                                weight_scale[0] = b_sf[
+                                    consumer_expert,
+                                    consumer_n * 2,
+                                    consumer_k,
+                                ]
+                                weight_scale[1] = b_sf[
+                                    consumer_expert,
+                                    consumer_n * 2 + 1,
+                                    consumer_k,
+                                ]
+                                for i, j in T.Parallel(block_m, block_n):
+                                    accum[i, j] = (
+                                        T.cast(partial[i, j], T.bfloat16)
+                                        * T.cast(
+                                            act_scale[i] * weight_scale[j // 128],
+                                            T.bfloat16,
+                                        )
+                                        + accum[i, j]
+                                    )
+                                T.clear(partial)
+                                T.mbarrier_arrive(stage_barriers[pipeline_stages + consumer_stage])
+                            consumer_step += num_k_blocks
+                            T.copy(accum, out_shared)
+                            for row in T.serial(block_m):
+                                pool_row = consumer_m * block_m + row
+                                if pool_row < recv_counts[consumer_expert]:
+                                    dst_rank = src_ranks[consumer_expert, pool_row]
+                                    dst_token = src_tokens[consumer_expert, pool_row]
+                                    dst_topk = src_topk[consumer_expert, pool_row]
+                                    if (
+                                        dst_rank >= 0
+                                        and dst_rank < num_ranks
+                                        and dst_token >= 0
+                                        and dst_token < num_tokens
+                                        and dst_topk >= 0
+                                        and dst_topk < num_topk
+                                    ):
+                                        T.copy(
+                                            out_shared[row, :],
+                                            combine[
+                                                dst_token,
+                                                dst_topk,
+                                                consumer_n * block_n : (consumer_n + 1) * block_n,
+                                            ],
+                                            dst_pe=dst_rank,
+                                            disable_tma=True,
+                                        )
+
+            T.fence_sys()
+            T.sync_grid()
+            if bid == 0:
+                T.barrier_blocks(barrier[0])
+            T.sync_grid()
+
+            if tx < 128:
+                reduce_accum = T.alloc_fragment((reduce_block_m, reduce_block_h), T.float32)
+                for reduce_wave in T.serial(ceil_div(num_reduce_tiles, num_sms)):
+                    reduce_tile = bid + reduce_wave * num_sms
+                    if reduce_tile < num_reduce_tiles:
+                        reduce_n = reduce_tile % num_reduce_n_blocks
+                        reduce_m = reduce_tile // num_reduce_n_blocks
+                        T.clear(reduce_accum)
+                        for topk_slot in T.serial(num_topk):
+                            for i, j in T.Parallel(reduce_block_m, reduce_block_h):
+                                if reduce_m * reduce_block_m + i < num_tokens:
+                                    reduce_accum[i, j] += combine[
+                                        reduce_m * reduce_block_m + i,
+                                        topk_slot,
+                                        reduce_n * reduce_block_h + j,
+                                    ]
+                        T.copy(reduce_accum, reduce_shared)
+                        T.copy(
+                            reduce_shared,
+                            out[
+                                reduce_m * reduce_block_m,
+                                reduce_n * reduce_block_h,
+                            ],
+                        )
+
+    return main
+
+
 def swiglu_quant_kernel(
     num_experts_per_rank: int,
     capacity: int,
@@ -359,12 +952,7 @@ def swiglu_quant_kernel(
                 for i, j in T.Parallel(block_m, block_n):
                     gate[i, j] = T.min(gate[i, j], activation_clamp)
                     up[i, j] = T.max(T.min(up[i, j], activation_clamp), -activation_clamp)
-                    activated[i, j] = (
-                        gate[i, j]
-                        * T.sigmoid(gate[i, j])
-                        * up[i, j]
-                        * route_weights[bz, by * block_m + i]
-                    )
+                    activated[i, j] = gate[i, j] * T.sigmoid(gate[i, j]) * up[i, j] * route_weights[bz, by * block_m + i]
                 T.reduce_absmax(activated, amax, dim=1)
                 for i in T.Parallel(block_m):
                     scale[i] = T.max(amax[i], 1e-4) / FP8_MAX
@@ -450,25 +1038,24 @@ def _allocator_size_bytes(
     bf16 = 2
     fp32 = 4
     i32 = 4
-    weight_bytes = num_experts_per_rank * (
-        2 * intermediate_hidden * hidden * fp8 + hidden * intermediate_hidden * fp8
+    weight_bytes = num_experts_per_rank * (2 * intermediate_hidden * hidden * fp8 + hidden * intermediate_hidden * fp8)
+    weight_scale_bytes = (
+        num_experts_per_rank * ((2 * intermediate_hidden // 128) * (hidden // 128) + (hidden // 128) * (intermediate_hidden // 128)) * fp32
     )
-    weight_scale_bytes = num_experts_per_rank * (
-        (2 * intermediate_hidden // 128) * (hidden // 128)
-        + (hidden // 128) * (intermediate_hidden // 128)
-    ) * fp32
-    pool_bytes = num_experts_per_rank * capacity * (
-        hidden * fp8
-        + (hidden // 128) * fp32
-        + 4 * i32
-        + 2 * intermediate_hidden * bf16
-        + intermediate_hidden * fp8
-        + (intermediate_hidden // 128) * fp32
-        + hidden * bf16
+    pool_bytes = (
+        num_experts_per_rank
+        * capacity
+        * (
+            hidden * fp8
+            + (hidden // 128) * fp32
+            + 4 * i32
+            + 2 * intermediate_hidden * bf16
+            + intermediate_hidden * fp8
+            + (intermediate_hidden // 128) * fp32
+            + hidden * bf16
+        )
     )
-    input_bytes = num_tokens * (
-        hidden * fp8 + (hidden // 128) * fp32 + num_topk * (3 * i32 + fp32) + num_topk * hidden * bf16
-    )
+    input_bytes = num_tokens * (hidden * fp8 + (hidden // 128) * fp32 + num_topk * (3 * i32 + fp32) + num_topk * hidden * bf16)
     return align_up(weight_bytes + weight_scale_bytes + pool_bytes + input_bytes + 2**27, 2**20)
 
 
@@ -538,6 +1125,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     num_topk = model["num_topk"]
     num_tokens = args.num_tokens
     activation_clamp = args.activation_clamp
+    use_fused = args.model_config != "pro"
 
     assert num_experts % num_local_ranks == 0
     assert hidden % 256 == 0 and intermediate_hidden % 128 == 0
@@ -547,6 +1135,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
     assert rank == local_rank and num_ranks == num_local_ranks
+    num_sms = torch.cuda.get_device_properties(local_rank).multi_processor_count
     allocator = get_allocator(
         size=_allocator_size_bytes(
             num_tokens,
@@ -564,40 +1153,68 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         use_vmm=True,
     )
 
-    kernel_specs = [
-        reset_route_counts_kernel(num_experts, num_ranks),
-        assign_local_routes_kernel(num_tokens, num_experts, num_topk, num_ranks),
-        publish_route_counts_kernel(num_experts, num_ranks),
-        device_barrier_kernel(num_ranks),
-        finalize_routes_kernel(num_tokens, num_experts, num_topk, num_ranks),
-        dispatch_tokens_kernel(num_tokens, hidden, num_experts, num_topk, num_ranks, capacity),
-        fp8_grouped_gemm_kernel(num_experts_per_rank, capacity, 2 * intermediate_hidden, hidden),
-        swiglu_quant_kernel(
-            num_experts_per_rank,
-            capacity,
-            intermediate_hidden,
-            activation_clamp=activation_clamp,
-        ),
-        fp8_grouped_gemm_kernel(num_experts_per_rank, capacity, hidden, intermediate_hidden),
-        scatter_outputs_kernel(num_experts_per_rank, capacity, num_tokens, num_topk, hidden),
-        reduce_topk_kernel(num_tokens, num_topk, hidden),
-    ]
+    if use_fused:
+        kernel_specs = [
+            fused_l1_swiglu_manual_warp_kernel(
+                num_tokens,
+                hidden,
+                2 * intermediate_hidden,
+                num_experts,
+                num_topk,
+                num_ranks,
+                capacity,
+                num_sms,
+                activation_clamp=activation_clamp,
+            ),
+            fused_l2_scatter_reduce_manual_warp_kernel(
+                num_tokens,
+                hidden,
+                intermediate_hidden,
+                num_experts_per_rank,
+                num_topk,
+                num_ranks,
+                capacity,
+                num_sms,
+            ),
+        ]
+    else:
+        kernel_specs = [
+            reset_route_counts_kernel(num_experts, num_ranks),
+            assign_local_routes_kernel(num_tokens, num_experts, num_topk, num_ranks),
+            publish_route_counts_kernel(num_experts, num_ranks),
+            device_barrier_kernel(num_ranks),
+            finalize_routes_kernel(num_tokens, num_experts, num_topk, num_ranks),
+            dispatch_tokens_kernel(num_tokens, hidden, num_experts, num_topk, num_ranks, capacity),
+            fp8_grouped_gemm_kernel(num_experts_per_rank, capacity, 2 * intermediate_hidden, hidden),
+            swiglu_quant_kernel(
+                num_experts_per_rank,
+                capacity,
+                intermediate_hidden,
+                activation_clamp=activation_clamp,
+            ),
+            fp8_grouped_gemm_kernel(num_experts_per_rank, capacity, hidden, intermediate_hidden),
+            scatter_outputs_kernel(num_experts_per_rank, capacity, num_tokens, num_topk, hidden),
+            reduce_topk_kernel(num_tokens, num_topk, hidden),
+        ]
     kernels = [tilelang.compile(spec, compile_once=True, compile_group=group) for spec in kernel_specs]
     for kernel in kernels:
         kernel.initialize(allocator=allocator)
-    (
-        reset_route_counts,
-        assign_local_routes,
-        publish_route_counts,
-        device_barrier,
-        finalize_routes,
-        dispatch_tokens,
-        l1_gemm,
-        swiglu_quant,
-        l2_gemm,
-        scatter_outputs,
-        reduce_topk,
-    ) = kernels
+    if use_fused:
+        fused_l1, fused_l2 = kernels
+    else:
+        (
+            reset_route_counts,
+            assign_local_routes,
+            publish_route_counts,
+            device_barrier,
+            finalize_routes,
+            dispatch_tokens,
+            l1_gemm,
+            swiglu_quant,
+            l2_gemm,
+            scatter_outputs,
+            reduce_topk,
+        ) = kernels
 
     if local_rank == 0 and args.print_source:
         for kernel in kernels:
@@ -610,16 +1227,22 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     topk_weights_src, topk_idx_src = torch.topk(scores, num_topk, dim=-1, sorted=False)
     topk_idx_src = topk_idx_src.to(torch.int32)
 
-    l1_bf16 = torch.randn(
-        (num_experts_per_rank, 2 * intermediate_hidden, hidden),
-        dtype=torch.bfloat16,
-        device="cuda",
-    ) * 0.05
-    l2_bf16 = torch.randn(
-        (num_experts_per_rank, hidden, intermediate_hidden),
-        dtype=torch.bfloat16,
-        device="cuda",
-    ) * 0.05
+    l1_bf16 = (
+        torch.randn(
+            (num_experts_per_rank, 2 * intermediate_hidden, hidden),
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        * 0.05
+    )
+    l2_bf16 = (
+        torch.randn(
+            (num_experts_per_rank, hidden, intermediate_hidden),
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        * 0.05
+    )
     l1_fp8_src, l1_sf_src = block_cast_to_fp8(l1_bf16)
     l2_fp8_src, l2_sf_src = block_cast_to_fp8(l2_bf16)
     del scores, l1_bf16, l2_bf16
@@ -630,10 +1253,10 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     x = allocator_tensor(x_fp8_src.shape, x_fp8_src.dtype, allocator=allocator).copy_(x_fp8_src)
     x_sf = allocator_tensor(x_sf_src.shape, x_sf_src.dtype, allocator=allocator).copy_(x_sf_src)
     topk_idx = allocator_tensor(topk_idx_src.shape, topk_idx_src.dtype, allocator=allocator).copy_(topk_idx_src)
-    topk_weights = allocator_tensor(
-        topk_weights_src.shape, topk_weights_src.dtype, allocator=allocator
-    ).copy_(topk_weights_src)
-    l1_fp8 = allocator_tensor(l1_fp8_src.shape, l1_fp8_src.dtype, allocator=allocator).copy_(l1_fp8_src)
+    topk_weights = allocator_tensor(topk_weights_src.shape, topk_weights_src.dtype, allocator=allocator).copy_(topk_weights_src)
+    l1_fp8_kernel = interleave_gate_up_weights(l1_fp8_src) if use_fused else l1_fp8_src
+    l1_fp8 = allocator_tensor(l1_fp8_kernel.shape, l1_fp8_kernel.dtype, allocator=allocator).copy_(l1_fp8_kernel)
+    del l1_fp8_kernel
     l1_sf = allocator_tensor(l1_sf_src.shape, l1_sf_src.dtype, allocator=allocator).copy_(l1_sf_src)
     l2_fp8 = allocator_tensor(l2_fp8_src.shape, l2_fp8_src.dtype, allocator=allocator).copy_(l2_fp8_src)
     l2_sf = allocator_tensor(l2_sf_src.shape, l2_sf_src.dtype, allocator=allocator).copy_(l2_sf_src)
@@ -642,25 +1265,33 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     recv_counts = allocator_tensor((num_experts_per_rank,), torch.int32, allocator=allocator)
     recv_x = allocator_tensor((num_experts_per_rank, capacity, hidden), torch.float8_e4m3fn, allocator=allocator)
     recv_x_sf = allocator_tensor(
-        (num_experts_per_rank, capacity, hidden // SCALE_GRANULARITY), torch.float32, allocator=allocator
+        (num_experts_per_rank, capacity, hidden // SCALE_GRANULARITY),
+        torch.float32,
+        allocator=allocator,
     )
     recv_weights = allocator_tensor((num_experts_per_rank, capacity), torch.float32, allocator=allocator)
     src_ranks = allocator_tensor((num_experts_per_rank, capacity), torch.int32, allocator=allocator)
     src_tokens = allocator_tensor((num_experts_per_rank, capacity), torch.int32, allocator=allocator)
     src_topk = allocator_tensor((num_experts_per_rank, capacity), torch.int32, allocator=allocator)
     route_slots = allocator_tensor((num_tokens, num_topk), torch.int32, allocator=allocator)
-    l1_out = allocator_tensor(
-        (num_experts_per_rank, capacity, 2 * intermediate_hidden), torch.bfloat16, allocator=allocator
-    )
-    l2_x = allocator_tensor(
-        (num_experts_per_rank, capacity, intermediate_hidden), torch.float8_e4m3fn, allocator=allocator
-    )
+    if not use_fused:
+        l1_out = allocator_tensor(
+            (num_experts_per_rank, capacity, 2 * intermediate_hidden),
+            torch.bfloat16,
+            allocator=allocator,
+        )
+    l2_x = allocator_tensor((num_experts_per_rank, capacity, intermediate_hidden), torch.float8_e4m3fn, allocator=allocator)
     l2_x_sf = allocator_tensor(
         (num_experts_per_rank, capacity, intermediate_hidden // SCALE_GRANULARITY),
         torch.float32,
         allocator=allocator,
     )
-    l2_out = allocator_tensor((num_experts_per_rank, capacity, hidden), torch.bfloat16, allocator=allocator)
+    if not use_fused:
+        l2_out = allocator_tensor(
+            (num_experts_per_rank, capacity, hidden),
+            torch.bfloat16,
+            allocator=allocator,
+        )
     combine = allocator_tensor((num_tokens, num_topk, hidden), torch.bfloat16, allocator=allocator)
     out = allocator_tensor((num_tokens, hidden), torch.bfloat16, allocator=allocator)
 
@@ -677,42 +1308,72 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         dist.barrier(group=group)
 
     def run_pipeline(check_capacity: bool = False):
-        reset_route_counts(route_counts)
-        assign_local_routes(topk_idx, route_counts, route_slots)
-        publish_route_counts(route_counts)
-        device_barrier(barrier)
-        finalize_routes(
-            topk_idx,
-            route_counts,
-            recv_counts,
-            route_slots,
-        )
-        dispatch_tokens(
-            x,
-            x_sf,
-            topk_idx,
-            topk_weights,
-            route_slots,
-            recv_x,
-            recv_x_sf,
-            recv_weights,
-            src_ranks,
-            src_tokens,
-            src_topk,
-        )
-        device_barrier(barrier)
+        if use_fused:
+            fused_l1(
+                x,
+                x_sf,
+                topk_idx,
+                topk_weights,
+                route_counts,
+                recv_counts,
+                route_slots,
+                recv_x,
+                recv_x_sf,
+                recv_weights,
+                src_ranks,
+                src_tokens,
+                src_topk,
+                l1_fp8,
+                l1_sf,
+                l2_x,
+                l2_x_sf,
+                barrier,
+            )
+        else:
+            reset_route_counts(route_counts)
+            assign_local_routes(topk_idx, route_counts, route_slots)
+            publish_route_counts(route_counts)
+            device_barrier(barrier)
+            finalize_routes(topk_idx, route_counts, recv_counts, route_slots)
+            dispatch_tokens(
+                x,
+                x_sf,
+                topk_idx,
+                topk_weights,
+                route_slots,
+                recv_x,
+                recv_x_sf,
+                recv_weights,
+                src_ranks,
+                src_tokens,
+                src_topk,
+            )
+            device_barrier(barrier)
         if check_capacity:
             local_max = recv_counts.max()
             dist.all_reduce(local_max, op=dist.ReduceOp.MAX, group=group)
-            assert local_max.item() <= capacity, (
-                f"expert capacity {capacity} is smaller than received routes {local_max.item()}"
+            assert local_max.item() <= capacity, f"expert capacity {capacity} is smaller than received routes {local_max.item()}"
+        if use_fused:
+            fused_l2(
+                l2_x,
+                l2_fp8,
+                l2_x_sf,
+                l2_sf,
+                recv_counts,
+                src_ranks,
+                src_tokens,
+                src_topk,
+                combine,
+                barrier,
+                out,
             )
-        l1_gemm(recv_x, l1_fp8, recv_x_sf, l1_sf, recv_counts, l1_out)
-        swiglu_quant(l1_out, recv_weights, recv_counts, l2_x, l2_x_sf)
-        l2_gemm(l2_x, l2_fp8, l2_x_sf, l2_sf, recv_counts, l2_out)
-        scatter_outputs(l2_out, recv_counts, src_ranks, src_tokens, src_topk, combine)
-        device_barrier(barrier)
-        reduce_topk(combine, out)
+        else:
+            l1_gemm(recv_x, l1_fp8, recv_x_sf, l1_sf, recv_counts, l1_out)
+            swiglu_quant(l1_out, recv_weights, recv_counts, l2_x, l2_x_sf)
+            l2_gemm(l2_x, l2_fp8, l2_x_sf, l2_sf, recv_counts, l2_out)
+            scatter_outputs(l2_out, recv_counts, src_ranks, src_tokens, src_topk, combine)
+            device_barrier(barrier)
+            reduce_topk(combine, out)
         return out
 
     reset_state()
@@ -749,6 +1410,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         if local_rank == 0:
             print(
                 f"tilescale sm90 fp8 mega moe: model={args.model_config} M={num_tokens} "
+                f"implementation={'fused' if use_fused else 'multi-kernel'} "
                 f"capacity={capacity} latency={latency * 1000:.1f} us"
             )
 
