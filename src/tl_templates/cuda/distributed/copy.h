@@ -44,6 +44,18 @@ TL_DEVICE void cp_warp_impl(dtype_t const *const dst_addr,
   for (int __i = (N_int4 / kLoopStride) * kLoopStride + lane_id; __i < N_int4;
        __i += 32)
     __dst[__i] = __src[__i];
+  // Tail: `N` elements of `dtype_t` are not in general a whole number of
+  // int4s -- e.g. a single fp32 scale (`N=1`, 4 bytes) has `N_int4 == 0`, so
+  // both loops above run zero iterations and silently copy nothing at all.
+  // `threadgroup_cp` (the block-level copy just below) already falls back
+  // through progressively narrower element types down to a byte; here `N`
+  // and `dtype_t` are compile-time, so the remainder is just the last
+  // `N - N_int4 * kElemsPerInt4` elements, copied directly through the
+  // original (unreinterpreted) pointers.
+  constexpr int kElemsPerInt4 = sizeof(int4) / sizeof(dtype_t);
+  constexpr int kTailStart = N_int4 * kElemsPerInt4;
+  for (int __i = kTailStart + lane_id; __i < N; __i += 32)
+    const_cast<dtype_t *>(dst_addr)[__i] = src_addr[__i];
 }
 
 template <int N, int UNROLL_FACTOR, bool enable_aggressive_vectorize = false,
