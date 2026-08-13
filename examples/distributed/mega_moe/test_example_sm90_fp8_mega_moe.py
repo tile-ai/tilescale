@@ -13,6 +13,7 @@ def test_example_sm90_fp8_mega_moe(local_rank: int, num_ranks: int):
     args = argparse.Namespace(
         num_processes=num_ranks,
         model_config="smoke",
+        implementation="fused",
         num_tokens=32,
         capacity=64,
         activation_clamp=10.0,
