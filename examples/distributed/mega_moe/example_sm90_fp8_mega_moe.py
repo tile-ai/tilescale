@@ -2,7 +2,9 @@
 
 The fused implementation uses two persistent kernels: one for routing,
 dispatch, L1 GEMM, and SwiGLU quantization, and one for L2 GEMM, scatter, and
-reduction. Both model configurations use manually selected warp counts.
+reduction. Model presets and aligned custom shapes use manually selected warp
+counts and shape/load-based pipeline depths. Custom hidden sizes must be at
+least 512 and divisible by 256; intermediate sizes must be divisible by 128.
 """
 
 from __future__ import annotations
@@ -40,6 +42,64 @@ def ceil_div(x: int, y: int) -> int:
 
 def align_up(x: int, alignment: int) -> int:
     return ceil_div(x, alignment) * alignment
+
+
+def resolve_model_config(args: argparse.Namespace) -> Tuple[str, dict[str, int]]:
+    model = MODEL_CONFIGS[args.model_config].copy()
+    overrides = {
+        "hidden": getattr(args, "hidden", None),
+        "intermediate_hidden": getattr(args, "intermediate_hidden", None),
+        "num_experts": getattr(args, "num_experts", None),
+        "num_topk": getattr(args, "num_topk", None),
+    }
+    is_custom = any(value is not None for value in overrides.values())
+    model.update({key: value for key, value in overrides.items() if value is not None})
+    return ("custom" if is_custom else args.model_config), model
+
+
+def classify_shape(hidden: int, intermediate_hidden: int) -> str:
+    if 3072 <= hidden < 5120 and 1536 <= intermediate_hidden < 2560:
+        return "compact"
+    if 5120 <= hidden <= 8192 and 2560 <= intermediate_hidden <= 4096:
+        return "wide"
+    return "generic"
+
+
+def select_manual_warp_configs(
+    hidden: int,
+    intermediate_hidden: int,
+    num_tokens: int,
+    num_topk: int,
+    num_experts_per_rank: int,
+    num_sms: int,
+) -> Tuple[str, dict[str, int], dict[str, int]]:
+    """Select the TileScale counterpart of DeepGEMM SM90 schedule families."""
+    shape_family = classify_shape(hidden, intermediate_hidden)
+    routed_tokens = num_tokens * num_topk
+    high_sm = num_sms >= 100
+
+    l1_stages = 5
+    l2_stages = 3
+    if high_sm and shape_family == "compact":
+        if 12 * num_experts_per_rank < routed_tokens <= 32 * num_experts_per_rank:
+            l1_stages = l2_stages = 3
+        elif (
+            128 * num_experts_per_rank < routed_tokens <= 256 * num_experts_per_rank
+            or routed_tokens > 1024 * num_experts_per_rank
+        ):
+            l1_stages = l2_stages = 4
+    elif high_sm and shape_family == "wide":
+        # BN512/BK256 are profitable in the CUDA kernel, but the manually
+        # tuned TileScale BN256/BK128 path is faster for the current WGMMA
+        # lowering and remains the generic Wide schedule.
+        l1_stages = 4
+
+    common = {"block_m": 64, "block_n": 256, "block_k": 128, "threads": 384}
+    return (
+        shape_family,
+        {**common, "pipeline_stages": l1_stages},
+        {**common, "pipeline_stages": l2_stages},
+    )
 
 
 def per_token_cast_to_fp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -212,12 +272,14 @@ def fused_l1_swiglu_manual_warp_kernel(
                 T.barrier_blocks(barrier[0])
 
                 if tx < route_threads:
-                    if tx < num_experts_per_rank:
-                        recv_count = T.alloc_var(T.int32, init=0)
-                        recv_expert = src_rank[0] * num_experts_per_rank + tx
-                        for count_rank in T.serial(num_ranks):
-                            recv_count += route_counts[count_rank, recv_expert]
-                        recv_counts[tx] = recv_count
+                    for count_wave in T.serial(ceil_div(num_experts_per_rank, route_threads)):
+                        count_local_expert = tx + count_wave * route_threads
+                        if count_local_expert < num_experts_per_rank:
+                            recv_count = T.alloc_var(T.int32, init=0)
+                            recv_expert = src_rank[0] * num_experts_per_rank + count_local_expert
+                            for count_rank in T.serial(num_ranks):
+                                recv_count += route_counts[count_rank, recv_expert]
+                            recv_counts[count_local_expert] = recv_count
 
                     for prefix_wave in T.serial(ceil_div(num_routes, route_threads)):
                         prefix_route = tx + prefix_wave * route_threads
@@ -565,6 +627,7 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                 (pipeline_stages, block_n, block_k),
                 T.float8_e4m3fn,
             )
+            a_sf_shared = T.alloc_shared((pipeline_stages, block_m), T.float32)
             out_shared = T.alloc_shared((block_m, block_n), T.bfloat16)
             reduce_shared = T.alloc_shared((reduce_block_m, reduce_block_h), T.bfloat16)
             stage_barriers = T.alloc_barrier([64] * pipeline_stages + [256] * pipeline_stages)
@@ -614,6 +677,11 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                                     b_shared[producer_stage, :, :],
                                     barrier=stage_barriers[producer_stage],
                                 )
+                                a_sf_shared[producer_stage, tx - 64] = a_sf[
+                                    producer_expert,
+                                    producer_m * block_m + tx - 64,
+                                    producer_k,
+                                ]
                                 T.mbarrier_arrive(stage_barriers[producer_stage])
                             producer_step += num_k_blocks
 
@@ -656,11 +724,7 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                                     transpose_B=True,
                                 )
                                 for i in T.Parallel(block_m):
-                                    act_scale[i] = a_sf[
-                                        consumer_expert,
-                                        consumer_m * block_m + i,
-                                        consumer_k,
-                                    ]
+                                    act_scale[i] = a_sf_shared[consumer_stage, i]
                                 weight_scale[0] = b_sf[
                                     consumer_expert,
                                     consumer_n * 2,
@@ -848,7 +912,7 @@ def allocator_tensor(shape, dtype, allocator):
 
 
 def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
-    model = MODEL_CONFIGS[args.model_config]
+    model_name, model = resolve_model_config(args)
     hidden = model["hidden"]
     intermediate_hidden = model["intermediate_hidden"]
     num_experts = model["num_experts"]
@@ -856,11 +920,19 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     num_tokens = args.num_tokens
     activation_clamp = args.activation_clamp
 
-    assert num_experts % num_local_ranks == 0
-    assert hidden % 256 == 0 and intermediate_hidden % 128 == 0
+    assert num_tokens > 0
+    assert hidden >= 512 and hidden % 256 == 0
+    assert intermediate_hidden > 0 and intermediate_hidden % 128 == 0
+    assert num_experts > 0 and num_experts % num_local_ranks == 0
+    assert 0 < num_topk <= min(32, num_experts)
     num_experts_per_rank = num_experts // num_local_ranks
     average_recv = ceil_div(num_tokens * num_local_ranks * num_topk, num_experts)
-    capacity = args.capacity or align_up(max(average_recv * 2, 64), 64)
+    capacity = (
+        args.capacity
+        if args.capacity is not None
+        else align_up(max(average_recv * 2, 64), 64)
+    )
+    assert capacity >= 64 and capacity % 64 == 0
 
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
     assert rank == local_rank and num_ranks == num_local_ranks
@@ -882,10 +954,13 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         use_vmm=True,
     )
 
-    l1_config = (
-        {"block_n": 256, "threads": 384, "pipeline_stages": 4}
-        if args.model_config == "pro"
-        else {}
+    shape_family, l1_config, l2_config = select_manual_warp_configs(
+        hidden,
+        intermediate_hidden,
+        num_tokens,
+        num_topk,
+        num_experts_per_rank,
+        num_sms,
     )
     kernel_specs = [
         fused_l1_swiglu_manual_warp_kernel(
@@ -909,6 +984,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             num_ranks,
             capacity,
             num_sms,
+            **l2_config,
         ),
     ]
     kernels = [tilelang.compile(spec, compile_once=True, compile_group=group) for spec in kernel_specs]
@@ -1079,8 +1155,9 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         )
         if local_rank == 0:
             print(
-                f"tilescale sm90 fp8 mega moe: model={args.model_config} M={num_tokens} "
-                f"capacity={capacity} latency={latency * 1000:.1f} us"
+                f"tilescale sm90 fp8 mega moe: model={model_name} family={shape_family} "
+                f"M={num_tokens} H={hidden} IH={intermediate_hidden} E={num_experts} "
+                f"topk={num_topk} capacity={capacity} latency={latency * 1000:.1f} us"
             )
 
     allocator.close()
@@ -1091,6 +1168,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--num-processes", type=int, default=8)
     parser.add_argument("--model-config", choices=tuple(MODEL_CONFIGS), default="smoke")
+    parser.add_argument("--hidden", type=int, default=None)
+    parser.add_argument("--intermediate-hidden", type=int, default=None)
+    parser.add_argument("--num-experts", type=int, default=None)
+    parser.add_argument("--num-topk", type=int, default=None)
     parser.add_argument("--num-tokens", type=int, default=64)
     parser.add_argument("--capacity", type=int, default=None)
     parser.add_argument("--activation-clamp", type=float, default=10.0)

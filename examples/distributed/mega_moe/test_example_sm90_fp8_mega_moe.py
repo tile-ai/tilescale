@@ -8,6 +8,55 @@ from testing.python.distributed._utils import distributed_test
 import example_sm90_fp8_mega_moe
 
 
+def test_custom_model_config_and_schedule():
+    args = argparse.Namespace(
+        model_config="smoke",
+        hidden=2560,
+        intermediate_hidden=1536,
+        num_experts=64,
+        num_topk=4,
+    )
+    model_name, model = example_sm90_fp8_mega_moe.resolve_model_config(args)
+    assert model_name == "custom"
+    assert model == {
+        "hidden": 2560,
+        "intermediate_hidden": 1536,
+        "num_experts": 64,
+        "num_topk": 4,
+    }
+
+    family, l1, l2 = example_sm90_fp8_mega_moe.select_manual_warp_configs(
+        model["hidden"],
+        model["intermediate_hidden"],
+        num_tokens=64,
+        num_topk=model["num_topk"],
+        num_experts_per_rank=16,
+        num_sms=132,
+    )
+    assert family == "generic"
+    assert l1 == {
+        "block_m": 64,
+        "block_n": 256,
+        "block_k": 128,
+        "threads": 384,
+        "pipeline_stages": 5,
+    }
+    assert l2 == {**l1, "pipeline_stages": 3}
+
+    family, l1, l2 = example_sm90_fp8_mega_moe.select_manual_warp_configs(
+        4096, 2048, num_tokens=128, num_topk=6, num_experts_per_rank=32, num_sms=132
+    )
+    assert family == "compact"
+    assert l1["pipeline_stages"] == l2["pipeline_stages"] == 3
+
+    family, l1, l2 = example_sm90_fp8_mega_moe.select_manual_warp_configs(
+        7168, 3072, num_tokens=128, num_topk=6, num_experts_per_rank=48, num_sms=132
+    )
+    assert family == "wide"
+    assert l1["pipeline_stages"] == 4
+    assert l2["pipeline_stages"] == 3
+
+
 @distributed_test(nprocs=4, require_fabric=True)
 def test_example_sm90_fp8_mega_moe(local_rank: int, num_ranks: int):
     args = argparse.Namespace(
