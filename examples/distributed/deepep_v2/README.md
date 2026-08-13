@@ -179,15 +179,27 @@ that measured at least as fast at every SM count tried.
 
 8× B200, full NVLink mesh, 8192 tokens/rank, hidden 7168, top-8, 256 experts,
 64 SMs. Bandwidth is the bottleneck rank's, over payload bytes that cross
-NVLink. Four samples per row, every one taken in a verified-idle window --
-node14 is shared, and another user's job landing mid-run costs 1.5–2× without
-showing up anywhere in the output.
+NVLink. Three to four samples per row, each one gated on whether any process
+that is not ours *used the SMs* at any point during the run, sampled throughout
+with `nvidia-smi pmon`. Presence is not the test: an 8-way inference server
+holding 167 GB/GPU at 0% utilisation blocks a presence-based gate forever while
+disturbing nothing, and a job under this same account is invisible to a
+by-other-user check while pinning a GPU at 100%. Both happened; both produced
+numbers 30–60% off.
 
 | | dispatch | combine |
 |---|---|---|
-| bf16, whole call | **686–688 GB/s** (896–899 µs) | **623–625 GB/s** (985–989 µs) |
+| bf16, whole call | **686–687 GB/s** (897–899 µs) | **623–624 GB/s** (988–989 µs) |
 | bf16, kernel only | 694 GB/s | — |
-| fp8, whole call | **589–591 GB/s** (522–524 µs) | 624–625 GB/s (986–987 µs) |
+| fp8, whole call | **590–592 GB/s** (520–523 µs) | 623–625 GB/s (986–989 µs) |
+| bf16, `scatter_sms=128` | **703–716 GB/s** (861–877 µs) | unchanged |
+| fp8, `scatter_sms=128` | **613–617 GB/s** (499–503 µs) | unchanged |
+
+The last two rows are the same kernels on a wider scatter grid. Dispatch is two
+launches, and only the first needs a persistent grid, so the scatter is free to
+use more of the device than `num_sms` allows -- worth 3.4% on bf16 and 4.0% on
+fp8. Opt-in, because a caller who capped `num_sms` to leave room for expert
+compute did not ask for it back. See `kernels/dispatch.py`.
 
 Combine is bf16 whichever dtype dispatch used, and measures the same either
 way, as it should.
@@ -272,8 +284,27 @@ is nothing to hide it behind, and the end-to-end column is what you get. Note
 also that its epilogue *produces* `recv_x`, so it cannot overlap the expert
 computation that consumes it.
 
-DeepEP's figures are GPU time only; this port's are whole Python calls,
-including ~9 µs of host work.
+DeepEP's figures above are GPU time and this port's are whole Python calls,
+which is not a like-for-like comparison. Measured the same way -- per-kernel
+duration from the profiler, which is what DeepEP's `bench_kineto` reports, both
+on the same idle machine at the same shape -- fp8 dispatch comes out:
+
+| | DeepEP | this port |
+|---|---|---|
+| layout / notify | *(inside the main kernel)* | 35 µs |
+| cross-rank movement | 439 µs | 472 µs |
+| compaction epilogue | 113–130 µs | none |
+| **total** | **~559 µs** | **~508 µs** |
+
+So DeepEP is ahead on the movement itself by about 7%, and this port is ahead
+overall by about 9% because it has no compaction pass to pay for. Host overhead
+is the difference between those kernel times and the whole-call figures above:
+8–10 µs.
+
+Note that `async_finish` changes neither column. It moves who waits, not how
+long the work takes: measured, the same dispatch is 901.2 µs synchronous and
+901.4 µs asynchronous with the event waited on. Timing an asynchronous call
+*without* waiting reports 3.0 µs, which is the launch and nothing else.
 
 ## Not implemented
 
