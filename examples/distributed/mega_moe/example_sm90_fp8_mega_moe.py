@@ -623,6 +623,9 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                 act_scale = T.alloc_fragment((block_m,), T.float32)
                 weight_scale = T.alloc_local((2,), T.float32)
                 consumer_step = T.alloc_var(T.int32, init=0)
+                scatter_dst_rank = T.alloc_var(T.int32, init=0)
+                scatter_dst_token = T.alloc_var(T.int32, init=0)
+                scatter_dst_topk = T.alloc_var(T.int32, init=0)
 
                 for consumer_wave in T.serial(ceil_div(num_compute_tiles, num_sms)):
                     consumer_tile = bid + consumer_wave * num_sms
@@ -686,9 +689,13 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                                 row = scatter_warp * (block_m // 8) + row_in_warp
                                 pool_row = consumer_m * block_m + row
                                 if pool_row < recv_counts[consumer_expert]:
-                                    dst_rank = src_ranks[consumer_expert, pool_row]
-                                    dst_token = src_tokens[consumer_expert, pool_row]
-                                    dst_topk = src_topk[consumer_expert, pool_row]
+                                    if tx % 32 == 0:
+                                        scatter_dst_rank = src_ranks[consumer_expert, pool_row]
+                                        scatter_dst_token = src_tokens[consumer_expert, pool_row]
+                                        scatter_dst_topk = src_topk[consumer_expert, pool_row]
+                                    dst_rank = T.shfl_sync(scatter_dst_rank, 0)
+                                    dst_token = T.shfl_sync(scatter_dst_token, 0)
+                                    dst_topk = T.shfl_sync(scatter_dst_topk, 0)
                                     if (
                                         dst_rank >= 0
                                         and dst_rank < num_ranks
