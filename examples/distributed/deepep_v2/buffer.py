@@ -131,6 +131,8 @@ class EPHandle:
         recv_src_rank,
         recv_src_token,
         num_tokens,
+        topk_weights=None,
+        layout_generation=-1,
         finish_event=None,
         expert_count=None,
         expert_offset=None,
@@ -145,6 +147,15 @@ class EPHandle:
         self.recv_src_rank = recv_src_rank
         self.recv_src_token = recv_src_token
         self.num_tokens = num_tokens
+        # What a cached dispatch replays. `topk_idx`/`topk_weights` are this
+        # call's converted copies, so reusing them reproduces the previous
+        # dispatch's metadata exactly rather than approximately.
+        self.topk_weights = topk_weights
+        # Which layout the buffer held when this handle was made. A dispatch
+        # for different routing overwrites `send_base`/`send_rank_mask` in
+        # place, so an older handle is not merely stale, it is wrong -- and
+        # silently so. See `Buffer.dispatch`.
+        self.layout_generation = layout_generation
         # Set only for `async_finish` dispatches: nothing the call returned may
         # be read until this is waited on.
         self.finish_event = finish_event
@@ -407,6 +418,9 @@ class Buffer:
         self.pipeline_depth = pipeline_depth
         self._in_flight: deque = deque()
 
+        # Bumped by every dispatch that recomputes a layout; a handle stays
+        # reusable only while it still matches.
+        self._layout_generation = 0
         self._dispatch_kernels = {}
         self._combine_kernels = {}
 
@@ -417,9 +431,9 @@ class Buffer:
         assert 0 < num_sms <= self.device_sms, f"num_sms={num_sms} exceeds the device's {self.device_sms} SMs"
         return num_sms
 
-    def _get_dispatch_kernel(self, num_tokens: int, collect_expert_stats: bool = False, num_sms: int = 0):
+    def _get_dispatch_kernel(self, num_tokens: int, collect_expert_stats: bool = False, num_sms: int = 0, cached: bool = False):
         num_sms = self._resolve_num_sms(num_sms)
-        key = (num_tokens, collect_expert_stats, num_sms, self.scatter_sms)
+        key = (num_tokens, collect_expert_stats, num_sms, self.scatter_sms, cached)
         if key not in self._dispatch_kernels:
             kernel = dispatch_kernel(
                 num_tokens,
@@ -439,6 +453,7 @@ class Buffer:
                 self.zero_padding,
                 self.recv_capacity,
                 self.scatter_sms,
+                cached,
             )
             kernel.compile_group = self.group
             kernel.initialize(allocator=self.allocator)
@@ -469,8 +484,9 @@ class Buffer:
     def dispatch(
         self,
         x,
-        topk_idx: torch.Tensor,
-        topk_weights: torch.Tensor,
+        topk_idx: torch.Tensor = None,
+        topk_weights: torch.Tensor = None,
+        handle: "EPHandle" = None,
         num_sms: int = 0,
         previous_event: EventOverlap = None,
         async_finish: bool = False,
@@ -509,6 +525,18 @@ class Buffer:
         run. Passing it compiles a separate kernel variant -- the tally is
         absent from the default one, not merely skipped.
         """
+        if handle is not None:
+            # DeepEP's contract: passing a handle *is* the assertion that the
+            # routing is unchanged, so passing routing too would be ambiguous.
+            assert topk_idx is None and topk_weights is None, "pass either a handle or topk_idx/topk_weights, not both"
+            assert handle.layout_generation == self._layout_generation, (
+                f"handle holds layout {handle.layout_generation}, buffer is on {self._layout_generation}: "
+                "another dispatch has overwritten it, so the cached layout no longer describes this buffer"
+            )
+            topk_idx, topk_weights = handle.topk_idx, handle.topk_weights
+        else:
+            assert topk_idx is not None and topk_weights is not None, "dispatch needs topk_idx/topk_weights or a handle"
+        cached = handle is not None
         collect_expert_stats = cumulative_local_expert_recv_stats is not None
         if collect_expert_stats:
             stats = cumulative_local_expert_recv_stats
@@ -536,10 +564,11 @@ class Buffer:
             # `zero_()` launches -- consistently ahead across four interleaved
             # rounds. It needs a `T.sync_grid()` to be correct; see
             # kernels/dispatch.py.
-            topk_idx_i32 = topk_idx.to(torch.int32).contiguous()
-            topk_weights_f32 = topk_weights.to(torch.float32).contiguous()
+            # Already converted when replaying a handle.
+            topk_idx_i32 = topk_idx if cached else topk_idx.to(torch.int32).contiguous()
+            topk_weights_f32 = topk_weights if cached else topk_weights.to(torch.float32).contiguous()
 
-            kernel = self._get_dispatch_kernel(num_tokens, collect_expert_stats, num_sms)
+            kernel = self._get_dispatch_kernel(num_tokens, collect_expert_stats, num_sms, cached)
             # No `dist.barrier` on either side. The reset above is peer-visible
             # state, so it does need ordering against peers -- but the kernel's
             # own entry `barrier_blocks` provides it, which is why no collective
@@ -607,6 +636,8 @@ class Buffer:
         else:
             compute_stream.wait_stream(self.comm_stream)
 
+        if not cached:
+            self._layout_generation += 1
         handle = EPHandle(
             self.num_experts,
             self.num_max_tokens_per_rank,
@@ -617,6 +648,8 @@ class Buffer:
             self.recv_src_rank,
             self.recv_src_token,
             num_tokens,
+            topk_weights_f32,
+            self._layout_generation,
             finish_event if async_finish else None,
             expert_count,
             expert_offset,

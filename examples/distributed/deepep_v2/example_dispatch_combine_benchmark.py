@@ -112,6 +112,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         num_experts=args.experts,
         dtype=dtype,
         num_sms=args.num_sms,
+        scatter_sms=args.scatter_sms,
         dispatch_threads=args.dispatch_threads,
         combine_threads=args.combine_threads,
     )
@@ -173,6 +174,9 @@ if __name__ == "__main__":
     parser.add_argument("--topk", type=int, default=8)
     parser.add_argument("--experts", type=int, default=256)
     parser.add_argument("--num-sms", type=int, default=64)
+    # Dispatch's scatter is a separate launch from its notify and can use a
+    # wider grid; 0 means the same as --num-sms. See kernels/dispatch.py.
+    parser.add_argument("--scatter-sms", type=int, default=0)
     # Dispatch no longer stages rows through shared memory, so warps per block
     # is now a pure occupancy knob rather than something bounded by a
     # shared-memory budget; 512 measures fastest at this shape.

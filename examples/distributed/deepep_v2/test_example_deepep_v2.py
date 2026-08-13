@@ -162,6 +162,68 @@ def test_wide_scatter_grid(local_rank: int, num_ranks: int):
 
 @tilelang.testing.requires_cuda
 @distributed_test(nprocs=8)
+def test_cached_dispatch(local_rank: int, num_ranks: int):
+    """DeepEP's `handle=`: reuse a layout and skip the notify kernel.
+
+    A cached dispatch must produce exactly what a fresh one does, twice over --
+    the second reuse proves the first did not consume the layout. And a handle
+    whose layout has since been overwritten must be rejected: `send_base` and
+    `send_rank_mask` are updated in place, so a stale handle does not fail, it
+    quietly routes to the wrong slots.
+    """
+    rank, num_ranks, group = init_dist(local_rank, num_ranks)
+    device = f"cuda:{local_rank}"
+    torch.manual_seed(1234 + rank)
+
+    num_tokens, hidden, topk, num_experts = 1024, 1024, 8, 256
+    x = torch.randn(num_tokens, hidden, dtype=torch.bfloat16, device=device)
+    topk_idx, topk_weights = reference.make_topk(num_tokens, topk, num_experts, device, 0.25)
+    expected = reference.reference_combined(x, topk_weights, topk_idx)
+
+    buf = Buffer(
+        group=group,
+        local_rank=local_rank,
+        num_local_ranks=num_ranks,
+        num_max_tokens_per_rank=num_tokens,
+        hidden=hidden,
+        num_topk=topk,
+        num_experts=num_experts,
+        dtype=torch.bfloat16,
+        num_sms=16,
+    )
+
+    def roundtrip(reuse=None):
+        if reuse is None:
+            recv, recv_idx, recv_w, handle, _ = buf.dispatch(x, topk_idx, topk_weights)
+        else:
+            recv, recv_idx, recv_w, handle, _ = buf.dispatch(x, handle=reuse)
+        n = handle.num_recv_tokens
+        expert_out = reference.simulate_expert_compute(recv[:n], recv_idx[:n], recv_w[:n])
+        combined, _ = buf.combine(expert_out, handle)
+        err = (combined.float() - expected.float()).norm().item()
+        return handle, err / expected.float().norm().item()
+
+    try:
+        fresh, rel_fresh = roundtrip()
+        once, rel_once = roundtrip(fresh)
+        _, rel_twice = roundtrip(once)
+        for tag, rel in (("fresh", rel_fresh), ("cached", rel_once), ("cached twice", rel_twice)):
+            assert rel < _BF16_REL_L2_THRESHOLD, f"rank {rank}: {tag} rel_l2={rel} exceeds {_BF16_REL_L2_THRESHOLD}"
+
+        roundtrip()  # recomputes the layout, so `fresh` no longer describes the buffer
+        try:
+            buf.dispatch(x, handle=fresh)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f"rank {rank}: a handle whose layout was overwritten was accepted")
+    finally:
+        buf.close()
+        dist.destroy_process_group()
+
+
+@tilelang.testing.requires_cuda
+@distributed_test(nprocs=8)
 def test_dispatch_combine_masked(local_rank: int, num_ranks: int):
     """Half the selections unset: dispatch must route -1 nowhere, and a token
     with no selections at all must combine back to zero."""
