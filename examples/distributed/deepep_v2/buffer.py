@@ -253,6 +253,7 @@ class Buffer:
         from tilelang.carver.arch import driver
 
         device_sms = driver.get_num_sms()
+        self.device_sms = device_sms
         if num_sms == 0:
             num_sms = device_sms
         # Dispatch is a single persistent grid whose phases rendezvous through
@@ -288,9 +289,10 @@ class Buffer:
         self.expand_factor = expand_factor
         if do_expand:
             hard_bound = self.total_capacity * min(num_topk, self.experts_per_rank)
-            self.recv_capacity = min(int(self.total_capacity * expand_factor), hard_bound)
+            # Plus the alignment padding, which is not routing-dependent and so
+            # sits outside the bound rather than inside it.
             aligned_slack = self.experts_per_rank * (self.expert_alignment - 1)
-            self.recv_capacity = min(self.recv_capacity + aligned_slack, hard_bound + aligned_slack)
+            self.recv_capacity = min(int(self.total_capacity * expand_factor), hard_bound) + aligned_slack
         else:
             self.recv_capacity = self.total_capacity
 
@@ -402,8 +404,16 @@ class Buffer:
         self._dispatch_kernels = {}
         self._combine_kernels = {}
 
-    def _get_dispatch_kernel(self, num_tokens: int, collect_expert_stats: bool = False):
-        key = (num_tokens, collect_expert_stats)
+    def _resolve_num_sms(self, num_sms: int) -> int:
+        """Per-call grid size, validated. Both kernels rendezvous grid-wide, so
+        every block has to be resident and the count cannot exceed the device."""
+        num_sms = self.num_sms if num_sms == 0 else num_sms
+        assert 0 < num_sms <= self.device_sms, f"num_sms={num_sms} exceeds the device's {self.device_sms} SMs"
+        return num_sms
+
+    def _get_dispatch_kernel(self, num_tokens: int, collect_expert_stats: bool = False, num_sms: int = 0):
+        num_sms = self._resolve_num_sms(num_sms)
+        key = (num_tokens, collect_expert_stats, num_sms)
         if key not in self._dispatch_kernels:
             kernel = dispatch_kernel(
                 num_tokens,
@@ -412,7 +422,7 @@ class Buffer:
                 self.num_topk,
                 self.hidden,
                 self.num_max_tokens_per_rank,
-                self.num_sms,
+                num_sms,
                 self.dispatch_threads,
                 self.tl_dtype,
                 self.scale_dim,
@@ -428,8 +438,9 @@ class Buffer:
             self._dispatch_kernels[key] = kernel
         return self._dispatch_kernels[key]
 
-    def _get_combine_kernel(self, num_tokens: int, num_bias: int = 0):
-        key = (num_tokens, num_bias)
+    def _get_combine_kernel(self, num_tokens: int, num_bias: int = 0, num_sms: int = 0):
+        num_sms = self._resolve_num_sms(num_sms)
+        key = (num_tokens, num_bias, num_sms)
         if key not in self._combine_kernels:
             kernel = combine_kernel(
                 num_tokens,
@@ -437,7 +448,7 @@ class Buffer:
                 self.hidden,
                 self.num_max_tokens_per_rank,
                 self.total_capacity,
-                self.num_sms,
+                num_sms,
                 self.combine_threads,
                 self.reduce_threads,
                 self.tl_combine_dtype,
@@ -504,7 +515,7 @@ class Buffer:
                 f"expected a packed (*, {self.row_bytes}) uint8 buffer from reference.per_token_cast_to_fp8, got {tuple(x.shape)} {x.dtype}"
             )
         num_tokens = x.shape[0]
-        num_sms = self.num_sms if num_sms == 0 else num_sms
+        num_sms = self._resolve_num_sms(num_sms)
         compute_stream = torch.cuda.current_stream()
         if previous_event is not None:
             assert allocate_on_comm_stream, "previous_event requires allocate_on_comm_stream"
@@ -521,7 +532,7 @@ class Buffer:
             topk_idx_i32 = topk_idx.to(torch.int32).contiguous()
             topk_weights_f32 = topk_weights.to(torch.float32).contiguous()
 
-            kernel = self._get_dispatch_kernel(num_tokens, collect_expert_stats)
+            kernel = self._get_dispatch_kernel(num_tokens, collect_expert_stats, num_sms)
             # No `dist.barrier` on either side. The reset above is peer-visible
             # state, so it does need ordering against peers -- but the kernel's
             # own entry `barrier_blocks` provides it, which is why no collective
@@ -557,9 +568,14 @@ class Buffer:
             # capacity is `num_ranks` times that.
             num_recv = self.num_recv.clone()
             psum_recv_count = self.psum_recv_count.clone()
-            expert_count = self.expert_count.clone()
-            expert_offset = self.expert_offset.clone()
-            expand_overflow = self.expand_overflow.clone()
+            # Only the expanded layout produces these, so deduplicated there is
+            # nothing to snapshot.
+            if self.do_expand:
+                expert_count = self.expert_count.clone()
+                expert_offset = self.expert_offset.clone()
+                expand_overflow = self.expand_overflow.clone()
+            else:
+                expert_count = expert_offset = expand_overflow = None
 
         finish_event = torch.cuda.Event()
         finish_event.record(self.comm_stream)
@@ -572,7 +588,11 @@ class Buffer:
 
         # Allocated on the communication stream, read by the caller on its
         # own: something has to keep them alive across the handover.
-        temporaries = (topk_idx_i32, topk_weights_f32, num_recv, psum_recv_count, expert_count, expert_offset, expand_overflow)
+        temporaries = tuple(
+            t
+            for t in (topk_idx_i32, topk_weights_f32, num_recv, psum_recv_count, expert_count, expert_offset, expand_overflow)
+            if t is not None
+        )
         if async_finish:
             if not allocate_on_comm_stream:
                 for t in temporaries:
@@ -591,9 +611,9 @@ class Buffer:
             self.recv_src_token,
             num_tokens,
             finish_event if async_finish else None,
-            expert_count.clone() if self.do_expand else None,
-            expert_offset.clone() if self.do_expand else None,
-            expand_overflow.clone() if self.do_expand else None,
+            expert_count,
+            expert_offset,
+            expand_overflow,
         )
         event = EventOverlap(
             finish_event if async_finish else None,
@@ -654,7 +674,7 @@ class Buffer:
         # into a fixed-shape buffer is needed.
         x_contig = x if x.is_contiguous() else x.contiguous()
         x_flat = x_contig.reshape(-1)
-        num_sms = handle.num_sms if num_sms == 0 else num_sms
+        num_sms = self._resolve_num_sms(num_sms or handle.num_sms)
         num_tokens = handle.num_tokens
         compute_stream = torch.cuda.current_stream()
         if previous_event is not None:
@@ -663,7 +683,7 @@ class Buffer:
         else:
             self.comm_stream.wait_stream(compute_stream)
         with torch.cuda.stream(self.comm_stream):
-            kernel = self._get_combine_kernel(num_tokens, len(biases))
+            kernel = self._get_combine_kernel(num_tokens, len(biases), num_sms)
             kernel(
                 x_flat,
                 self.recv_src_rank,
