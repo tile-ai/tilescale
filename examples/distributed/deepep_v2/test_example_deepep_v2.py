@@ -45,6 +45,7 @@ def _run(
     masked_ratio: float = 0.0,
     dtype: torch.dtype = torch.bfloat16,
     num_bias: int = 0,
+    scatter_sms: int = 0,
 ):
     rank, num_ranks, group = init_dist(local_rank, num_ranks)
 
@@ -68,6 +69,7 @@ def _run(
         num_experts=num_experts,
         dtype=dtype,
         num_sms=num_sms,
+        scatter_sms=scatter_sms,
     )
     try:
         recv, recv_topk_idx, recv_topk_weights, handle, _ = buf.dispatch(dispatch_x, topk_idx, topk_weights)
@@ -143,6 +145,19 @@ def test_combine_bias_masked(local_rank: int, num_ranks: int):
     """Bias with half the selections masked off: a token with no contributions
     at all must still come back as its bias, not as zero."""
     _run(local_rank, num_ranks, num_tokens=1024, hidden=1024, topk=8, num_experts=256, num_sms=32, masked_ratio=0.5, num_bias=2)
+
+
+@tilelang.testing.requires_cuda
+@distributed_test(nprocs=8)
+def test_wide_scatter_grid(local_rank: int, num_ranks: int):
+    """Dispatch's scatter runs on its own, wider grid than its notify.
+
+    The two phases are separate launches, so the scatter is not bound by the
+    persistent grid the notify needs; `scatter_sms` has to stride the token
+    loop, the padding loop and the stats scan by the grid it actually runs on,
+    and getting any of those wrong drops or double-writes rows.
+    """
+    _run(local_rank, num_ranks, num_tokens=1024, hidden=1024, topk=8, num_experts=256, num_sms=16, scatter_sms=64)
 
 
 @tilelang.testing.requires_cuda

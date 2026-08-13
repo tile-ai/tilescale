@@ -98,6 +98,29 @@ caller's ``expand_factor`` and phase 2 checks it: every rank derives the same
 total from the same count matrix, so an overflow is known *before* any payload
 moves, and the destination is skipped rather than corrupted. See
 ``buffer.py``'s ``expand_overflow``.
+
+**Two launches, not one** (``scatter_sms``). Phases 1-2 compute a layout and
+phase 3 moves the payload, and they are separate kernels: the launch boundary
+gives phase 3 everything phase 2 wrote, which is exactly what the in-kernel
+spin on ``exchange_done`` used to buy. Splitting is free -- 881.7us against
+883.7 fused at the V3 shape, the extra launch absorbed by the spinner it
+replaces -- and it removes a constraint. The fused kernel ends in
+``T.sync_grid()``, so every block has to be resident and the grid is pinned to
+``num_sms``; that pinned the *scatter* too, even though the scatter itself
+needs no grid-wide rendezvous until the reset at the end. Now the scatter can
+be wider: at ``scatter_sms=128`` dispatch is 849.1us bf16 and 487.0 fp8,
+against 883.7 and 507.4 fused, about 4%.
+
+It is not DeepEP's split. DeepEP cuts *after* the movement, into a copy
+epilogue that compacts rows staged per sender; this port's scatter already
+writes rows at their final index, so there is nothing there to extract. The cut
+here is before the movement instead, and the piece it isolates -- 34.7us of
+layout computation, constant across dtypes -- is the piece a cached ``handle=``
+dispatch would skip outright.
+
+``scatter_sms`` defaults to ``num_sms``. A caller who set ``num_sms`` low to
+leave the rest of the device for expert compute did not thereby ask for a
+scatter that takes it back, so widening is opt-in.
 """
 
 import tilelang
@@ -134,6 +157,7 @@ def dispatch_kernel(
     expert_alignment: int = 1,
     zero_padding: bool = True,
     expand_capacity: int = 0,
+    scatter_sms: int = 0,
 ):
     assert threads % 32 == 0
     assert num_experts % num_ranks == 0
@@ -146,6 +170,10 @@ def dispatch_kernel(
     n_dst = num_experts if do_expand else num_ranks
     warps_per_cta = threads // 32
     total_warps = num_sms * warps_per_cta
+    # The scatter is its own launch, so it is free to be wider than the
+    # notify grid. See the module docstring.
+    scatter_blocks = scatter_sms or num_sms
+    scatter_warps = scatter_blocks * warps_per_cta
     cap = num_max_tokens_per_rank
     total_capacity = cap * num_ranks
     # Deduplicated, `total_capacity` is a bound no routing can exceed. Expanded
@@ -398,15 +426,19 @@ def dispatch_kernel(
                 if lane == 0:
                     T.atom_add(exchange_done[0], 1, scope="gpu", sem="release")
 
-            # One spinner per block, not one per warp: every polling lane is
-            # hitting the same line, and `total_warps` of them contend with the
-            # remote traffic phase 2 is trying to get through.
-            if tid == 0:
-                T.wait_ge(exchange_done[0], 1, scope=T.WaitScope.GPU, semantics=T.WaitSemantics.ACQUIRE)
-            T.sync_threads()
+            # Everything phase 2 published is visible to the next kernel
+            # across the launch boundary, which is what the spin on
+            # `exchange_done` used to be for.
+
+        with T.Kernel(scatter_blocks, threads=threads) as bx:
+            tid = T.get_thread_binding()
+            lane = tid % 32
+            local_warp = tid // 32
+            warp = bx * warps_per_cta + local_warp
+            my_rank = T.alloc_var(T.int32, init=T.get_rank())
 
             # ---------------- Phase 3: scatter ----------------
-            for token in T.serial(warp, num_tokens, total_warps):
+            for token in T.serial(warp, num_tokens, scatter_warps):
                 expert = T.alloc_var(T.int32)
                 dst_rank = T.alloc_var(T.int32)
                 slot = T.alloc_var(T.int32)
@@ -483,7 +515,7 @@ def dispatch_kernel(
                 for e in range(experts_per_rank):
                     pad_begin = T.alloc_var(T.int32, init=expert_offset[e] + expert_count[e])
                     pad_end = T.alloc_var(T.int32, init=expert_offset[e + 1])
-                    for row in T.serial(pad_begin + warp, pad_end, total_warps):
+                    for row in T.serial(pad_begin + warp, pad_end, scatter_warps):
                         for i in T.serial(lane, row_width, 32):
                             recv_x[row * row_width + i] = T.Cast(row_dtype, 0)
                         if lane == 0:
@@ -510,7 +542,7 @@ def dispatch_kernel(
             # have landed and this rank's own blocks are past the scatter.
             if collect_expert_stats:
                 n_recv = T.alloc_var(T.int32, init=num_recv[0])
-                for i in T.serial(bx * threads + tid, n_recv * topk, num_sms * threads):
+                for i in T.serial(bx * threads + tid, n_recv * topk, scatter_blocks * threads):
                     local_expert = T.alloc_var(T.int32, init=recv_topk_idx[i])
                     if local_expert >= 0:
                         T.atom_add(recv_expert_stats[local_expert], 1, scope="gpu")

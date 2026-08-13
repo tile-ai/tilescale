@@ -208,6 +208,7 @@ class Buffer:
         combine_threads: int = 1024,
         reduce_threads: int = 256,
         pipeline_depth: int = 2,
+        scatter_sms: int = 0,
         do_expand: bool = False,
         expert_alignment: int = 1,
         zero_padding: bool = True,
@@ -398,6 +399,11 @@ class Buffer:
         # driving its own overlap usually wants: the `synchronize` it does
         # blocks the *host*, so a bounded run-ahead and a fully asynchronous
         # call are not the same thing.
+        # Dispatch's scatter is a separate launch from its notify, so it can
+        # use a wider grid; 0 means the same as `num_sms`. Worth about 4% at
+        # 128 against the default 64, and opt-in because a caller who capped
+        # `num_sms` to leave room for expert compute did not ask for it back.
+        self.scatter_sms = scatter_sms
         self.pipeline_depth = pipeline_depth
         self._in_flight: deque = deque()
 
@@ -413,7 +419,7 @@ class Buffer:
 
     def _get_dispatch_kernel(self, num_tokens: int, collect_expert_stats: bool = False, num_sms: int = 0):
         num_sms = self._resolve_num_sms(num_sms)
-        key = (num_tokens, collect_expert_stats, num_sms)
+        key = (num_tokens, collect_expert_stats, num_sms, self.scatter_sms)
         if key not in self._dispatch_kernels:
             kernel = dispatch_kernel(
                 num_tokens,
@@ -432,6 +438,7 @@ class Buffer:
                 self.expert_alignment,
                 self.zero_padding,
                 self.recv_capacity,
+                self.scatter_sms,
             )
             kernel.compile_group = self.group
             kernel.initialize(allocator=self.allocator)
