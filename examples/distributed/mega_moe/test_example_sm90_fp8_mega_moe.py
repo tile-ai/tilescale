@@ -40,6 +40,7 @@ def test_custom_model_config_and_schedule():
         "block_k": 128,
         "threads": 384,
         "pipeline_stages": 5,
+        "num_experts_per_wave": 16,
     }
     assert l2 == {**l1, "pipeline_stages": 3}
 
@@ -48,6 +49,7 @@ def test_custom_model_config_and_schedule():
     )
     assert family == "compact"
     assert l1["pipeline_stages"] == l2["pipeline_stages"] == 3
+    assert l1["num_experts_per_wave"] == l2["num_experts_per_wave"] == 4
 
     family, l1, l2 = example_sm90_fp8_mega_moe.select_manual_warp_configs(
         7168, 3072, num_tokens=128, num_topk=6, num_experts_per_rank=48, num_sms=132
@@ -55,6 +57,8 @@ def test_custom_model_config_and_schedule():
     assert family == "wide"
     assert l1["pipeline_stages"] == 4
     assert l2["pipeline_stages"] == 3
+    assert l1["num_experts_per_wave"] == l2["num_experts_per_wave"] == 4
+    assert example_sm90_fp8_mega_moe.normalize_experts_per_wave(50, 16) == 25
 
 
 @distributed_test(nprocs=4, require_fabric=True)

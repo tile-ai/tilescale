@@ -65,6 +65,46 @@ def classify_shape(hidden: int, intermediate_hidden: int) -> str:
     return "generic"
 
 
+def normalize_experts_per_wave(num_experts: int, requested: int) -> int:
+    requested = min(max(requested, 1), num_experts)
+    for candidate in range(requested, num_experts + 1):
+        if num_experts % candidate == 0:
+            return candidate
+    return num_experts
+
+
+def select_generic_experts_per_wave(
+    intermediate_hidden: int,
+    routed_tokens: int,
+    num_experts_per_rank: int,
+    num_sms: int,
+    block_m: int = 64,
+    block_n: int = 256,
+) -> int:
+    if routed_tokens < num_experts_per_rank or routed_tokens > 4 * num_experts_per_rank:
+        return num_experts_per_rank
+
+    expected_tokens = ceil_div(routed_tokens, num_experts_per_rank)
+    num_m_blocks = ceil_div(expected_tokens, block_m)
+    num_n_blocks = 2 * intermediate_hidden // block_n
+    blocks_per_expert = num_m_blocks * num_n_blocks
+    requested = min(
+        num_experts_per_rank,
+        ceil_div(2 * num_sms, blocks_per_expert),
+    )
+    if blocks_per_expert < num_sms:
+        max_candidate = min(num_experts_per_rank, 2 * requested)
+        requested = max(
+            range(requested, max_candidate + 1),
+            key=lambda candidate: (
+                1.0
+                if num_experts_per_rank % candidate == 0
+                else (num_experts_per_rank % candidate) / candidate
+            ),
+        )
+    return normalize_experts_per_wave(num_experts_per_rank, requested)
+
+
 def select_manual_warp_configs(
     hidden: int,
     intermediate_hidden: int,
@@ -80,25 +120,59 @@ def select_manual_warp_configs(
 
     l1_stages = 5
     l2_stages = 3
+    generic_experts_per_wave = select_generic_experts_per_wave(
+        intermediate_hidden,
+        routed_tokens,
+        num_experts_per_rank,
+        num_sms,
+    )
+    l1_experts_per_wave = l2_experts_per_wave = generic_experts_per_wave
     if high_sm and shape_family == "compact":
-        if 12 * num_experts_per_rank < routed_tokens <= 32 * num_experts_per_rank:
+        if routed_tokens <= 32 * num_experts_per_rank:
             l1_stages = l2_stages = 3
+            l1_experts_per_wave = l2_experts_per_wave = normalize_experts_per_wave(
+                num_experts_per_rank, 4
+            )
         elif (
             128 * num_experts_per_rank < routed_tokens <= 256 * num_experts_per_rank
             or routed_tokens > 1024 * num_experts_per_rank
         ):
             l1_stages = l2_stages = 4
+            l1_experts_per_wave = l2_experts_per_wave = normalize_experts_per_wave(
+                num_experts_per_rank, 32
+            )
     elif high_sm and shape_family == "wide":
         # BN512/BK256 are profitable in the CUDA kernel, but the manually
         # tuned TileScale BN256/BK128 path is faster for the current WGMMA
         # lowering and remains the generic Wide schedule.
         l1_stages = 4
+        if routed_tokens <= 24 * num_experts_per_rank:
+            # CUDA selects 16 experts here, while TileScale's direct TIR
+            # scheduler is faster with a shorter four-expert scan on H200.
+            l1_experts_per_wave = l2_experts_per_wave = normalize_experts_per_wave(
+                num_experts_per_rank, 4
+            )
+        elif 24 * num_experts_per_rank < routed_tokens <= 48 * num_experts_per_rank:
+            l1_experts_per_wave = normalize_experts_per_wave(num_experts_per_rank, 8)
+            l2_experts_per_wave = normalize_experts_per_wave(num_experts_per_rank, 48)
+        elif routed_tokens > 48 * num_experts_per_rank:
+            l1_experts_per_wave = l2_experts_per_wave = normalize_experts_per_wave(
+                num_experts_per_rank, 16
+            )
 
     common = {"block_m": 64, "block_n": 256, "block_k": 128, "threads": 384}
     return (
         shape_family,
-        {**common, "pipeline_stages": l1_stages},
-        {**common, "pipeline_stages": l2_stages},
+        {
+            **common,
+            "pipeline_stages": l1_stages,
+            "num_experts_per_wave": l1_experts_per_wave,
+        },
+        {
+            **common,
+            "pipeline_stages": l2_stages,
+            "num_experts_per_wave": l2_experts_per_wave,
+        },
     )
 
 
@@ -167,13 +241,18 @@ def fused_l1_swiglu_manual_warp_kernel(
     block_k: int = 128,
     threads: int = 384,
     pipeline_stages: int = 5,
+    num_experts_per_wave: int | None = None,
 ):
     num_experts_per_rank = num_experts // num_ranks
+    num_experts_per_wave = num_experts_per_wave or num_experts_per_rank
+    assert num_experts_per_rank % num_experts_per_wave == 0
     num_scale_groups = hidden // SCALE_GRANULARITY
     num_routes = num_tokens * num_topk
     num_m_blocks = ceil_div(capacity, block_m)
     num_n_blocks = ceil_div(l1_n, block_n)
-    num_compute_tiles = num_experts_per_rank * num_m_blocks * num_n_blocks
+    num_expert_waves = num_experts_per_rank // num_experts_per_wave
+    max_tiles_per_expert_wave = num_experts_per_wave * num_m_blocks * num_n_blocks
+    max_tile_rounds_per_expert_wave = ceil_div(max_tiles_per_expert_wave, num_sms)
     num_k_blocks = hidden // block_k
     # CTA roles: warps 0-1 dispatch, warps 2-3 TMA, then WGMMA warpgroups.
     warp_size = 32
@@ -209,7 +288,9 @@ def fused_l1_swiglu_manual_warp_kernel(
         route_counts: T.Tensor((num_ranks, num_experts), T.int32),
         recv_counts: T.Tensor((num_experts_per_rank,), T.int32),
         route_slots: T.Tensor((num_tokens, num_topk), T.int32),
-        arrivals: T.Tensor((num_experts_per_rank, num_m_blocks), T.uint32),
+        arrivals: T.Tensor(
+            (num_experts_per_rank, ceil_div(capacity, block_m)), T.uint32
+        ),
         recv_x: T.Tensor((num_experts_per_rank, capacity, hidden), T.float8_e4m3fn),
         recv_x_sf: T.Tensor((num_experts_per_rank, capacity, num_scale_groups), T.float32),
         recv_weights: T.Tensor((num_experts_per_rank, capacity), T.float32),
@@ -403,13 +484,55 @@ def fused_l1_swiglu_manual_warp_kernel(
 
             if tx >= producer_begin and tx < producer_end:
                 producer_step = T.alloc_var(T.int32, init=0)
-                for producer_wave in T.serial(ceil_div(num_compute_tiles, num_sms)):
-                    producer_tile = bid + producer_wave * num_sms
-                    if producer_tile < num_compute_tiles:
-                        producer_n = producer_tile % num_n_blocks
-                        producer_m = (producer_tile // num_n_blocks) % num_m_blocks
-                        producer_expert = producer_tile // (num_n_blocks * num_m_blocks)
-                        if producer_n * block_n < l1_n and producer_m * block_m < recv_counts[producer_expert]:
+                producer_wave_tile = T.alloc_var(T.int32, init=bid)
+                for producer_schedule_step in T.serial(
+                    num_expert_waves * max_tile_rounds_per_expert_wave
+                ):
+                    producer_expert_wave = (
+                        producer_schedule_step // max_tile_rounds_per_expert_wave
+                    )
+                    producer_tile_round = (
+                        producer_schedule_step % max_tile_rounds_per_expert_wave
+                    )
+                    producer_wave_begin = producer_expert_wave * num_experts_per_wave
+                    producer_wave_num_tiles = T.alloc_var(T.int32, init=0)
+                    for producer_wave_expert_offset in T.serial(num_experts_per_wave):
+                        producer_wave_expert = (
+                            producer_wave_begin + producer_wave_expert_offset
+                        )
+                        producer_wave_num_tiles += (
+                            T.ceildiv(T.min(recv_counts[producer_wave_expert], capacity), block_m)
+                            * num_n_blocks
+                        )
+
+                    if producer_wave_tile < producer_wave_num_tiles:
+                        producer_tile_offset = T.alloc_var(
+                            T.int32, init=producer_wave_tile
+                        )
+                        producer_expert = T.alloc_var(T.int32, init=-1)
+                        producer_m = T.alloc_var(T.int32, init=0)
+                        producer_n = T.alloc_var(T.int32, init=0)
+                        for producer_wave_expert_offset in T.serial(
+                            num_experts_per_wave
+                        ):
+                            producer_wave_expert = (
+                                producer_wave_begin + producer_wave_expert_offset
+                            )
+                            producer_expert_m_blocks = T.ceildiv(
+                                T.min(recv_counts[producer_wave_expert], capacity), block_m
+                            )
+                            producer_expert_tiles = (
+                                producer_expert_m_blocks * num_n_blocks
+                            )
+                            if producer_expert < 0:
+                                if producer_tile_offset < producer_expert_tiles:
+                                    producer_expert = producer_wave_expert
+                                    producer_m = producer_tile_offset // num_n_blocks
+                                    producer_n = producer_tile_offset % num_n_blocks
+                                else:
+                                    producer_tile_offset -= producer_expert_tiles
+
+                        if producer_expert >= 0 and producer_n * block_n < l1_n:
                             producer_arrivals = T.min(
                                 block_m,
                                 recv_counts[producer_expert] - producer_m * block_m,
@@ -457,6 +580,13 @@ def fused_l1_swiglu_manual_warp_kernel(
                                     )
                                 T.mbarrier_arrive(stage_barriers[producer_stage])
                             producer_step += num_k_blocks
+                            producer_wave_tile += num_sms
+
+                    if (
+                        producer_tile_round == max_tile_rounds_per_expert_wave - 1
+                        and producer_wave_num_tiles > 0
+                    ):
+                        producer_wave_tile -= producer_wave_num_tiles
 
             elif tx >= math_begin:
                 partial = T.alloc_fragment((block_m, block_n), T.float32)
@@ -473,14 +603,56 @@ def fused_l1_swiglu_manual_warp_kernel(
                 act_scale = T.alloc_fragment((block_m,), T.float32)
                 weight_scale = T.alloc_local((2 * num_output_scale_groups,), T.float32)
                 consumer_step = T.alloc_var(T.int32, init=0)
+                consumer_wave_tile = T.alloc_var(T.int32, init=bid)
 
-                for consumer_wave in T.serial(ceil_div(num_compute_tiles, num_sms)):
-                    consumer_tile = bid + consumer_wave * num_sms
-                    if consumer_tile < num_compute_tiles:
-                        consumer_n = consumer_tile % num_n_blocks
-                        consumer_m = (consumer_tile // num_n_blocks) % num_m_blocks
-                        consumer_expert = consumer_tile // (num_n_blocks * num_m_blocks)
-                        if consumer_n * block_n < l1_n and consumer_m * block_m < recv_counts[consumer_expert]:
+                for consumer_schedule_step in T.serial(
+                    num_expert_waves * max_tile_rounds_per_expert_wave
+                ):
+                    consumer_expert_wave = (
+                        consumer_schedule_step // max_tile_rounds_per_expert_wave
+                    )
+                    consumer_tile_round = (
+                        consumer_schedule_step % max_tile_rounds_per_expert_wave
+                    )
+                    consumer_wave_begin = consumer_expert_wave * num_experts_per_wave
+                    consumer_wave_num_tiles = T.alloc_var(T.int32, init=0)
+                    for consumer_wave_expert_offset in T.serial(num_experts_per_wave):
+                        consumer_wave_expert = (
+                            consumer_wave_begin + consumer_wave_expert_offset
+                        )
+                        consumer_wave_num_tiles += (
+                            T.ceildiv(T.min(recv_counts[consumer_wave_expert], capacity), block_m)
+                            * num_n_blocks
+                        )
+
+                    if consumer_wave_tile < consumer_wave_num_tiles:
+                        consumer_tile_offset = T.alloc_var(
+                            T.int32, init=consumer_wave_tile
+                        )
+                        consumer_expert = T.alloc_var(T.int32, init=-1)
+                        consumer_m = T.alloc_var(T.int32, init=0)
+                        consumer_n = T.alloc_var(T.int32, init=0)
+                        for consumer_wave_expert_offset in T.serial(
+                            num_experts_per_wave
+                        ):
+                            consumer_wave_expert = (
+                                consumer_wave_begin + consumer_wave_expert_offset
+                            )
+                            consumer_expert_m_blocks = T.ceildiv(
+                                T.min(recv_counts[consumer_wave_expert], capacity), block_m
+                            )
+                            consumer_expert_tiles = (
+                                consumer_expert_m_blocks * num_n_blocks
+                            )
+                            if consumer_expert < 0:
+                                if consumer_tile_offset < consumer_expert_tiles:
+                                    consumer_expert = consumer_wave_expert
+                                    consumer_m = consumer_tile_offset // num_n_blocks
+                                    consumer_n = consumer_tile_offset % num_n_blocks
+                                else:
+                                    consumer_tile_offset -= consumer_expert_tiles
+
+                        if consumer_expert >= 0 and consumer_n * block_n < l1_n:
                             T.clear(partial)
                             T.clear(accum)
                             for consumer_k in T.serial(num_k_blocks):
@@ -575,6 +747,13 @@ def fused_l1_swiglu_manual_warp_kernel(
                                     consumer_n * (block_n // 2),
                                 ],
                             )
+                            consumer_wave_tile += num_sms
+
+                    if (
+                        consumer_tile_round == max_tile_rounds_per_expert_wave - 1
+                        and consumer_wave_num_tiles > 0
+                    ):
+                        consumer_wave_tile -= consumer_wave_num_tiles
 
     return main
 
@@ -596,10 +775,15 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
     reduce_block_h: int = 128,
     threads: int = 384,
     pipeline_stages: int = 3,
+    num_experts_per_wave: int | None = None,
 ):
+    num_experts_per_wave = num_experts_per_wave or num_experts_per_rank
+    assert num_experts_per_rank % num_experts_per_wave == 0
     num_m_blocks = ceil_div(capacity, block_m)
     num_n_blocks = ceil_div(hidden, block_n)
-    num_compute_tiles = num_experts_per_rank * num_m_blocks * num_n_blocks
+    num_expert_waves = num_experts_per_rank // num_experts_per_wave
+    max_tiles_per_expert_wave = num_experts_per_wave * num_m_blocks * num_n_blocks
+    max_tile_rounds_per_expert_wave = ceil_div(max_tiles_per_expert_wave, num_sms)
     num_k_blocks = intermediate_hidden // block_k
     num_reduce_n_blocks = ceil_div(hidden, reduce_block_h)
     num_reduce_m_blocks = ceil_div(num_tokens, reduce_block_m)
@@ -683,17 +867,58 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
 
             if tx >= producer_begin and tx < producer_end:
                 producer_step = T.alloc_var(T.int32, init=0)
-                for producer_wave in T.serial(ceil_div(num_compute_tiles, num_sms)):
-                    producer_tile = bid + producer_wave * num_sms
-                    if producer_tile < num_compute_tiles:
-                        producer_n = producer_tile % num_n_blocks
-                        producer_m = (producer_tile // num_n_blocks) % num_m_blocks
-                        producer_expert = producer_tile // (num_n_blocks * num_m_blocks)
+                producer_wave_tile = T.alloc_var(T.int32, init=bid)
+                for producer_schedule_step in T.serial(
+                    num_expert_waves * max_tile_rounds_per_expert_wave
+                ):
+                    producer_expert_wave = (
+                        producer_schedule_step // max_tile_rounds_per_expert_wave
+                    )
+                    producer_tile_round = (
+                        producer_schedule_step % max_tile_rounds_per_expert_wave
+                    )
+                    producer_wave_begin = producer_expert_wave * num_experts_per_wave
+                    producer_wave_num_tiles = T.alloc_var(T.int32, init=0)
+                    for producer_wave_expert_offset in T.serial(num_experts_per_wave):
+                        producer_wave_expert = (
+                            producer_wave_begin + producer_wave_expert_offset
+                        )
+                        producer_wave_num_tiles += (
+                            T.ceildiv(T.min(recv_counts[producer_wave_expert], capacity), block_m)
+                            * num_n_blocks
+                        )
+
+                    if producer_wave_tile < producer_wave_num_tiles:
+                        producer_tile_offset = T.alloc_var(
+                            T.int32, init=producer_wave_tile
+                        )
+                        producer_expert = T.alloc_var(T.int32, init=-1)
+                        producer_m = T.alloc_var(T.int32, init=0)
+                        producer_n = T.alloc_var(T.int32, init=0)
+                        for producer_wave_expert_offset in T.serial(
+                            num_experts_per_wave
+                        ):
+                            producer_wave_expert = (
+                                producer_wave_begin + producer_wave_expert_offset
+                            )
+                            producer_expert_m_blocks = T.ceildiv(
+                                T.min(recv_counts[producer_wave_expert], capacity), block_m
+                            )
+                            producer_expert_tiles = (
+                                producer_expert_m_blocks * num_n_blocks
+                            )
+                            if producer_expert < 0:
+                                if producer_tile_offset < producer_expert_tiles:
+                                    producer_expert = producer_wave_expert
+                                    producer_m = producer_tile_offset // num_n_blocks
+                                    producer_n = producer_tile_offset % num_n_blocks
+                                else:
+                                    producer_tile_offset -= producer_expert_tiles
+
                         if (
-                            producer_expert < num_experts_per_rank
+                            producer_expert >= 0
+                            and producer_expert < num_experts_per_rank
                             and producer_n * block_n < hidden
-                            and producer_m * block_m < capacity
-                            and producer_m * block_m < recv_counts[producer_expert]
                             and num_k_blocks * block_k == intermediate_hidden
                         ):
                             for producer_k in T.serial(num_k_blocks):
@@ -728,6 +953,13 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                                 ]
                                 T.mbarrier_arrive(stage_barriers[producer_stage])
                             producer_step += num_k_blocks
+                            producer_wave_tile += num_sms
+
+                    if (
+                        producer_tile_round == max_tile_rounds_per_expert_wave - 1
+                        and producer_wave_num_tiles > 0
+                    ):
+                        producer_wave_tile -= producer_wave_num_tiles
 
             elif tx >= math_begin:
                 partial = T.alloc_fragment((block_m, block_n), T.float32)
@@ -735,21 +967,62 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                 act_scale = T.alloc_fragment((block_m,), T.float32)
                 weight_scale = T.alloc_local((2,), T.float32)
                 consumer_step = T.alloc_var(T.int32, init=0)
+                consumer_wave_tile = T.alloc_var(T.int32, init=bid)
                 scatter_dst_rank = T.alloc_var(T.int32, init=0)
                 scatter_dst_token = T.alloc_var(T.int32, init=0)
                 scatter_dst_topk = T.alloc_var(T.int32, init=0)
 
-                for consumer_wave in T.serial(ceil_div(num_compute_tiles, num_sms)):
-                    consumer_tile = bid + consumer_wave * num_sms
-                    if consumer_tile < num_compute_tiles:
-                        consumer_n = consumer_tile % num_n_blocks
-                        consumer_m = (consumer_tile // num_n_blocks) % num_m_blocks
-                        consumer_expert = consumer_tile // (num_n_blocks * num_m_blocks)
+                for consumer_schedule_step in T.serial(
+                    num_expert_waves * max_tile_rounds_per_expert_wave
+                ):
+                    consumer_expert_wave = (
+                        consumer_schedule_step // max_tile_rounds_per_expert_wave
+                    )
+                    consumer_tile_round = (
+                        consumer_schedule_step % max_tile_rounds_per_expert_wave
+                    )
+                    consumer_wave_begin = consumer_expert_wave * num_experts_per_wave
+                    consumer_wave_num_tiles = T.alloc_var(T.int32, init=0)
+                    for consumer_wave_expert_offset in T.serial(num_experts_per_wave):
+                        consumer_wave_expert = (
+                            consumer_wave_begin + consumer_wave_expert_offset
+                        )
+                        consumer_wave_num_tiles += (
+                            T.ceildiv(T.min(recv_counts[consumer_wave_expert], capacity), block_m)
+                            * num_n_blocks
+                        )
+
+                    if consumer_wave_tile < consumer_wave_num_tiles:
+                        consumer_tile_offset = T.alloc_var(
+                            T.int32, init=consumer_wave_tile
+                        )
+                        consumer_expert = T.alloc_var(T.int32, init=-1)
+                        consumer_m = T.alloc_var(T.int32, init=0)
+                        consumer_n = T.alloc_var(T.int32, init=0)
+                        for consumer_wave_expert_offset in T.serial(
+                            num_experts_per_wave
+                        ):
+                            consumer_wave_expert = (
+                                consumer_wave_begin + consumer_wave_expert_offset
+                            )
+                            consumer_expert_m_blocks = T.ceildiv(
+                                T.min(recv_counts[consumer_wave_expert], capacity), block_m
+                            )
+                            consumer_expert_tiles = (
+                                consumer_expert_m_blocks * num_n_blocks
+                            )
+                            if consumer_expert < 0:
+                                if consumer_tile_offset < consumer_expert_tiles:
+                                    consumer_expert = consumer_wave_expert
+                                    consumer_m = consumer_tile_offset // num_n_blocks
+                                    consumer_n = consumer_tile_offset % num_n_blocks
+                                else:
+                                    consumer_tile_offset -= consumer_expert_tiles
+
                         if (
-                            consumer_expert < num_experts_per_rank
+                            consumer_expert >= 0
+                            and consumer_expert < num_experts_per_rank
                             and consumer_n * block_n < hidden
-                            and consumer_m * block_m < capacity
-                            and consumer_m * block_m < recv_counts[consumer_expert]
                             and num_k_blocks * block_k == intermediate_hidden
                         ):
                             T.clear(partial)
@@ -825,6 +1098,13 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                                             dst_pe=dst_rank,
                                             unroll_factor=1,
                                         )
+                            consumer_wave_tile += num_sms
+
+                    if (
+                        consumer_tile_round == max_tile_rounds_per_expert_wave - 1
+                        and consumer_wave_num_tiles > 0
+                    ):
+                        consumer_wave_tile -= consumer_wave_num_tiles
 
             T.fence_sys()
             T.sync_grid()
@@ -1006,6 +1286,11 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         num_experts_per_rank,
         num_sms,
     )
+    for phase, config in (("l1", l1_config), ("l2", l2_config)):
+        requested = getattr(args, f"{phase}_experts_per_wave", None)
+        if requested is not None:
+            assert requested > 0 and num_experts_per_rank % requested == 0
+            config["num_experts_per_wave"] = requested
     kernel_specs = [
         fused_l1_swiglu_manual_warp_kernel(
             num_tokens,
@@ -1201,7 +1486,9 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             print(
                 f"tilescale sm90 fp8 mega moe: model={model_name} family={shape_family} "
                 f"M={num_tokens} H={hidden} IH={intermediate_hidden} E={num_experts} "
-                f"topk={num_topk} capacity={capacity} latency={latency * 1000:.1f} us"
+                f"topk={num_topk} capacity={capacity} "
+                f"epw={l1_config['num_experts_per_wave']}/{l2_config['num_experts_per_wave']} "
+                f"latency={latency * 1000:.1f} us"
             )
 
     allocator.close()
@@ -1218,6 +1505,8 @@ if __name__ == "__main__":
     parser.add_argument("--num-topk", type=int, default=None)
     parser.add_argument("--num-tokens", type=int, default=64)
     parser.add_argument("--capacity", type=int, default=None)
+    parser.add_argument("--l1-experts-per-wave", type=int, default=None)
+    parser.add_argument("--l2-experts-per-wave", type=int, default=None)
     parser.add_argument("--activation-clamp", type=float, default=10.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--diff-tol", type=float, default=0.01)
