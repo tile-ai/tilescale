@@ -175,14 +175,29 @@ def fused_l1_swiglu_manual_warp_kernel(
     num_n_blocks = ceil_div(l1_n, block_n)
     num_compute_tiles = num_experts_per_rank * num_m_blocks * num_n_blocks
     num_k_blocks = hidden // block_k
-    num_math_threads = threads - 128
+    # CTA roles: warps 0-1 dispatch, warps 2-3 TMA, then WGMMA warpgroups.
+    warp_size = 32
+    warpgroup_size = 128
+    dispatch_warps = 2
+    producer_warps = 2
+    frontend_warps = dispatch_warps + producer_warps
+    dispatch_threads = dispatch_warps * warp_size
+    producer_begin = dispatch_threads
+    producer_threads = producer_warps * warp_size
+    producer_end = frontend_warps * warp_size
+    math_begin = producer_end
+    num_math_threads = threads - math_begin
+    assert producer_end == producer_begin + producer_threads == warpgroup_size
+    assert num_math_threads > 0 and num_math_threads % warpgroup_size == 0
+    math_warpgroups = num_math_threads // warpgroup_size
+    assert math_warpgroups in (2, 4)
     num_output_scale_groups = block_n // (2 * SCALE_GRANULARITY)
     num_l1_scale_groups = l1_n // (2 * SCALE_GRANULARITY)
     tma_block_n = min(block_n, 256)
     num_tma_n_blocks = block_n // tma_block_n
     frontend_registers = 32 if num_math_threads == 512 else 48
     math_registers = 112 if num_math_threads == 512 else 208
-    dispatch_thread = 0
+    dispatch_leader_lane = 0
     route_threads = 256
 
     @T.prim_func
@@ -229,7 +244,7 @@ def fused_l1_swiglu_manual_warp_kernel(
             )
             out_shared = T.alloc_shared((block_m, block_n // 2), T.float8_e4m3fn)
             stage_barriers = T.alloc_barrier(
-                [64] * pipeline_stages + [num_math_threads] * pipeline_stages
+                [producer_threads] * pipeline_stages + [num_math_threads] * pipeline_stages
             )
 
             if bid == 0:
@@ -299,16 +314,20 @@ def fused_l1_swiglu_manual_warp_kernel(
 
             T.sync_grid()
 
-            if tx < 128:
+            if tx < math_begin:
                 T.dec_max_nreg(frontend_registers)
             else:
                 T.inc_max_nreg(math_registers)
 
-            dispatch_warp = tx // 32
-            dispatch_lane = tx % 32
-            if tx < 64:
-                for metadata_wave in T.serial(ceil_div(num_routes, num_sms * 64)):
-                    metadata_route = bid * 64 + tx + metadata_wave * num_sms * 64
+            dispatch_warp = tx // warp_size
+            dispatch_lane = tx % warp_size
+            if tx < dispatch_threads:
+                for metadata_wave in T.serial(ceil_div(num_routes, num_sms * dispatch_threads)):
+                    metadata_route = (
+                        bid * dispatch_threads
+                        + tx
+                        + metadata_wave * num_sms * dispatch_threads
+                    )
                     if metadata_route < num_routes:
                         metadata_token = metadata_route // num_topk
                         metadata_topk = metadata_route % num_topk
@@ -340,13 +359,16 @@ def fused_l1_swiglu_manual_warp_kernel(
                                 dst_pe=metadata_rank,
                             )
 
-            if tx < 64:
-                for pull_wave in T.serial(ceil_div(num_experts_per_rank * capacity, num_sms * 2)):
-                    pull_idx = bid * 2 + dispatch_warp + pull_wave * num_sms * 2
+                for pull_wave in T.serial(ceil_div(num_experts_per_rank * capacity, num_sms * dispatch_warps)):
+                    pull_idx = (
+                        bid * dispatch_warps
+                        + dispatch_warp
+                        + pull_wave * num_sms * dispatch_warps
+                    )
                     pull_expert = pull_idx // capacity
                     pull_slot = pull_idx % capacity
                     if pull_expert < num_experts_per_rank and pull_slot < recv_counts[pull_expert]:
-                        if dispatch_lane == dispatch_thread:
+                        if dispatch_lane == dispatch_leader_lane:
                             T.wait_ge(
                                 src_ranks[pull_expert, pull_slot],
                                 0,
@@ -371,7 +393,7 @@ def fused_l1_swiglu_manual_warp_kernel(
                             unroll_factor=8,
                         )
                         T.sync_warp()
-                        if dispatch_lane == dispatch_thread:
+                        if dispatch_lane == dispatch_leader_lane:
                             T.atom_add(
                                 arrivals[pull_expert, pull_slot // block_m],
                                 1,
@@ -379,7 +401,7 @@ def fused_l1_swiglu_manual_warp_kernel(
                                 sem="release",
                             )
 
-            if tx >= 64 and tx < 128:
+            if tx >= producer_begin and tx < producer_end:
                 producer_step = T.alloc_var(T.int32, init=0)
                 for producer_wave in T.serial(ceil_div(num_compute_tiles, num_sms)):
                     producer_tile = bid + producer_wave * num_sms
@@ -392,14 +414,14 @@ def fused_l1_swiglu_manual_warp_kernel(
                                 block_m,
                                 recv_counts[producer_expert] - producer_m * block_m,
                             )
-                            if tx == 64:
+                            if tx == producer_begin:
                                 T.wait_ge(
                                     arrivals[producer_expert, producer_m],
                                     producer_arrivals,
                                     scope=T.WaitScope.GPU,
                                     semantics=T.WaitSemantics.ACQUIRE,
                                 )
-                            T.sync_threads(5, 64)
+                            T.sync_threads(5, producer_threads)
                             for producer_k in T.serial(num_k_blocks):
                                 producer_stage = (producer_step + producer_k) % pipeline_stages
                                 producer_phase = ((producer_step + producer_k) // pipeline_stages) & 1
@@ -436,7 +458,7 @@ def fused_l1_swiglu_manual_warp_kernel(
                                 T.mbarrier_arrive(stage_barriers[producer_stage])
                             producer_step += num_k_blocks
 
-            elif tx >= 128:
+            elif tx >= math_begin:
                 partial = T.alloc_fragment((block_m, block_n), T.float32)
                 accum = T.alloc_fragment((block_m, block_n), T.bfloat16)
                 gate = T.alloc_fragment((block_m, block_n // 2), T.float32)
@@ -582,6 +604,26 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
     num_reduce_n_blocks = ceil_div(hidden, reduce_block_h)
     num_reduce_m_blocks = ceil_div(num_tokens, reduce_block_m)
     num_reduce_tiles = num_reduce_n_blocks * num_reduce_m_blocks
+    # GEMM roles: warps 0-1 idle, warps 2-3 TMA, then two WGMMA
+    # warpgroups. After the grid barrier, warps 0-3 perform top-k reduction.
+    warp_size = 32
+    warpgroup_size = 128
+    reduce_warps = 4
+    producer_begin_warp = 2
+    producer_warps = 2
+    math_begin_warp = 4
+    math_warpgroups = 2
+    reduce_threads = reduce_warps * warp_size
+    producer_begin = producer_begin_warp * warp_size
+    producer_threads = producer_warps * warp_size
+    producer_end = producer_begin + producer_threads
+    math_begin = math_begin_warp * warp_size
+    num_math_threads = math_warpgroups * warpgroup_size
+    math_warps = num_math_threads // warp_size
+    rows_per_math_warp = block_m // math_warps
+    assert producer_end == math_begin == reduce_threads
+    assert block_m % math_warps == 0
+    assert threads == math_begin + num_math_threads
 
     @T.prim_func
     def main(
@@ -630,14 +672,16 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
             a_sf_shared = T.alloc_shared((pipeline_stages, block_m), T.float32)
             out_shared = T.alloc_shared((block_m, block_n), T.bfloat16)
             reduce_shared = T.alloc_shared((reduce_block_m, reduce_block_h), T.bfloat16)
-            stage_barriers = T.alloc_barrier([64] * pipeline_stages + [256] * pipeline_stages)
+            stage_barriers = T.alloc_barrier(
+                [producer_threads] * pipeline_stages + [num_math_threads] * pipeline_stages
+            )
 
-            if tx < 128:
+            if tx < math_begin:
                 T.dec_max_nreg(48)
             else:
                 T.inc_max_nreg(208)
 
-            if tx >= 64 and tx < 128:
+            if tx >= producer_begin and tx < producer_end:
                 producer_step = T.alloc_var(T.int32, init=0)
                 for producer_wave in T.serial(ceil_div(num_compute_tiles, num_sms)):
                     producer_tile = bid + producer_wave * num_sms
@@ -677,15 +721,15 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                                     b_shared[producer_stage, :, :],
                                     barrier=stage_barriers[producer_stage],
                                 )
-                                a_sf_shared[producer_stage, tx - 64] = a_sf[
+                                a_sf_shared[producer_stage, tx - producer_begin] = a_sf[
                                     producer_expert,
-                                    producer_m * block_m + tx - 64,
+                                    producer_m * block_m + tx - producer_begin,
                                     producer_k,
                                 ]
                                 T.mbarrier_arrive(stage_barriers[producer_stage])
                             producer_step += num_k_blocks
 
-            elif tx >= 128:
+            elif tx >= math_begin:
                 partial = T.alloc_fragment((block_m, block_n), T.float32)
                 accum = T.alloc_fragment((block_m, block_n), T.bfloat16)
                 act_scale = T.alloc_fragment((block_m,), T.float32)
@@ -748,12 +792,12 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                                 T.mbarrier_arrive(stage_barriers[pipeline_stages + consumer_stage])
                             consumer_step += num_k_blocks
                             T.copy(accum, out_shared)
-                            scatter_warp = (tx - 128) // 32
-                            for row_in_warp in T.serial(block_m // 8):
-                                row = scatter_warp * (block_m // 8) + row_in_warp
+                            scatter_warp = (tx - math_begin) // warp_size
+                            for row_in_warp in T.serial(rows_per_math_warp):
+                                row = scatter_warp * rows_per_math_warp + row_in_warp
                                 pool_row = consumer_m * block_m + row
                                 if pool_row < recv_counts[consumer_expert]:
-                                    if tx % 32 == 0:
+                                    if tx % warp_size == 0:
                                         scatter_dst_rank = src_ranks[consumer_expert, pool_row]
                                         scatter_dst_token = src_tokens[consumer_expert, pool_row]
                                         scatter_dst_topk = src_topk[consumer_expert, pool_row]
@@ -788,7 +832,7 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                 T.barrier_blocks(barrier[0])
             T.sync_grid()
 
-            if tx < 128:
+            if tx < reduce_threads:
                 reduce_accum = T.alloc_fragment((reduce_block_m, reduce_block_h), T.float32)
                 for reduce_wave in T.serial(ceil_div(num_reduce_tiles, num_sms)):
                     reduce_tile = bid + reduce_wave * num_sms
