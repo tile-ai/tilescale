@@ -336,21 +336,39 @@ second row at ~892 µs rather than 1538. `previous_event` does not change it
 hide the same ~35 µs -- so it is not SM starvation and not the
 `wait_stream` dependency either.
 
-The cooperative launch was the obvious suspect -- both dispatch kernels end in
-`T.sync_grid()`, and a cooperative grid does not co-schedule with other work --
-and it is wrong. Tried: the end-of-call reset is the only thing needing a
-grid-wide rendezvous, and moving it to the front of the *next* call makes the
-scatter an ordinary launch (correct on all 8 ranks). Overlap went from 1538.4us
-to 1552.8, i.e. nothing, so that experiment was discarded. Launching the
-scatter with more blocks than the device has SMs, which dropping the
-rendezvous also permits, is worse too: 450us at 128 blocks against 621 at 256
-and 541 at 512.
+The cause is now known, and it is this port's, not the workload's. DeepEP run
+through the identical harness on the same idle machine hides 81% of the same
+GEMM:
 
-So four explanations have been measured and rejected -- the `wait_stream`
-dependency, SM starvation, proportionality, and the cooperative launch. What
-remains untested is plain resource contention: the collective is bandwidth-
-bound and gated by its slowest rank, and a large GEMM on *every* rank slows
-every rank's participation, so there may be little to win here at this shape.
+| | compute | dispatch | serial | overlapped |
+|---|---|---|---|---|
+| DeepEP | 672.1 µs | 1051.2 | 1724.7 | **1177.8** |
+| this port | 674.5 µs | 891.8 | 1566.0 | 1538.1 |
+
+Note the reversal: this port is faster serially and 23% slower overlapped.
+
+`dispatch` opens with `comm_stream.wait_stream(compute_stream)` whenever no
+`previous_event` is given, which makes the collective wait for *everything*
+already queued on the caller's stream -- including work it does not depend on.
+Recording an event once before any compute and passing it as `previous_event`,
+so the comm stream never waits on the compute stream, collapses the overlapped
+time to 675 µs: the collective disappears behind the GEMM entirely. That
+configuration is not itself usable -- it also lets successive dispatches
+overlap each other on the same buffers -- but it isolates the cause.
+
+DeepEP does not take that blanket dependency; with `allocate_on_comm_stream`
+the caller owns the ordering and states it through `previous_event`. Matching
+that would mean `async_finish` no longer implying a wait on the compute
+stream, which is a real semantic change: safe today, and it would become the
+caller's responsibility not to hand in a tensor the compute stream is still
+writing.
+
+Four things measured and rejected along the way: SM starvation (8, 16 and 32
+SMs all hide the same ~35 µs), proportionality (99 µs and 673 µs of compute
+hide the same absolute amount), `previous_event` recorded *inside* the loop
+(1538.7 -- it still covers the previous iteration's GEMM), and the cooperative
+launch (moving the reset to the front of the next call makes the scatter an
+ordinary launch, correct on all 8 ranks, and changes nothing: 1552.8).
 
 Note that `async_finish` changes neither column. It moves who waits, not how
 long the work takes: measured, the same dispatch is 901.2 µs synchronous and
