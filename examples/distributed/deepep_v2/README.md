@@ -336,39 +336,49 @@ second row at ~892 µs rather than 1538. `previous_event` does not change it
 hide the same ~35 µs -- so it is not SM starvation and not the
 `wait_stream` dependency either.
 
-The cause is now known, and it is this port's, not the workload's. DeepEP run
-through the identical harness on the same idle machine hides 81% of the same
-GEMM:
+The gap is this port's, not the workload's. DeepEP run through the identical
+harness on the same idle machine hides 81% of the same GEMM:
 
 | | compute | dispatch | serial | overlapped |
 |---|---|---|---|---|
-| DeepEP | 672.1 µs | 1051.2 | 1724.7 | **1177.8** |
-| this port | 674.5 µs | 891.8 | 1566.0 | 1538.1 |
+| DeepEP | 672.1 us | 1051.2 | 1724.7 | **1177.8** |
+| this port | 674.5 us | 891.8 | 1566.0 | 1538.1 |
 
 Note the reversal: this port is faster serially and 23% slower overlapped.
 
-`dispatch` opens with `comm_stream.wait_stream(compute_stream)` whenever no
-`previous_event` is given, which makes the collective wait for *everything*
-already queued on the caller's stream -- including work it does not depend on.
-Recording an event once before any compute and passing it as `previous_event`,
-so the comm stream never waits on the compute stream, collapses the overlapped
-time to 675 µs: the collective disappears behind the GEMM entirely. That
-configuration is not itself usable -- it also lets successive dispatches
-overlap each other on the same buffers -- but it isolates the cause.
+The cause is **not yet known**, and six explanations have been measured and
+rejected:
 
-DeepEP does not take that blanket dependency; with `allocate_on_comm_stream`
-the caller owns the ordering and states it through `previous_event`. Matching
-that would mean `async_finish` no longer implying a wait on the compute
-stream, which is a real semantic change: safe today, and it would become the
-caller's responsibility not to hand in a tensor the compute stream is still
-writing.
+- *SM starvation* -- 8, 16 and 32 SMs for the collective all hide the same
+  ~35 us.
+- *Proportionality* -- 99 us and 673 us of compute hide the same absolute
+  amount.
+- *The cooperative launch* -- the end-of-call reset is the only thing needing a
+  grid-wide rendezvous, and moving it to the front of the next call makes the
+  scatter an ordinary launch (correct on 8 ranks). No change: 1552.8.
+- *Grids beyond the SM count*, which dropping that rendezvous permits -- worse:
+  450 us at 128 blocks against 621 at 256 and 541 at 512.
+- *`previous_event` recorded inside the loop* -- 1538.7, because the event still
+  covers the previous iteration's GEMM.
+- *`comm_stream.wait_stream(compute_stream)` at the top of `dispatch`* --
+  DeepEP's `stream_control_prologue` takes exactly the same dependency when no
+  `previous_event` is given, and overlaps anyway.
 
-Four things measured and rejected along the way: SM starvation (8, 16 and 32
-SMs all hide the same ~35 µs), proportionality (99 µs and 673 µs of compute
-hide the same absolute amount), `previous_event` recorded *inside* the loop
-(1538.7 -- it still covers the previous iteration's GEMM), and the cooperative
-launch (moving the reset to the front of the next call makes the scatter an
-ordinary launch, correct on all 8 ranks, and changes nothing: 1552.8).
+What is known is the shape of it. The amount hidden is a constant ~30 us across
+a 14x range of dispatch length -- 63 us for a notify-only dispatch against
+892 us for a full one -- and a 7x range of compute. That is the signature of
+overlapping the enqueue gap and nothing else: no kernel-level concurrency at
+all. It also rules out the scatter specifically, and rules out barrier
+spinning, since a dispatch that is almost entirely barriers hides the same
+absolute amount as one moving 850 us of payload.
+
+Removing the compute-stream dependency entirely -- recording an event once
+before any compute and passing it as `previous_event`, so the communication
+stream never waits on the compute stream -- collapses the overlapped time to
+675 us, the collective vanishing behind the GEMM. That configuration is not
+usable as it stands, since it also lets successive dispatches overlap each
+other on shared buffers, but it shows the concurrency is there to be had once
+something stops serialising the two streams.
 
 Note that `async_finish` changes neither column. It moves who waits, not how
 long the work takes: measured, the same dispatch is 901.2 µs synchronous and
