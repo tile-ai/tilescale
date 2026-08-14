@@ -110,7 +110,12 @@ Splitting the kernel is what makes this worth anything. Fused, notify was
 welded to the scatter and skipping it meant skipping the payload too; DeepEP
 has the same problem from the other direction and its cached dispatch measures
 441-444us against 437-439 uncached -- i.e. it saves host work, not GPU time.
-Here the whole 34us kernel disappears.
+
+Measured here, three clean samples each: fp8 dispatch 514 -> 497us whole call
+(3.3%), bf16 888 -> 871 (2.0%). Not the whole 36us notify kernel, because the
+cached scatter is about 10us slower than the uncached one -- the entry barrier
+moves into it rather than disappearing, being about peers not overwriting data
+this rank is still reading, which holds however the layout was obtained.
 
 The entry barrier moves with it. It stops a peer's next round from overwriting
 data this rank has not finished reading, which is needed whether or not the
