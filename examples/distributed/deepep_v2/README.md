@@ -336,11 +336,21 @@ second row at ~892 µs rather than 1538. `previous_event` does not change it
 hide the same ~35 µs -- so it is not SM starvation and not the
 `wait_stream` dependency either.
 
-The likely cause is that both dispatch kernels end in `T.sync_grid()`, which
-makes them cooperative launches, and a cooperative grid does not co-schedule
-with other work. If so the fix is structural: the only thing needing a
-grid-wide rendezvous is the end-of-call reset, so moving that to the front of
-the *next* call would let the scatter be an ordinary launch. Untested.
+The cooperative launch was the obvious suspect -- both dispatch kernels end in
+`T.sync_grid()`, and a cooperative grid does not co-schedule with other work --
+and it is wrong. Tried: the end-of-call reset is the only thing needing a
+grid-wide rendezvous, and moving it to the front of the *next* call makes the
+scatter an ordinary launch (correct on all 8 ranks). Overlap went from 1538.4us
+to 1552.8, i.e. nothing, so that experiment was discarded. Launching the
+scatter with more blocks than the device has SMs, which dropping the
+rendezvous also permits, is worse too: 450us at 128 blocks against 621 at 256
+and 541 at 512.
+
+So four explanations have been measured and rejected -- the `wait_stream`
+dependency, SM starvation, proportionality, and the cooperative launch. What
+remains untested is plain resource contention: the collective is bandwidth-
+bound and gated by its slowest rank, and a large GEMM on *every* rank slows
+every rank's participation, so there may be little to win here at this shape.
 
 Note that `async_finish` changes neither column. It moves who waits, not how
 long the work takes: measured, the same dispatch is 901.2 µs synchronous and
