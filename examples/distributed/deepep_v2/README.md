@@ -319,6 +319,29 @@ overall by about 9% because it has no compaction pass to pay for. Host overhead
 is the difference between those kernel times and the whole-call figures above:
 8–10 µs.
 
+**What `async_finish` currently buys, measured.** Not much, and this is worth
+knowing before building a schedule around it. Running an independent GEMM
+beside a bf16 dispatch on an idle machine:
+
+| | compute | dispatch | serial | overlapped |
+|---|---|---|---|---|
+| gemm 4096 | 98.9 µs | 891.6 | 988.5 | 949.6 |
+| gemm 8192 | 672.4 µs | 891.8 | 1568.9 | 1538.4 |
+
+The amount hidden is ~30 µs in both, and in the second case that is 5% of a
+673 µs GEMM: it does not scale with the compute, so what is being hidden is
+launch and host overhead, not the collective. Perfect overlap would put the
+second row at ~892 µs rather than 1538. `previous_event` does not change it
+(1538.7), and neither does giving the collective fewer SMs -- 8, 16 and 32 all
+hide the same ~35 µs -- so it is not SM starvation and not the
+`wait_stream` dependency either.
+
+The likely cause is that both dispatch kernels end in `T.sync_grid()`, which
+makes them cooperative launches, and a cooperative grid does not co-schedule
+with other work. If so the fix is structural: the only thing needing a
+grid-wide rendezvous is the end-of-call reset, so moving that to the front of
+the *next* call would let the scatter be an ordinary launch. Untested.
+
 Note that `async_finish` changes neither column. It moves who waits, not how
 long the work takes: measured, the same dispatch is 901.2 µs synchronous and
 901.4 µs asynchronous with the event waited on. Timing an asynchronous call
