@@ -46,6 +46,7 @@ def _run(
     dtype: torch.dtype = torch.bfloat16,
     num_bias: int = 0,
     scatter_sms: int = 0,
+    do_expand: bool = False,
 ):
     rank, num_ranks, group = init_dist(local_rank, num_ranks)
 
@@ -70,6 +71,8 @@ def _run(
         dtype=dtype,
         num_sms=num_sms,
         scatter_sms=scatter_sms,
+        do_expand=do_expand,
+        expand_factor=float(min(topk, num_experts // num_ranks)) if do_expand else 1.0,
     )
     try:
         recv, recv_topk_idx, recv_topk_weights, handle, _ = buf.dispatch(dispatch_x, topk_idx, topk_weights)
@@ -220,6 +223,37 @@ def test_cached_dispatch(local_rank: int, num_ranks: int):
     finally:
         buf.close()
         dist.destroy_process_group()
+
+
+@tilelang.testing.requires_cuda
+@distributed_test(nprocs=8)
+def test_expanded_round_trip(local_rank: int, num_ranks: int):
+    """The expanded layout end to end, dispatch through combine.
+
+    A token with two experts on one rank has two received rows, and combine has
+    to sum them before sending -- one row per (rank, token) is all
+    `comm_x` has slots for. topk=8 over 8 ranks makes collisions common, so
+    the summing path is exercised rather than incidentally avoided.
+    """
+    _run(local_rank, num_ranks, num_tokens=1024, hidden=1024, topk=8, num_experts=256, num_sms=16, do_expand=True)
+
+
+@tilelang.testing.requires_cuda
+@distributed_test(nprocs=8)
+def test_expanded_round_trip_masked(local_rank: int, num_ranks: int):
+    """Same, with half the selections unset and the segments aligned, so the
+    padding rows dispatch writes have to be skipped by the grouping pass."""
+    _run(
+        local_rank,
+        num_ranks,
+        num_tokens=512,
+        hidden=512,
+        topk=8,
+        num_experts=256,
+        num_sms=16,
+        masked_ratio=0.5,
+        do_expand=True,
+    )
 
 
 @tilelang.testing.requires_cuda

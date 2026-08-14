@@ -131,6 +131,24 @@ other rank inside the kernel's cross-rank barrier, and it is orthogonal to
 DeepEP's `combine` returns a third value, `combined_topk_weights`, which has no
 counterpart here for the reason given under *Not implemented*.
 
+`dispatch(x, handle=h)` reuses the layout `h` was built with and skips the
+notify kernel outright -- DeepEP's cached dispatch. Phases 1-2 depend only on
+the routing, so a call whose `topk_idx` has not changed is recomputing
+something it already has. As in DeepEP, `topk_idx` and `topk_weights` must be
+`None`; the handle replays its own copies.
+
+Measured, three clean samples each: fp8 dispatch 514 -> 497 µs (3.3%), bf16 888
+-> 871 µs (2.0%). Less than the 36 µs the notify kernel costs, because the
+cached scatter runs about 10 µs slower than the uncached one: the entry barrier
+moves into it rather than disappearing, being about peers not overwriting data
+this rank is still reading, which holds however the layout was obtained.
+
+A handle is only good until the next layout-computing dispatch. `send_base` and
+`send_rank_mask` are updated in place, so a stale handle would not fail, it
+would route to the wrong slots and return plausible numbers -- dispatch
+therefore tracks a layout generation and rejects a handle that no longer
+matches.
+
 `dispatch(..., cumulative_local_expert_recv_stats=t)` adds this rank's received
 token count per local expert into `t`, a `[num_experts // num_ranks]` uint32
 tensor -- DeepEP's load-balance counter. It accumulates rather than overwrites,
@@ -313,7 +331,6 @@ a design decision here -- each would be an additive parameter or output:
 
 | | |
 |---|---|
-| `handle=` on dispatch | reuse a cached layout and skip the notify phase entirely |
 | `kAllowMultipleReduction` | combine-side local sum across several experts on one rank -- what combine needs before it can consume an expanded dispatch, see below |
 | `deterministic` mode | DeepEP has a separate prologue for it |
 | `use_tma_aligned_col_major_sf` | column-major scale-factor layout for a downstream GEMM |

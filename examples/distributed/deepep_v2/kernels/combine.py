@@ -14,6 +14,24 @@ Gate weights are *not* applied here. Like DeepEP, weighting and the local sum
 across several experts on one rank belong to the expert epilogue; ``x`` is
 already the per-compact-row contribution.
 
+**The expanded layout** (``do_expand``). The store-back slot
+``comm_x[rank][src_token]`` is unique only because a deduplicated dispatch
+gives a token one row per destination rank. Expanded, a token with two experts
+here has two rows and they would collide.
+
+DeepEP's answer is ``kDoExpandedSend``: sum a token's local-expert rows before
+sending, so one row per (rank, token) still crosses NVLink and ``comm_x`` and
+the reduce stay exactly as they are. That needs the inverse of what dispatch
+recorded -- dispatch gives row -> (src_rank, src_token), and this needs
+(src_rank, src_token) -> rows -- so an extra kernel builds it, bucketing each
+received row under its source. It touches metadata only, never the payload.
+
+The store-back then runs one warp per *group* rather than per row, elected by
+the group's first row, and the common case is unchanged: with routing spread
+over many ranks most groups hold a single row, which is sent straight from
+``x`` with no summing and no staging. Only groups of two or more accumulate
+into ``reduce_scratch`` first, one row of it per warp.
+
 Up to two bias tensors may be added to the output, DeepEP's ``bias_0``/
 ``bias_1``. They seed the reduce accumulator rather than being added to it
 afterwards, which costs nothing: the accumulator had to be written once
@@ -37,6 +55,9 @@ def combine_kernel(
     reduce_threads: int = 0,
     dtype=T.bfloat16,
     num_bias: int = 0,
+    do_expand: bool = False,
+    max_rows_per_token: int = 1,
+    recv_capacity: int = 0,
 ):
     assert threads % 32 == 0
     assert 0 <= num_bias <= 2, f"DeepEP takes at most two bias tensors, got {num_bias}"
@@ -55,20 +76,57 @@ def combine_kernel(
     # code, not predicated in it.
     n_bias_0 = num_tokens if num_bias >= 1 else 1
     n_bias_1 = num_tokens if num_bias >= 2 else 1
+    # Deduplicated there is one row per (rank, token) and nothing to group, so
+    # the grouping buffers degenerate.
+    # Expanded, the receive buffers are wider than `total_capacity`; see
+    # buffer.py's `recv_capacity`.
+    n_recv_slots = recv_capacity or total_capacity
+    max_k = max_rows_per_token if do_expand else 1
+    n_pairs = num_ranks * cap if do_expand else 1
+    n_scratch = total_warps * hidden if do_expand else 1
 
     @T.prim_func
     def main(
         x: T.Tensor((num_elems,), dtype),
-        recv_src_rank: T.Tensor((total_capacity,), T.int32),
-        recv_src_token: T.Tensor((total_capacity,), T.int32),
+        recv_src_rank: T.Tensor((n_recv_slots,), T.int32),
+        recv_src_token: T.Tensor((n_recv_slots,), T.int32),
         num_recv: T.Tensor((1,), T.int32),
         send_rank_mask: T.Tensor((num_tokens,), T.int32),
         barrier: T.Tensor((4 * num_ranks,), T.int32),
         comm_x: T.Tensor((num_ranks * cap * hidden,), dtype),
+        # Expanded layout only: the (src_rank, src_token) -> rows inversion,
+        # and one scratch row per warp for groups that need summing.
+        group_count: T.Tensor((n_pairs,), T.uint32),
+        group_rows: T.Tensor((n_pairs * max_k,), T.int32),
+        reduce_scratch: T.Tensor((n_scratch,), dtype),
         bias_0: T.Tensor((n_bias_0, hidden), dtype),
         bias_1: T.Tensor((n_bias_1, hidden), dtype),
         combined: T.Tensor((num_tokens, hidden), dtype),
     ):
+        # ---------------- Bucket rows by source (expanded only) ----------------
+        if do_expand:
+            with T.Kernel(num_sms, threads=threads) as bx:
+                tid = T.get_thread_binding()
+                n_recv = T.alloc_var(T.int32, init=num_recv[0])
+                for i in T.serial(bx * threads + tid, n_pairs, num_sms * threads):
+                    group_count[i] = 0
+                # The fill below reads counters the zeroing above writes, and
+                # any block may touch any counter.
+                T.sync_grid()
+                # Names distinct from the store-back kernel's below: the
+                # tracer binds an `alloc_var` name for the whole traced
+                # function, so reusing one across the two kernels reads as the
+                # same immutable variable escaping its region.
+                for i in T.serial(bx * threads + tid, n_recv, num_sms * threads):
+                    bucket_src = T.alloc_var(T.int32, init=recv_src_rank[i])
+                    # Alignment padding is marked -1 by dispatch and belongs to
+                    # no token.
+                    if bucket_src >= 0:
+                        bucket_pair = T.alloc_var(T.int32, init=bucket_src * cap + recv_src_token[i])
+                        bucket_slot = T.alloc_var(T.int32, init=T.atom_add(group_count[bucket_pair], 1, scope="gpu"))
+                        if bucket_slot < max_k:
+                            group_rows[bucket_pair * max_k + bucket_slot] = i
+
         with T.Kernel(num_sms, threads=threads) as bx:
             tid = T.get_thread_binding()
             # Through a variable, not inline: see kernels/dispatch.py.
@@ -93,14 +151,58 @@ def combine_kernel(
             # to read the count back to the host, worth ~33us there.
             n_recv = T.alloc_var(T.int32, init=num_recv[0])
             per_warp = T.alloc_var(T.int32, init=T.ceildiv(n_recv, total_warps))
+            lane = tid % 32
+            # A scratch row per warp, indexed by the *unrotated* block/warp
+            # pair. `warp` below folds in `my_rank`, whose range the compiler
+            # cannot prove, so using it here would bounds-wrap the index in an
+            # `if_then_else` that `address_of` rejects -- the same thing
+            # kernels/dispatch.py hit with `T.get_rank()` inline.
+            scratch_warp = bx * warps_per_cta + tid // 32
             for i in T.serial(warp * per_warp, T.min((warp + 1) * per_warp, n_recv)):
-                slot = my_rank * cap + recv_src_token[i]
-                T.put_warp(
-                    src=T.address_of(x[i * hidden]),
-                    dst=T.address_of(comm_x[slot * hidden]),
-                    size=hidden,
-                    dst_pe=recv_src_rank[i],
-                )
+                src_rank = T.alloc_var(T.int32, init=recv_src_rank[i])
+                # Padding rows belong to nobody; only the expanded layout has any.
+                if src_rank >= 0:
+                    slot = my_rank * cap + recv_src_token[i]
+                    if do_expand:
+                        pair = T.alloc_var(T.int32, init=src_rank * cap + recv_src_token[i])
+                        cnt = T.alloc_var(T.int32, init=group_count[pair])
+                        # One warp per group, not per row: the group's first row
+                        # elects itself, the rest of the group does nothing.
+                        if group_rows[pair * max_k] == i:
+                            if cnt == 1:
+                                # The common case with routing spread across
+                                # ranks -- nothing to sum, send it where it lies.
+                                T.put_warp(
+                                    src=T.address_of(x[i * hidden]),
+                                    dst=T.address_of(comm_x[slot * hidden]),
+                                    size=hidden,
+                                    dst_pe=src_rank,
+                                )
+                            else:
+                                # Lane-strided rather than `T.Parallel`: this is
+                                # warp-scoped code, and a tile-level op here
+                                # would have the compiler insert a block-wide
+                                # barrier into it.
+                                for e in T.serial(lane, hidden, 32):
+                                    acc = T.alloc_var(T.float32, init=0.0)
+                                    for j in range(max_k):
+                                        if j < cnt:
+                                            acc = acc + T.Cast(T.float32, x[group_rows[pair * max_k + j] * hidden + e])
+                                    reduce_scratch[scratch_warp * hidden + e] = T.Cast(dtype, acc)
+                                T.sync_warp()
+                                T.put_warp(
+                                    src=T.address_of(reduce_scratch[scratch_warp * hidden]),
+                                    dst=T.address_of(comm_x[slot * hidden]),
+                                    size=hidden,
+                                    dst_pe=src_rank,
+                                )
+                    else:
+                        T.put_warp(
+                            src=T.address_of(x[i * hidden]),
+                            dst=T.address_of(comm_x[slot * hidden]),
+                            size=hidden,
+                            dst_pe=src_rank,
+                        )
 
             T.barrier_blocks(barrier[3 * num_ranks])
 

@@ -520,7 +520,15 @@ def dispatch_kernel(
                             T.st(recv_src_token[idx_k], token, scope="sys", sem="relaxed", dst_pe=pe_k)
                         if lane < topk:
                             local_expert = T.alloc_var(T.int32, init=-1)
-                            if pe_k * experts_per_rank <= expert and expert < (pe_k + 1) * experts_per_rank:
+                            if do_expand:
+                                # This row *is* one (token, expert) pair, and
+                                # `dst_k` is that expert. Marking the token's
+                                # other local experts here too would have the
+                                # epilogue weight every one of the token's rows
+                                # by the same sum, and combine would add them up.
+                                if expert == dst_k:
+                                    local_expert = expert - pe_k * experts_per_rank
+                            elif pe_k * experts_per_rank <= expert and expert < (pe_k + 1) * experts_per_rank:
                                 local_expert = expert - pe_k * experts_per_rank
                             T.st(recv_topk_idx[idx_k * topk + lane], local_expert, scope="sys", sem="relaxed", dst_pe=pe_k)
                             T.st(recv_topk_weights[idx_k * topk + lane], topk_weights[token, lane], scope="sys", sem="relaxed", dst_pe=pe_k)

@@ -313,6 +313,11 @@ class Buffer:
         row_bytes = self.row_bytes if self.is_fp8 else hidden * itemsize
         compact_bytes = self.recv_capacity * (row_bytes + 4 + 4 + num_topk * 4 + num_topk * 4)
         combined_bytes = num_max_tokens_per_rank * (hidden * 2 + 4) + self.num_ranks * self.cap * 4
+        if do_expand:
+            # Combine's grouping buffers and per-warp scratch; see below.
+            max_rows = min(num_topk, self.experts_per_rank)
+            combine_warps = (self.num_sms or 1) * 32
+            combined_bytes += self.num_ranks * self.cap * 4 * (1 + max_rows) + combine_warps * hidden * 2
         total = comm_bytes + compact_bytes + combined_bytes
         self.allocator = get_allocator(
             # 5% of slack: every tensor is padded for alignment and the sum
@@ -347,6 +352,16 @@ class Buffer:
         self.expert_count = tilelang.tensor((self.experts_per_rank if self.do_expand else 1,), torch.int32, allocator=self.allocator)
         self.expert_offset = tilelang.tensor((self.experts_per_rank + 1 if self.do_expand else 1,), torch.int32, allocator=self.allocator)
         self.expand_overflow = tilelang.tensor((1,), torch.int32, allocator=self.allocator)
+        # Combine's (src_rank, src_token) -> rows inversion, and one scratch row
+        # per warp for tokens whose rows have to be summed before sending. Only
+        # the expanded layout can produce more than one row per pair, so these
+        # degenerate otherwise. uint32 for `atom_add`, as with `send_count`.
+        self.max_rows_per_token = min(num_topk, self.experts_per_rank) if do_expand else 1
+        n_pairs = self.num_ranks * self.cap if do_expand else 1
+        combine_warps = self.num_sms * (self.combine_threads // 32)
+        self.group_count = tilelang.tensor((n_pairs,), torch.uint32, allocator=self.allocator)
+        self.group_rows = tilelang.tensor((n_pairs * self.max_rows_per_token,), torch.int32, allocator=self.allocator)
+        self.reduce_scratch = tilelang.tensor((combine_warps * hidden if do_expand else 1,), self.combine_dtype, allocator=self.allocator)
         # Likewise for combine's unused bias arguments; see `combine`.
         self._no_bias = tilelang.tensor((1, hidden), self.combine_dtype, allocator=self.allocator)
         # int32 (signed): -1 is the "not yet published" sentinel every rank
@@ -462,7 +477,7 @@ class Buffer:
 
     def _get_combine_kernel(self, num_tokens: int, num_bias: int = 0, num_sms: int = 0):
         num_sms = self._resolve_num_sms(num_sms)
-        key = (num_tokens, num_bias, num_sms)
+        key = (num_tokens, num_bias, num_sms, self.do_expand)
         if key not in self._combine_kernels:
             kernel = combine_kernel(
                 num_tokens,
@@ -475,6 +490,9 @@ class Buffer:
                 self.reduce_threads,
                 self.tl_combine_dtype,
                 num_bias,
+                self.do_expand,
+                self.max_rows_per_token,
+                self.recv_capacity,
             )
             kernel.compile_group = self.group
             kernel.initialize(allocator=self.allocator)
@@ -686,14 +704,6 @@ class Buffer:
         token with no contributions still receives them. Each distinct count
         compiles its own kernel variant.
         """
-        assert not self.do_expand, (
-            "combine does not support the expanded layout yet: its store-back slot is "
-            "`comm_x[rank][src_token]`, unique only because dispatch deduplicated. Expanded, "
-            "a token with two experts on one rank produces two rows that collide there. "
-            "DeepEP's answer is `kDoExpandedSend` -- sum a token's local-expert rows before "
-            "sending -- which needs the (src_rank, src_token) -> rows inversion dispatch does "
-            "not currently record."
-        )
         if bias is None:
             biases = ()
         elif torch.is_tensor(bias):
@@ -732,6 +742,9 @@ class Buffer:
                 self.send_rank_mask[:num_tokens],
                 self.barrier,
                 self.comm_x,
+                self.group_count,
+                self.group_rows,
+                self.reduce_scratch,
                 *bias_args,
                 self.combined[:num_tokens],
             )
