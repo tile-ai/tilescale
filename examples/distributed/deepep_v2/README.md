@@ -375,21 +375,44 @@ rejected:
   on the compute stream at entry, and at exit either join or hand back an event
   and protect the tensors. The overlap does not come from the stream plumbing.
 
-What is known is the shape of it. The amount hidden is a constant ~30 us across
-a 14x range of dispatch length -- 63 us for a notify-only dispatch against
-892 us for a full one -- and a 7x range of compute. That is the signature of
-overlapping the enqueue gap and nothing else: no kernel-level concurrency at
-all. It also rules out the scatter specifically, and rules out barrier
-spinning, since a dispatch that is almost entirely barriers hides the same
-absolute amount as one moving 850 us of payload.
+An nsys timeline settles what seven A/B experiments could not. On rank 0, with
+the other seven ranks running free, the sequence here is a strict alternation:
 
-Removing the compute-stream dependency entirely -- recording an event once
-before any compute and passing it as `previous_event`, so the communication
-stream never waits on the compute stream -- collapses the overlapped time to
-675 us, the collective vanishing behind the GEMM. That configuration is not
-usable as it stands, since it also lets successive dispatches overlap each
-other on shared buffers, but it shows the concurrency is there to be had once
-something stops serialising the two streams.
+```
+notify   2543 us
+  GEMM    968 us   <- overlaps the notify
+scatter   842 us
+  GEMM    661 us   <- starts 10.2 us AFTER the scatter ends
+notify   2453 us   <- overlaps the previous GEMM's tail by 47.6 us
+scatter   847 us
+  GEMM    657 us   <- starts 9.2 us after the scatter ends
+```
+
+The GEMM never runs during the scatter. It starts 9-10 us after it ends, every
+iteration. The only concurrency is at the boundary, where the next notify
+overlaps the GEMM's tail by 40-48 us -- and that sliver is the constant ~30 us
+that shows up in every measurement above.
+
+The dependency cycle produces exactly this. Iteration N+1's `dispatch` calls
+`wait_stream(comm, compute)` after iteration N's GEMM is already on the compute
+stream, so the communication waits for the previous GEMM; and `with event:`
+puts the event wait on the compute stream, so the next GEMM waits for the
+previous dispatch. Each stream waits for the other's last item, and they
+ping-pong.
+
+DeepEP traced the same way does not:
+
+```
+dispatch  2823 us
+  GEMM     964 us   <- starts 112 us in, runs entirely inside the dispatch
+dispatch  3350 us
+  GEMM     927 us   <- starts 0.6 us later, entirely inside the dispatch
+```
+
+Its GEMM sits inside the dispatch kernel; this port's sits between kernels.
+Since the stream plumbing is identical on both sides, what remains is something
+about how the kernels themselves are launched or admitted -- which is where to
+look next, with the timeline rather than more A/B.
 
 Note that `async_finish` changes neither column. It moves who waits, not how
 long the work takes: measured, the same dispatch is 901.2 µs synchronous and
