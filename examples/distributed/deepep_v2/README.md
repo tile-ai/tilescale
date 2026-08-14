@@ -353,16 +353,27 @@ rejected:
   ~35 us.
 - *Proportionality* -- 99 us and 673 us of compute hide the same absolute
   amount.
-- *The cooperative launch* -- the end-of-call reset is the only thing needing a
-  grid-wide rendezvous, and moving it to the front of the next call makes the
-  scatter an ordinary launch (correct on 8 ranks). No change: 1552.8.
+- *The cooperative launch*, which was the best-motivated of these: `sync_grid`
+  is `cudaLaunchCooperativeKernel`, which requires every block co-resident and
+  so cannot be co-scheduled, and EPv2's intranode path has no
+  `this_grid().sync()` anywhere -- it appears only in DeepEP's legacy
+  `internode_ll`. Tested twice badly and once properly. Moving the reset to the
+  front of the next call makes the *scatter* ordinary but leaves the notify
+  cooperative (1552.8); the earlier arrangement was the reverse. Removing both,
+  by moving the padding, stats and reset into a third kernel so a kernel
+  boundary provides the ordering the grid sync provided, leaves dispatch with
+  no cooperative launch at all -- correct on 8 ranks -- and still hides 27.3 µs
+  out of 1534.8. So it is not this either.
 - *Grids beyond the SM count*, which dropping that rendezvous permits -- worse:
   450 us at 128 blocks against 621 at 256 and 541 at 512.
 - *`previous_event` recorded inside the loop* -- 1538.7, because the event still
   covers the previous iteration's GEMM.
 - *`comm_stream.wait_stream(compute_stream)` at the top of `dispatch`* --
   DeepEP's `stream_control_prologue` takes exactly the same dependency when no
-  `previous_event` is given, and overlaps anyway.
+  `previous_event` is given, and overlaps anyway. Its `async` path is
+  structurally identical to this one throughout: wait the communication stream
+  on the compute stream at entry, and at exit either join or hand back an event
+  and protect the tensors. The overlap does not come from the stream plumbing.
 
 What is known is the shape of it. The amount hidden is a constant ~30 us across
 a 14x range of dispatch length -- 63 us for a notify-only dispatch against
