@@ -23,6 +23,15 @@ from tilelang.distributed.allocator import get_allocator
 from tilelang.distributed.bench import do_bench
 from tilelang.distributed.host import init_dist
 
+from pipeline_trace import (
+    GLOBAL_TIMER_SOURCE,
+    L1_TRACE_ROLES,
+    L2_TRACE_ROLES,
+    TRACE_FIELDS,
+    save_pipeline_trace_png,
+    trace_schedule_steps,
+)
+
 os.environ.setdefault("NCCL_DEBUG", "ERROR")
 
 
@@ -242,6 +251,7 @@ def fused_l1_swiglu_manual_warp_kernel(
     threads: int = 384,
     pipeline_stages: int = 5,
     num_experts_per_wave: int | None = None,
+    enable_pipeline_trace: bool = False,
 ):
     num_experts_per_rank = num_experts // num_ranks
     num_experts_per_wave = num_experts_per_wave or num_experts_per_rank
@@ -308,9 +318,19 @@ def fused_l1_swiglu_manual_warp_kernel(
             T.float32,
         ),
         barrier: T.Tensor((num_ranks,), T.int32),
+        pipeline_trace: T.Tensor(
+            (
+                num_sms,
+                L1_TRACE_ROLES,
+                num_expert_waves * max_tile_rounds_per_expert_wave,
+                TRACE_FIELDS,
+            ),
+            T.int64,
+        ),
     ):
         T.annotate_pass_configs({tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True})
         with T.Kernel(num_sms, threads=threads) as bid:
+            T.import_source(GLOBAL_TIMER_SOURCE)
             tx = T.get_thread_binding()
             src_rank = T.alloc_local((1,), T.int32)
             src_rank[0] = T.get_rank()
@@ -403,6 +423,11 @@ def fused_l1_swiglu_manual_warp_kernel(
             dispatch_warp = tx // warp_size
             dispatch_lane = tx % warp_size
             if tx < dispatch_threads:
+                if enable_pipeline_trace:
+                    if dispatch_lane == 0:
+                        pipeline_trace[bid, dispatch_warp, 0, 0] = T.call_extern(
+                            "int64", "tl_globaltimer_ns"
+                        )
                 for metadata_wave in T.serial(ceil_div(num_routes, num_sms * dispatch_threads)):
                     metadata_route = (
                         bid * dispatch_threads
@@ -439,6 +464,15 @@ def fused_l1_swiglu_manual_warp_kernel(
                                 sem="release",
                                 dst_pe=metadata_rank,
                             )
+
+                if enable_pipeline_trace:
+                    if dispatch_lane == 0:
+                        pipeline_trace[bid, dispatch_warp, 0, 1] = T.call_extern(
+                            "int64", "tl_globaltimer_ns"
+                        )
+                        pipeline_trace[bid, dispatch_warp, 0, 2] = T.call_extern(
+                            "int64", "tl_globaltimer_ns"
+                        )
 
                 for pull_wave in T.serial(ceil_div(num_experts_per_rank * capacity, num_sms * dispatch_warps)):
                     pull_idx = (
@@ -481,6 +515,12 @@ def fused_l1_swiglu_manual_warp_kernel(
                                 scope="gpu",
                                 sem="release",
                             )
+
+                if enable_pipeline_trace:
+                    if dispatch_lane == 0:
+                        pipeline_trace[bid, dispatch_warp, 0, 3] = T.call_extern(
+                            "int64", "tl_globaltimer_ns"
+                        )
 
             if tx >= producer_begin and tx < producer_end:
                 producer_step = T.alloc_var(T.int32, init=0)
@@ -533,6 +573,11 @@ def fused_l1_swiglu_manual_warp_kernel(
                                     producer_tile_offset -= producer_expert_tiles
 
                         if producer_expert >= 0 and producer_n * block_n < l1_n:
+                            if enable_pipeline_trace:
+                                if tx == producer_begin:
+                                    pipeline_trace[bid, 2, producer_schedule_step, 0] = T.call_extern(
+                                        "int64", "tl_globaltimer_ns"
+                                    )
                             producer_arrivals = T.min(
                                 block_m,
                                 recv_counts[producer_expert] - producer_m * block_m,
@@ -545,6 +590,11 @@ def fused_l1_swiglu_manual_warp_kernel(
                                     semantics=T.WaitSemantics.ACQUIRE,
                                 )
                             T.sync_threads(5, producer_threads)
+                            if enable_pipeline_trace:
+                                if tx == producer_begin:
+                                    pipeline_trace[bid, 2, producer_schedule_step, 1] = T.call_extern(
+                                        "int64", "tl_globaltimer_ns"
+                                    )
                             for producer_k in T.serial(num_k_blocks):
                                 producer_stage = (producer_step + producer_k) % pipeline_stages
                                 producer_phase = ((producer_step + producer_k) // pipeline_stages) & 1
@@ -579,6 +629,11 @@ def fused_l1_swiglu_manual_warp_kernel(
                                         barrier=stage_barriers[producer_stage],
                                     )
                                 T.mbarrier_arrive(stage_barriers[producer_stage])
+                            if enable_pipeline_trace:
+                                if tx == producer_begin:
+                                    pipeline_trace[bid, 2, producer_schedule_step, 2] = T.call_extern(
+                                        "int64", "tl_globaltimer_ns"
+                                    )
                             producer_step += num_k_blocks
                             producer_wave_tile += num_sms
 
@@ -653,6 +708,11 @@ def fused_l1_swiglu_manual_warp_kernel(
                                     consumer_tile_offset -= consumer_expert_tiles
 
                         if consumer_expert >= 0 and consumer_n * block_n < l1_n:
+                            if enable_pipeline_trace:
+                                if tx == math_begin:
+                                    pipeline_trace[bid, 3, consumer_schedule_step, 3] = T.call_extern(
+                                        "int64", "tl_globaltimer_ns"
+                                    )
                             T.clear(partial)
                             T.clear(accum)
                             for consumer_k in T.serial(num_k_blocks):
@@ -662,6 +722,12 @@ def fused_l1_swiglu_manual_warp_kernel(
                                     stage_barriers[consumer_stage],
                                     consumer_phase,
                                 )
+                                if consumer_k == 0:
+                                    if enable_pipeline_trace:
+                                        if tx == math_begin:
+                                            pipeline_trace[bid, 3, consumer_schedule_step, 0] = T.call_extern(
+                                                "int64", "tl_globaltimer_ns"
+                                            )
                                 T.gemm(
                                     a_shared[consumer_stage, :, :],
                                     b_shared[consumer_stage, :, :],
@@ -703,6 +769,11 @@ def fused_l1_swiglu_manual_warp_kernel(
                                 T.clear(partial)
                                 T.mbarrier_arrive(stage_barriers[pipeline_stages + consumer_stage])
                             consumer_step += num_k_blocks
+                            if enable_pipeline_trace:
+                                if tx == math_begin:
+                                    pipeline_trace[bid, 3, consumer_schedule_step, 1] = T.call_extern(
+                                        "int64", "tl_globaltimer_ns"
+                                    )
                             for i, j in T.Parallel(block_m, block_n // 2):
                                 gate[i, j] = accum[i, (j // 8) * 16 + j % 8]
                             for i, j in T.Parallel(block_m, block_n // 2):
@@ -747,6 +818,11 @@ def fused_l1_swiglu_manual_warp_kernel(
                                     consumer_n * (block_n // 2),
                                 ],
                             )
+                            if enable_pipeline_trace:
+                                if tx == math_begin:
+                                    pipeline_trace[bid, 3, consumer_schedule_step, 2] = T.call_extern(
+                                        "int64", "tl_globaltimer_ns"
+                                    )
                             consumer_wave_tile += num_sms
 
                     if (
@@ -776,6 +852,7 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
     threads: int = 384,
     pipeline_stages: int = 3,
     num_experts_per_wave: int | None = None,
+    enable_pipeline_trace: bool = False,
 ):
     num_experts_per_wave = num_experts_per_wave or num_experts_per_rank
     assert num_experts_per_rank % num_experts_per_wave == 0
@@ -842,8 +919,18 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
         combine: T.Tensor((num_tokens, num_topk, hidden), T.bfloat16),
         barrier: T.Tensor((num_ranks,), T.int32),
         out: T.Tensor((num_tokens, hidden), T.bfloat16),
+        pipeline_trace: T.Tensor(
+            (
+                num_sms,
+                L2_TRACE_ROLES,
+                num_expert_waves * max_tile_rounds_per_expert_wave,
+                TRACE_FIELDS,
+            ),
+            T.int64,
+        ),
     ):
         with T.Kernel(num_sms, threads=threads) as bid:
+            T.import_source(GLOBAL_TIMER_SOURCE)
             tx = T.get_thread_binding()
             a_shared = T.alloc_shared(
                 (pipeline_stages, block_m, block_k),
@@ -921,6 +1008,11 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                             and producer_n * block_n < hidden
                             and num_k_blocks * block_k == intermediate_hidden
                         ):
+                            if enable_pipeline_trace:
+                                if tx == producer_begin:
+                                    pipeline_trace[bid, 0, producer_schedule_step, 0] = T.call_extern(
+                                        "int64", "tl_globaltimer_ns"
+                                    )
                             for producer_k in T.serial(num_k_blocks):
                                 producer_stage = (producer_step + producer_k) % pipeline_stages
                                 producer_phase = ((producer_step + producer_k) // pipeline_stages) & 1
@@ -952,6 +1044,11 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                                     producer_k,
                                 ]
                                 T.mbarrier_arrive(stage_barriers[producer_stage])
+                            if enable_pipeline_trace:
+                                if tx == producer_begin:
+                                    pipeline_trace[bid, 0, producer_schedule_step, 1] = T.call_extern(
+                                        "int64", "tl_globaltimer_ns"
+                                    )
                             producer_step += num_k_blocks
                             producer_wave_tile += num_sms
 
@@ -1025,6 +1122,11 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                             and consumer_n * block_n < hidden
                             and num_k_blocks * block_k == intermediate_hidden
                         ):
+                            if enable_pipeline_trace:
+                                if tx == math_begin:
+                                    pipeline_trace[bid, 1, consumer_schedule_step, 3] = T.call_extern(
+                                        "int64", "tl_globaltimer_ns"
+                                    )
                             T.clear(partial)
                             T.clear(accum)
                             for consumer_k in T.serial(num_k_blocks):
@@ -1034,6 +1136,12 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                                     stage_barriers[consumer_stage],
                                     consumer_phase,
                                 )
+                                if consumer_k == 0:
+                                    if enable_pipeline_trace:
+                                        if tx == math_begin:
+                                            pipeline_trace[bid, 1, consumer_schedule_step, 0] = T.call_extern(
+                                                "int64", "tl_globaltimer_ns"
+                                            )
                                 T.gemm(
                                     a_shared[consumer_stage, :, :],
                                     b_shared[consumer_stage, :, :],
@@ -1064,6 +1172,11 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                                 T.clear(partial)
                                 T.mbarrier_arrive(stage_barriers[pipeline_stages + consumer_stage])
                             consumer_step += num_k_blocks
+                            if enable_pipeline_trace:
+                                if tx == math_begin:
+                                    pipeline_trace[bid, 1, consumer_schedule_step, 1] = T.call_extern(
+                                        "int64", "tl_globaltimer_ns"
+                                    )
                             T.copy(accum, out_shared)
                             scatter_warp = (tx - math_begin) // warp_size
                             for row_in_warp in T.serial(rows_per_math_warp):
@@ -1098,6 +1211,11 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                                             dst_pe=dst_rank,
                                             unroll_factor=1,
                                         )
+                            if enable_pipeline_trace:
+                                if tx == math_begin:
+                                    pipeline_trace[bid, 1, consumer_schedule_step, 2] = T.call_extern(
+                                        "int64", "tl_globaltimer_ns"
+                                    )
                             consumer_wave_tile += num_sms
 
                     if (
@@ -1114,6 +1232,11 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
 
             if tx < reduce_threads:
                 reduce_accum = T.alloc_fragment((reduce_block_m, reduce_block_h), T.float32)
+                if enable_pipeline_trace:
+                    if tx == 0:
+                        pipeline_trace[bid, 2, 0, 0] = T.call_extern(
+                            "int64", "tl_globaltimer_ns"
+                        )
                 for reduce_wave in T.serial(ceil_div(num_reduce_tiles, num_sms)):
                     reduce_tile = bid + reduce_wave * num_sms
                     if reduce_tile < num_reduce_tiles:
@@ -1135,6 +1258,11 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                                 reduce_m * reduce_block_m,
                                 reduce_n * reduce_block_h,
                             ],
+                        )
+                if enable_pipeline_trace:
+                    if tx == 0:
+                        pipeline_trace[bid, 2, 0, 1] = T.call_extern(
+                            "int64", "tl_globaltimer_ns"
                         )
 
     return main
@@ -1243,6 +1371,8 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     num_topk = model["num_topk"]
     num_tokens = args.num_tokens
     activation_clamp = args.activation_clamp
+    pipeline_trace_path = getattr(args, "pipeline_trace", None)
+    enable_pipeline_trace = pipeline_trace_path is not None
 
     assert num_tokens > 0
     assert hidden >= 512 and hidden % 256 == 0
@@ -1291,6 +1421,22 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         if requested is not None:
             assert requested > 0 and num_experts_per_rank % requested == 0
             config["num_experts_per_wave"] = requested
+    l1_trace_steps = trace_schedule_steps(
+        num_experts_per_rank,
+        l1_config["num_experts_per_wave"],
+        capacity,
+        l1_config["block_m"],
+        ceil_div(2 * intermediate_hidden, l1_config["block_n"]),
+        num_sms,
+    )
+    l2_trace_steps = trace_schedule_steps(
+        num_experts_per_rank,
+        l2_config["num_experts_per_wave"],
+        capacity,
+        l2_config["block_m"],
+        ceil_div(hidden, l2_config["block_n"]),
+        num_sms,
+    )
     kernel_specs = [
         fused_l1_swiglu_manual_warp_kernel(
             num_tokens,
@@ -1302,6 +1448,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             capacity,
             num_sms,
             activation_clamp=activation_clamp,
+            enable_pipeline_trace=enable_pipeline_trace,
             **l1_config,
         ),
         fused_l2_scatter_reduce_manual_warp_kernel(
@@ -1313,6 +1460,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             num_ranks,
             capacity,
             num_sms,
+            enable_pipeline_trace=enable_pipeline_trace,
             **l2_config,
         ),
     ]
@@ -1392,6 +1540,16 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     )
     combine = allocator_tensor((num_tokens, num_topk, hidden), torch.bfloat16, allocator=allocator)
     out = allocator_tensor((num_tokens, hidden), torch.bfloat16, allocator=allocator)
+    l1_pipeline_trace = torch.zeros(
+        (num_sms, L1_TRACE_ROLES, l1_trace_steps, TRACE_FIELDS),
+        dtype=torch.int64,
+        device="cuda",
+    )
+    l2_pipeline_trace = torch.zeros(
+        (num_sms, L2_TRACE_ROLES, l2_trace_steps, TRACE_FIELDS),
+        dtype=torch.int64,
+        device="cuda",
+    )
 
     def reset_state():
         route_counts.zero_()
@@ -1403,6 +1561,8 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         recv_weights.zero_()
         src_ranks.fill_(-1)
         combine.zero_()
+        l1_pipeline_trace.zero_()
+        l2_pipeline_trace.zero_()
         torch.cuda.synchronize()
         dist.barrier(group=group)
 
@@ -1427,6 +1587,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             l2_x,
             l2_x_sf,
             barrier,
+            l1_pipeline_trace,
         )
         if check_capacity:
             local_max = recv_counts.max()
@@ -1444,6 +1605,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             combine,
             barrier,
             out,
+            l2_pipeline_trace,
         )
         return out
 
@@ -1468,6 +1630,52 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         diff = calc_diff(actual, expected)
         assert diff < args.diff_tol, f"rank {local_rank}: diff={diff} exceeds {args.diff_tol}"
         print(f"rank {local_rank} check passed, diff={diff:.6f}")
+
+    if enable_pipeline_trace:
+        dist.barrier(group=group)
+        if local_rank == 0:
+            if getattr(args, "pipeline_trace_ctas", None):
+                selected_ctas = [
+                    int(value)
+                    for value in args.pipeline_trace_ctas.split(",")
+                    if value.strip()
+                ]
+            else:
+                local_counts = recv_counts.detach().cpu().tolist()
+
+                def first_wave_tiles(config, output_size):
+                    experts_per_wave = config["num_experts_per_wave"]
+                    block_m = config["block_m"]
+                    num_n_blocks = ceil_div(output_size, config["block_n"])
+                    return sum(
+                        ceil_div(min(int(count), capacity), block_m) * num_n_blocks
+                        for count in local_counts[:experts_per_wave]
+                    )
+
+                selected_ctas = [0, num_sms - 1]
+                for wave_tiles in (
+                    first_wave_tiles(l1_config, 2 * intermediate_hidden),
+                    first_wave_tiles(l2_config, hidden),
+                ):
+                    if 0 < wave_tiles < num_sms:
+                        selected_ctas.extend((wave_tiles - 1, wave_tiles))
+            selected_ctas = sorted(
+                {cta for cta in selected_ctas if 0 <= cta < num_sms}
+            )
+            trace_output = save_pipeline_trace_png(
+                l1_pipeline_trace,
+                l2_pipeline_trace,
+                pipeline_trace_path,
+                selected_ctas,
+                (
+                    f"TileScale SM90 Mega MoE pipeline: {model_name}, "
+                    f"M={num_tokens}, ranks={num_ranks}, "
+                    f"epw={l1_config['num_experts_per_wave']}/"
+                    f"{l2_config['num_experts_per_wave']}"
+                ),
+            )
+            print(f"pipeline trace: {trace_output} (CTAs={selected_ctas})")
+        dist.barrier(group=group)
 
     if args.rep > 0:
         reset_state()
@@ -1507,6 +1715,8 @@ if __name__ == "__main__":
     parser.add_argument("--capacity", type=int, default=None)
     parser.add_argument("--l1-experts-per-wave", type=int, default=None)
     parser.add_argument("--l2-experts-per-wave", type=int, default=None)
+    parser.add_argument("--pipeline-trace", type=str, default=None)
+    parser.add_argument("--pipeline-trace-ctas", type=str, default=None)
     parser.add_argument("--activation-clamp", type=float, default=10.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--diff-tol", type=float, default=0.01)
