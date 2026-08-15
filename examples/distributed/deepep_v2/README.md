@@ -319,100 +319,55 @@ overall by about 9% because it has no compaction pass to pay for. Host overhead
 is the difference between those kernel times and the whole-call figures above:
 8–10 µs.
 
-**What `async_finish` currently buys, measured.** Not much, and this is worth
-knowing before building a schedule around it. Running an independent GEMM
-beside a bf16 dispatch on an idle machine:
+**What `async_finish` buys.** Measured against an 8192-square bf16 GEMM sized
+to match the collective, on an idle machine:
 
-| | compute | dispatch | serial | overlapped |
-|---|---|---|---|---|
-| gemm 4096 | 98.9 µs | 891.6 | 988.5 | 949.6 |
-| gemm 8192 | 672.4 µs | 891.8 | 1568.9 | 1538.4 |
+| | compute | dispatch | serial | overlapped | hidden |
+|---|---|---|---|---|---|
+| before | 672.4 us | 891.8 | 1568.9 | 1538.4 | 29.7 us (4%) |
+| after | 671.0 us | 891.5 | 1566.2 | **1279.9** | **286.3 us (43%)** |
 
-The amount hidden is ~30 µs in both, and in the second case that is 5% of a
-673 µs GEMM: it does not scale with the compute, so what is being hidden is
-launch and host overhead, not the collective. Perfect overlap would put the
-second row at ~892 µs rather than 1538. `previous_event` does not change it
-(1538.7), and neither does giving the collective fewer SMs -- 8, 16 and 32 all
-hide the same ~35 µs -- so it is not SM starvation and not the
-`wait_stream` dependency either.
+The fix is one line -- the communication stream is created with a raised
+priority -- and the reason it is worth 10x is worth writing down, because six
+plausible theories were measured and rejected before the right one.
 
-The gap is this port's, not the workload's. DeepEP run through the identical
-harness on the same idle machine hides 81% of the same GEMM:
+A private stream buys *eligibility*, not *admission*. The trace shows the
+collective becoming eligible the instant the previous scatter ends, and then
+waiting 624 us anyway. What it is waiting for is an SM. A GEMM large enough to
+be worth hiding behind is also large enough to hold the whole device: 2048
+blocks, each needing a full SM's registers and 213 KB of shared memory, so 148
+are resident and fourteen waves are pending. Block admission is greedy, so
+every SM that frees goes to the next GEMM block, and a collective that arrives
+even microseconds later gets in only as the last wave drains -- a fixed ~48 us
+window, which is why the amount hidden was a constant ~30 us regardless of
+dispatch length, compute length or SM count.
 
-| | compute | dispatch | serial | overlapped |
-|---|---|---|---|---|
-| DeepEP | 672.1 us | 1051.2 | 1724.7 | **1177.8** |
-| this port | 674.5 us | 891.8 | 1566.0 | 1538.1 |
+The experiment that settled it: `torch.cuda._sleep` calibrated to the same
+674 us as the GEMM occupies the compute stream just as long but uses **one
+block**, and it is hidden **100%**. Same streams, same events, same
+dependencies, 147 SMs free instead of none. Not ordering -- occupancy.
 
-Note the reversal: this port is faster serially and 23% slower overlapped.
+Stream priority biases precisely that admission decision. Any raised priority
+works (-1, -2 and -3 all measure ~285 us), so the buffer takes whatever the
+device offers. `num_sms` matters now for the first time, since it is how many
+blocks the collective is trying to get admitted: 158 us hidden at 16 SMs,
+223.6 at 32, 285.3 at 64.
 
-The cause is **not yet known**, and six explanations have been measured and
-rejected:
+Standalone performance is unchanged -- 898-900 us bf16 dispatch, 984-985
+combine, 522 fp8, all within the spread of the numbers above -- so this costs
+nothing when there is nothing to overlap with.
 
-- *SM starvation* -- 8, 16 and 32 SMs for the collective all hide the same
-  ~35 us.
-- *Proportionality* -- 99 us and 673 us of compute hide the same absolute
-  amount.
-- *The cooperative launch*, which was the best-motivated of these: `sync_grid`
-  is `cudaLaunchCooperativeKernel`, which requires every block co-resident and
-  so cannot be co-scheduled, and EPv2's intranode path has no
-  `this_grid().sync()` anywhere -- it appears only in DeepEP's legacy
-  `internode_ll`. Tested twice badly and once properly. Moving the reset to the
-  front of the next call makes the *scatter* ordinary but leaves the notify
-  cooperative (1552.8); the earlier arrangement was the reverse. Removing both,
-  by moving the padding, stats and reset into a third kernel so a kernel
-  boundary provides the ordering the grid sync provided, leaves dispatch with
-  no cooperative launch at all -- correct on 8 ranks -- and still hides 27.3 µs
-  out of 1534.8. So it is not this either.
-- *Grids beyond the SM count*, which dropping that rendezvous permits -- worse:
-  450 us at 128 blocks against 621 at 256 and 541 at 512.
-- *`previous_event` recorded inside the loop* -- 1538.7, because the event still
-  covers the previous iteration's GEMM.
-- *`comm_stream.wait_stream(compute_stream)` at the top of `dispatch`* --
-  DeepEP's `stream_control_prologue` takes exactly the same dependency when no
-  `previous_event` is given, and overlaps anyway. Its `async` path is
-  structurally identical to this one throughout: wait the communication stream
-  on the compute stream at entry, and at exit either join or hand back an event
-  and protect the tensors. The overlap does not come from the stream plumbing.
-
-An nsys timeline settles what seven A/B experiments could not. On rank 0, with
-the other seven ranks running free, the sequence here is a strict alternation:
-
-```
-notify   2543 us
-  GEMM    968 us   <- overlaps the notify
-scatter   842 us
-  GEMM    661 us   <- starts 10.2 us AFTER the scatter ends
-notify   2453 us   <- overlaps the previous GEMM's tail by 47.6 us
-scatter   847 us
-  GEMM    657 us   <- starts 9.2 us after the scatter ends
-```
-
-The GEMM never runs during the scatter. It starts 9-10 us after it ends, every
-iteration. The only concurrency is at the boundary, where the next notify
-overlaps the GEMM's tail by 40-48 us -- and that sliver is the constant ~30 us
-that shows up in every measurement above.
-
-The dependency cycle produces exactly this. Iteration N+1's `dispatch` calls
-`wait_stream(comm, compute)` after iteration N's GEMM is already on the compute
-stream, so the communication waits for the previous GEMM; and `with event:`
-puts the event wait on the compute stream, so the next GEMM waits for the
-previous dispatch. Each stream waits for the other's last item, and they
-ping-pong.
-
-DeepEP traced the same way does not:
-
-```
-dispatch  2823 us
-  GEMM     964 us   <- starts 112 us in, runs entirely inside the dispatch
-dispatch  3350 us
-  GEMM     927 us   <- starts 0.6 us later, entirely inside the dispatch
-```
-
-Its GEMM sits inside the dispatch kernel; this port's sits between kernels.
-Since the stream plumbing is identical on both sides, what remains is something
-about how the kernels themselves are launched or admitted -- which is where to
-look next, with the timeline rather than more A/B.
+Rejected along the way, each with numbers: SM starvation as a *count* problem
+(8, 16 and 32 SMs all hid the same ~35 us, and at 8 SMs there are 140 free),
+proportionality (99 us and 673 us of compute hid the same absolute amount), the
+scatter and barrier spinning (a notify-only dispatch, 63 us and almost entirely
+barriers, hid 28.2 us where the full 892 us one hid 29.7), the cooperative
+launch (moving padding, stats and reset into a third kernel removes every
+`sync_grid`, correct on 8 ranks, and changed nothing), grids beyond the SM
+count (450 us at 128 blocks against 621 at 256), host run-ahead (both sides
+queue thousands of microseconds ahead), and the stream dependency itself
+(DeepEP's `stream_control_prologue` takes the same `wait_stream(comm, compute)`
+when no `previous_event` is given, and overlaps anyway).
 
 Note that `async_finish` changes neither column. It moves who waits, not how
 long the work takes: measured, the same dispatch is 901.2 µs synchronous and

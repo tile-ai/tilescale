@@ -220,6 +220,7 @@ class Buffer:
         reduce_threads: int = 256,
         pipeline_depth: int = 2,
         scatter_sms: int = 0,
+        comm_stream_priority: int = None,
         do_expand: bool = False,
         expert_alignment: int = 1,
         zero_padding: bool = True,
@@ -414,7 +415,22 @@ class Buffer:
         # the launch, the handle bookkeeping -- sits between GPU kernels with
         # the GPU idle through it. On a private stream it overlaps with whatever
         # the caller already has queued instead.
-        self.comm_stream = torch.cuda.Stream()
+        #
+        # The priority is what makes `async_finish` worth anything, and it is
+        # not a tuning knob but the difference between overlapping and not. A
+        # private stream buys eligibility, not admission: a GEMM large enough to
+        # be worth hiding behind is also large enough to hold every SM for many
+        # waves, and each SM that frees goes to the next of its blocks, so a
+        # collective that becomes eligible mid-GEMM waits for the whole thing.
+        # Measured at the V3 shape against an 8192-square bf16 GEMM: 29.4us of
+        # 674 hidden at the default priority, 285.3 at any raised one. The
+        # actual value does not matter -- -1, -2 and -3 measure the same -- so
+        # take whatever the device offers and let a caller who is scheduling
+        # several streams override it.
+        if comm_stream_priority is None:
+            comm_stream_priority = torch.cuda.Stream.priority_range()[1]
+        self.comm_stream_priority = comm_stream_priority
+        self.comm_stream = torch.cuda.Stream(priority=comm_stream_priority)
 
         # How far the CPU may run ahead, in calls -- not about ordering
         # (`wait_stream` handles that) but about skew between ranks: the kernel
