@@ -586,6 +586,16 @@ class Buffer:
         num_tokens = x.shape[0]
         num_sms = self._resolve_num_sms(num_sms)
         compute_stream = torch.cuda.current_stream()
+        # Converted here, on the caller's stream, rather than inside the
+        # communication-stream block below. Whichever operation is queued first
+        # on the communication stream gets the one admission slot per iteration
+        # that is not taxed by a resident GEMM (see the module docstring in
+        # kernels/dispatch.py on overlap); a 3us cast taking it and leaving the
+        # 850us collective to pay the ~130us stall costs 141us of hidden time.
+        # `wait_stream` is issued after this, so it still covers them.
+        topk_idx_i32 = topk_idx if cached else topk_idx.to(torch.int32).contiguous()
+        topk_weights_f32 = topk_weights if cached else topk_weights.to(torch.float32).contiguous()
+
         if previous_event is not None:
             assert allocate_on_comm_stream, "previous_event requires allocate_on_comm_stream"
             self.comm_stream.wait_event(previous_event.event)
@@ -598,9 +608,6 @@ class Buffer:
             # `zero_()` launches -- consistently ahead across four interleaved
             # rounds. It needs a `T.sync_grid()` to be correct; see
             # kernels/dispatch.py.
-            # Already converted when replaying a handle.
-            topk_idx_i32 = topk_idx if cached else topk_idx.to(torch.int32).contiguous()
-            topk_weights_f32 = topk_weights if cached else topk_weights.to(torch.float32).contiguous()
 
             kernel = self._get_dispatch_kernel(num_tokens, collect_expert_stats, num_sms, cached)
             # No `dist.barrier` on either side. The reset above is peer-visible

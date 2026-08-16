@@ -325,11 +325,12 @@ to match the collective, on an idle machine:
 | | compute | dispatch | serial | overlapped | hidden |
 |---|---|---|---|---|---|
 | before | 672.4 us | 891.8 | 1568.9 | 1538.4 | 29.7 us (4%) |
-| after | 671.0 us | 891.5 | 1566.2 | **1279.9** | **286.3 us (43%)** |
+| + stream priority | 671.0 us | 891.5 | 1566.2 | 1279.9 | 286.3 us (43%) |
+| + cast hoisted | 675.8 us | 890.9 | 1566.7 | **1135.8** | **430.9 us (64%)** |
 
-The fix is one line -- the communication stream is created with a raised
-priority -- and the reason it is worth 10x is worth writing down, because six
-plausible theories were measured and rejected before the right one.
+Two one-line fixes, and the reason each is worth what it is worth is worth
+writing down, because six plausible theories were measured and rejected before
+the first one.
 
 A private stream buys *eligibility*, not *admission*. The trace shows the
 collective becoming eligible the instant the previous scatter ends, and then
@@ -366,9 +367,29 @@ scatter [4057.4 -> 4892.2]   GEMM [3781.8 -> 4704.4]   647.0 us concurrent
 hidden at 16, 223.6 at 32, 285.3 at 64, 267.7 at 96, and 96.9 at 128, where so
 many blocks are queued for admission that the collective starves itself.
 
-DeepEP still hides more (81% against 43%), and the remaining difference is not
-explained here. Its dispatch is one kernel where this port's is two, so the
-GEMM has a seam to fall into that DeepEP does not offer it.
+**The second fix: do not spend the free admission slot on a dtype cast.** The
+admission stall above is not paid uniformly. There is exactly one moment per
+iteration when it is free -- the ~2.5 us window after the previous scatter
+releases its SMs and before the GEMM's next wave refills them -- and whichever
+operation is queued first on the communication stream gets it. Everything
+behind it pays ~90-140 us.
+
+That slot was going to `topk_idx.to(int32)`, a 3 us elementwise kernel that the
+buffer issued inside the communication-stream block, 0.4 us ahead of the GEMM.
+The 850 us collective behind it then paid the full 129.9 us. Converting on the
+caller's stream instead -- before `wait_stream`, so the dependency still covers
+it -- puts the collective's own kernel first in the queue. Worth 144.6 us, or
+43% to 64% hidden, for moving two lines above a `wait`.
+
+Isolated first from the caller side, by pre-converting the tensors so the
+buffer's cast becomes a no-op: 285.0 us hidden with the cast, 425.7 without.
+
+DeepEP is at 81%, and the gap left is one more instance of the same thing. Both
+sides pay the admission tax, but this port pays it twice per iteration, once
+per launch (mean 267.6 us), where DeepEP pays it at most once (mean 81.5 us):
+its epilogue is pre-admitted through programmatic dependent launch, so the seam
+between its two kernels is *negative*, -30.9 us. Ours is a full stall. That is
+the next thing to try.
 
 Standalone performance is unchanged -- 898-900 us bf16 dispatch, 984-985
 combine, 522 fp8, all within the spread of the numbers above -- so this costs
@@ -380,7 +401,11 @@ proportionality (99 us and 673 us of compute hid the same absolute amount), the
 scatter and barrier spinning (a notify-only dispatch, 63 us and almost entirely
 barriers, hid 28.2 us where the full 892 us one hid 29.7), the cooperative
 launch (moving padding, stats and reset into a third kernel removes every
-`sync_grid`, correct on 8 ranks, and changed nothing), grids beyond the SM
+`sync_grid`, correct on 8 ranks, and changed nothing -- and note that the
+motivation given in the commit for that test was itself wrong: EPv2's intranode
+path *does* use `this_grid().sync()`, at `common/comm.cuh:233,251,269` from
+`impls/dispatch.cuh:74,398`, so a cooperative launch was never the structural
+difference it was claimed to be), grids beyond the SM
 count (450 us at 128 blocks against 621 at 256), host run-ahead (both sides
 queue thousands of microseconds ahead), and the stream dependency itself
 (DeepEP's `stream_control_prologue` takes the same `wait_stream(comm, compute)`
