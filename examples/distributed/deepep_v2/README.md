@@ -353,6 +353,23 @@ device offers. `num_sms` matters now for the first time, since it is how many
 blocks the collective is trying to get admitted: 158 us hidden at 16 SMs,
 223.6 at 32, 285.3 at 64.
 
+The timeline confirms the mechanism rather than just the number. Before, the
+GEMM started 9-10 us *after* the scatter ended, every iteration, and the two
+were never resident together. After:
+
+```
+scatter [2916.8 -> 3770.6]   GEMM [2605.8 -> 3505.6]   588.8 us concurrent
+scatter [4057.4 -> 4892.2]   GEMM [3781.8 -> 4704.4]   647.0 us concurrent
+```
+
+`num_sms` is now the knob that matters, and 64 is already the peak: 158 us
+hidden at 16, 223.6 at 32, 285.3 at 64, 267.7 at 96, and 96.9 at 128, where so
+many blocks are queued for admission that the collective starves itself.
+
+DeepEP still hides more (81% against 43%), and the remaining difference is not
+explained here. Its dispatch is one kernel where this port's is two, so the
+GEMM has a seam to fall into that DeepEP does not offer it.
+
 Standalone performance is unchanged -- 898-900 us bf16 dispatch, 984-985
 combine, 522 fp8, all within the spread of the numbers above -- so this costs
 nothing when there is nothing to overlap with.
