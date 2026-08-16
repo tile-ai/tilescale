@@ -254,6 +254,236 @@ end): what runs out is SM count itself.
 
 ### Against DeepEP
 
+Both columns from one harness: same `do_bench`, same warmup and rep counts,
+same shape, same 5 s clock warm-up, same eight ranks, run back to back on one
+idle machine. Every figure is a whole Python call, so it carries the host side,
+the launches, and every kernel in the call -- which is the only accounting under
+which the two implementations are comparable, since DeepEP's dispatch is a main
+kernel plus a copy epilogue and this port's is one kernel with no epilogue at
+all. DeepEP runs with `do_cpu_sync=False` and `do_handle_copy=False`, work this
+port has no equivalent of. Two rounds each; both are shown.
+
+| | DeepEP | this port | |
+|---|---|---|---|
+| dispatch bf16 | 1047.7 / 1049.2 µs | **890.2 / 892.1** | −15% |
+| dispatch fp8 | 566.7 / 568.1 | **512.0 / 512.6** | −10% |
+| dispatch cached (`handle=`) | 1045.4 / 1049.2 | **874.6 / 875.8** | −16% |
+| combine bf16 | 988.9 / 992.1 | **954.4 / 954.9** | −3.7% |
+
+A whole layer's collectives -- dispatch → expert → combine, where neither side
+has anything to hide an epilogue behind -- come to 2039 µs against 1846 (−9.5%)
+in bf16, and 1558 against 1467 (−5.8%) with an fp8 dispatch.
+
+`handle=` is the one row where the two differ in kind rather than degree.
+DeepEP saves nothing measurable from it, because its layout work lives inside
+the main kernel; here it is a phase that can be skipped outright, worth 16 µs.
+
+**Overlap**, same harness, against an 8192-square bf16 GEMM:
+
+| | DeepEP | this port |
+|---|---|---|
+| compute | 670.3 / 670.5 µs | 674.4 / 672.5 |
+| dispatch alone | 1049.6 / 1050.6 | 890.0 / 889.5 |
+| serial | 1723.0 / 1724.4 | 1564.4 / 1562.1 |
+| overlapped | 1176.3 / 1176.2 | **1002.7 / 1006.0** |
+| hidden | 546.6 / 548.2 (82%) | **558.4 / 559.4 (83%)** |
+
+**Where DeepEP is ahead.** The cross-rank movement itself: 745 GB/s against 723
+on combine's store-back, about 7%, which is this port's roofline for
+`put_warp`. It gives that back to the epilogues -- writing rows straight into
+their final compact index costs a wait for the count exchange (~19 µs) and
+saves a whole extra pass over the payload. It also degrades more gracefully as
+SMs are taken away: from 64 to 24, this port loses 13% on both collectives
+against DeepEP's 11% and 9%.
+
+Note too that DeepEP's dispatch epilogue *produces* `recv_x`, so it cannot
+overlap the expert computation that consumes it, and that its own headline
+numbers report the main kernel and the epilogue separately.
+
+**Scope.** This is the comparison that matters most and no measurement shows
+it: DeepEP is a production multi-node implementation. There is no RDMA path
+here, so multi-node EP is out of reach, along with the low-latency decode path
+and Engram/PP/CP. Everything above is one node.
+
+**Size**, for the intranode dispatch/combine path only:
+
+| | DeepEP | this port |
+|---|---|---|
+| kernels | ~2110 lines CUDA | **828 lines TileLang** |
+| host | 1107 lines Python | **790** |
+
+DeepEP's kernel figure is `impls/dispatch.cuh` (411) plus its copy epilogue
+(325), `impls/combine.cuh` (245) plus its reduce epilogue (145) and utils
+(172), and the `common/` comm, layout and handle headers (272 + 313 + 230). The
+two epilogues and the separate layout module are most of the difference, and
+this port has neither.
+
+## Overlapping
+
+Both collectives return an `EventOverlap` as their last value, DeepEP's wrapper
+around the communication-stream event. It comes back either way -- synchronously
+it wraps `None` -- so a caller can write `with event:` without knowing which
+mode it asked for.
+
+```python
+recv_x, recv_topk_idx, recv_topk_weights, handle, event = buf.dispatch(
+    x, topk_idx, topk_weights, async_finish=True, allocate_on_comm_stream=True
+)
+with event:                       # runs on the compute stream, overlapping the dispatch
+    something_else()
+# leaving the block, the current stream waits: recv_x is readable
+
+combined, event = buf.combine(
+    expert_out, handle, previous_event=event, async_finish=True, allocate_on_comm_stream=True
+)
+event.current_stream_wait()
+```
+
+`async_finish` leaves the caller's stream unjoined from the communication
+stream; nothing returned may be read until the event is waited on. EPv2 spells
+this `async_with_compute_stream` on dispatch; the name here follows its
+`combine` and DeepEP's legacy buffer.
+
+`previous_event` starts the communication after one specific event instead of
+after everything queued on the caller's stream. `allocate_on_comm_stream` keeps
+this call's temporaries owned by the communication stream and alive through the
+returned event, rather than `Tensor.record_stream`, which CUDA graph capture
+does not permit -- the reason DeepEP carries `extra_tensors` on its event. As in
+DeepEP, `previous_event` requires `allocate_on_comm_stream`.
+
+One asymmetry with DeepEP worth knowing: `Buffer.pipeline_depth` (default 2)
+bounds how far the CPU may run ahead by blocking the *host* on an event a few
+calls back. It exists because a rank queued several calls behind stalls every
+other rank inside the kernel's cross-rank barrier, and it is orthogonal to
+`async_finish` -- so an asynchronous call can still block the host. Pass
+`pipeline_depth=0` to turn it off when driving the overlap yourself.
+
+DeepEP's `combine` returns a third value, `combined_topk_weights`, which has no
+counterpart here for the reason given under *Not implemented*.
+
+`dispatch(x, handle=h)` reuses the layout `h` was built with and skips the
+notify kernel outright -- DeepEP's cached dispatch. Phases 1-2 depend only on
+the routing, so a call whose `topk_idx` has not changed is recomputing
+something it already has. As in DeepEP, `topk_idx` and `topk_weights` must be
+`None`; the handle replays its own copies.
+
+Measured, three clean samples each: fp8 dispatch 514 -> 497 µs (3.3%), bf16 888
+-> 871 µs (2.0%). Less than the 36 µs the notify kernel costs, because the
+cached scatter runs about 10 µs slower than the uncached one: the entry barrier
+moves into it rather than disappearing, being about peers not overwriting data
+this rank is still reading, which holds however the layout was obtained.
+
+A handle is only good until the next layout-computing dispatch. `send_base` and
+`send_rank_mask` are updated in place, so a stale handle would not fail, it
+would route to the wrong slots and return plausible numbers -- dispatch
+therefore tracks a layout generation and rejects a handle that no longer
+matches.
+
+`dispatch(..., cumulative_local_expert_recv_stats=t)` adds this rank's received
+token count per local expert into `t`, a `[num_experts // num_ranks]` uint32
+tensor -- DeepEP's load-balance counter. It accumulates rather than overwrites,
+so the caller decides the window by choosing when to zero it. Costs ~25 µs of
+dispatch's ~896 (2.8%) and compiles its own kernel variant, so the default path
+does not pay for it. DeepEP gets the same number for free because its expanded
+layout already exchanges per-expert counts; this port has no such exchange and
+counts locally instead, which is why it is not free here.
+
+`dispatch` produces DeepEP's **expanded layout** when the buffer is built with
+`do_expand=True`: one received row per (token, expert) instead of one per
+(token, rank), and rows grouped by local expert, so each expert's rows are the
+contiguous block a grouped GEMM wants. `handle.expert_offset` gives the segment
+bounds and `handle.expert_count` how many rows in each are real;
+`expert_alignment=n` rounds each segment up to a multiple of `n` and the gap is
+zeroed unless `zero_padding=False`.
+
+DeepEP expands in a receiver-side copy epilogue. This port has none -- rows land
+at their final index straight from the sender -- so instead the count exchange
+runs at expert granularity and the sender derives the index itself. That also
+makes the capacity check free: every rank computes the same layout from the same
+count matrix, so an overflow is known before any payload moves. Deduplicated,
+capacity cannot be exceeded; expanded it can, so `expand_factor` sizes the
+receive buffer (default 1.0, right for balanced routing) and `handle.expand_overflow`
+reports how many rows a call needed if it did not fit -- dispatch skips the rank
+rather than writing past it.
+
+**`combine` cannot consume an expanded dispatch yet** and asserts rather than
+returning a wrong answer. Its store-back slot is `comm_x[rank][src_token]`,
+unique only because dispatch deduplicated; expanded, a token with two experts on
+one rank has two rows that collide there. The fix is DeepEP's `kDoExpandedSend`
+-- sum a token's local-expert rows before sending -- which needs a
+(src_rank, src_token) -> rows inversion dispatch does not currently record.
+
+`combine(..., bias=b)` adds one tensor, or `bias=(b0, b1)` two, to the output --
+DeepEP's `bias_0`/`bias_1`, each `[num_tokens, hidden]`. They seed the reduce
+accumulator instead of being added after it, so they cost nothing measurable,
+and a token whose every selection was masked off still comes back as its bias.
+
+Knobs worth tuning: `num_sms`, `dispatch_threads`, `combine_threads`, and
+`reduce_threads` (separate because the reduce wants `hidden / reduce_threads` to
+be a whole number of 128-bit loads). The thread defaults are wide (1024) because
+that measured at least as fast at every SM count tried.
+
+## Performance
+
+8× B200, full NVLink mesh, 8192 tokens/rank, hidden 7168, top-8, 256 experts,
+64 SMs. Bandwidth is the bottleneck rank's, over payload bytes that cross
+NVLink. Three to four samples per row, each one gated on whether any process
+that is not ours *used the SMs* at any point during the run, sampled throughout
+with `nvidia-smi pmon`. Presence is not the test: an 8-way inference server
+holding 167 GB/GPU at 0% utilisation blocks a presence-based gate forever while
+disturbing nothing, and a job under this same account is invisible to a
+by-other-user check while pinning a GPU at 100%. Both happened; both produced
+numbers 30–60% off.
+
+| | dispatch | combine |
+|---|---|---|
+| bf16, whole call | **686–687 GB/s** (897–899 µs) | **623–624 GB/s** (988–989 µs) |
+| bf16, kernel only | 694 GB/s | — |
+| fp8, whole call | **590–592 GB/s** (520–523 µs) | 623–625 GB/s (986–989 µs) |
+| bf16, `num_sms=128` | **716 GB/s** (861 µs) | **651 GB/s** (946 µs) |
+
+`num_sms` is the whole knob. Dispatch is one launch whose grid-wide rendezvous
+needs every block resident, so it cannot exceed the device's 148 SMs, but
+anything up to that is fair game: 898.1 µs at 64, 873.6 at 96, 861.0 at 128.
+The default leaves the rest of the device for expert compute; a caller who
+wants dispatch to have it says so.
+
+Combine is bf16 whichever dtype dispatch used, and measures the same either
+way, as it should.
+
+FP8's rate is below bf16's partly as an accounting artifact: it counts the
+7168 payload bytes a row carries, but the row that crosses NVLink is 7680 --
+the per-128 fp32 scales packed in alongside, plus alignment padding (see
+`reference.packed_row_bytes`). On the wire that is ~632 GB/s. The rest of the
+gap is the kernel's fixed phases -- notify, dedup, count exchange, metadata
+stores -- costing the same in absolute terms against a payload half the size.
+
+Where the time goes in a bf16 dispatch (887µs kernel, 897µs call):
+
+| | |
+|---|---|
+| scatter | ~822 µs (749 GB/s — at the `put_warp` roofline of 731–739) |
+| entry + exit barriers | ~44 µs |
+| count exchange | ~19 µs |
+| host | ~9 µs |
+
+combine splits into ~850µs of store-back (725 GB/s, likewise at the roofline)
+and ~125µs of local reduce (733MB at ~5.9 TB/s).
+
+Fewer SMs, same shape:
+
+| #SMs | dispatch | combine |
+|---|---|---|
+| 64 | 686–688 GB/s | 623–625 GB/s |
+| 24 | 598 GB/s | 545–546 GB/s |
+
+That is −13% / −13% against DeepEP's −11% / −9% over the same range. At 24 SMs
+each block already carries 16 warps, past the point where `put_warp` saturates,
+so widening blocks does not help (1024 threads against 512 is ~1% at either
+end): what runs out is SM count itself.
+
+### Against DeepEP
+
 DeepEP's own `tests/elastic/test_ep.py`, same machine, same shape, 64 SMs.
 Its headline numbers cover `dispatch_impl` / `combine_impl` **only** -- the copy
 and reduce epilogues are timed and reported separately. This port has no
