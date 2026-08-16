@@ -176,12 +176,16 @@ receive buffer (default 1.0, right for balanced routing) and `handle.expand_over
 reports how many rows a call needed if it did not fit -- dispatch skips the rank
 rather than writing past it.
 
-**`combine` cannot consume an expanded dispatch yet** and asserts rather than
-returning a wrong answer. Its store-back slot is `comm_x[rank][src_token]`,
-unique only because dispatch deduplicated; expanded, a token with two experts on
-one rank has two rows that collide there. The fix is DeepEP's `kDoExpandedSend`
--- sum a token's local-expert rows before sending -- which needs a
-(src_rank, src_token) -> rows inversion dispatch does not currently record.
+`combine` consumes an expanded dispatch. Its store-back slot is
+`comm_x[rank][src_token]`, unique only because a deduplicated dispatch gives a
+token one row per destination rank; expanded, a token with two experts here has
+two rows that would collide. The answer is DeepEP's `kDoExpandedSend` -- sum a
+token's local-expert rows before sending, so one row per (rank, token) still
+crosses NVLink and the store-back and reduce are unchanged. That needs the
+inverse of what dispatch records, so a third kernel buckets each received row
+under its source; it touches metadata only, never the payload. With routing
+spread over many ranks most groups hold a single row and are sent straight from
+`x` with no summing.
 
 `combine(..., bias=b)` adds one tensor, or `bias=(b0, b1)` two, to the output --
 DeepEP's `bias_0`/`bias_1`, each `[num_tokens, hidden]`. They seed the reduce
@@ -299,6 +303,24 @@ DeepEP's 11% and 9%.
 Note too that DeepEP's dispatch epilogue *produces* `recv_x`, so it cannot
 overlap the expert computation that consumes it, and that its own headline
 numbers report the main kernel and the epilogue separately.
+
+**Coverage.** Within the intranode path:
+
+| | DeepEP | this port |
+|---|---|---|
+| `async_finish` / `previous_event` / `allocate_on_comm_stream` | yes | yes |
+| `handle=` cached dispatch | yes | yes |
+| per-call `num_sms` | yes | yes |
+| fp8 payload with per-128 scales | yes | yes, packed into the row |
+| expanded layout, `expert_alignment`, zero padding | yes | yes |
+| combine consuming an expanded dispatch | `kAllowMultipleReduction` | yes, summed on the sender |
+| `cumulative_local_expert_recv_stats` | yes | yes |
+| combine bias | yes | yes |
+| `deterministic` mode | yes | **no** |
+| `use_tma_aligned_col_major_sf` | yes | **no** |
+| combine's `topk_weights` output | yes | deliberately absent |
+
+The API section above and *Not implemented* below give the reasoning for each.
 
 **Scope.** This is the comparison that matters most and no measurement shows
 it: DeepEP is a production multi-node implementation. There is no RDMA path
@@ -454,7 +476,7 @@ a design decision here -- each would be an additive parameter or output:
 
 | | |
 |---|---|
-| `kAllowMultipleReduction` | combine-side local sum across several experts on one rank -- what combine needs before it can consume an expanded dispatch, see below |
+| `kAllowMultipleReduction` | combine-side local sum across several experts on one rank. This port sums on the *sender* instead, DeepEP's `kDoExpandedSend`, which is what lets combine take an expanded dispatch -- so the capability is covered and the flag is not |
 | `deterministic` mode | DeepEP has a separate prologue for it |
 | `use_tma_aligned_col_major_sf` | column-major scale-factor layout for a downstream GEMM |
 
