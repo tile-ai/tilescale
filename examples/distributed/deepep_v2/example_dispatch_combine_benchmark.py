@@ -173,11 +173,14 @@ if __name__ == "__main__":
     parser.add_argument("--topk", type=int, default=8)
     parser.add_argument("--experts", type=int, default=256)
     parser.add_argument("--num-sms", type=int, default=64)
-    # Dispatch no longer stages rows through shared memory, so warps per block
-    # is now a pure occupancy knob rather than something bounded by a
-    # shared-memory budget; 512 measures fastest at this shape.
-    parser.add_argument("--dispatch-threads", type=int, default=512)
-    parser.add_argument("--combine-threads", type=int, default=256)
+    # Neither collective stages rows through shared memory, so warps per block
+    # is a pure occupancy knob rather than something bounded by a shared-memory
+    # budget, and wide wins: against 512/256 these are worth 0.6% on dispatch
+    # and 3.0% on combine. Same as `Buffer`'s own defaults, deliberately -- when
+    # they drifted apart every number here described a configuration the library
+    # does not use.
+    parser.add_argument("--dispatch-threads", type=int, default=1024)
+    parser.add_argument("--combine-threads", type=int, default=1024)
     # Iteration counts, not milliseconds.
     parser.add_argument("--warmup", type=int, default=50)
     parser.add_argument("--rep", type=int, default=50)

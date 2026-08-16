@@ -191,7 +191,8 @@ and a token whose every selection was masked off still comes back as its bias.
 Knobs worth tuning: `num_sms`, `dispatch_threads`, `combine_threads`, and
 `reduce_threads` (separate because the reduce wants `hidden / reduce_threads` to
 be a whole number of 128-bit loads). The thread defaults are wide (1024) because
-that measured at least as fast at every SM count tried.
+that measured at least as fast at every SM count tried: against 512/256 it is
+worth 0.6% on dispatch and 3.0% on combine.
 
 ## Performance
 
@@ -207,10 +208,9 @@ numbers 30–60% off.
 
 | | dispatch | combine |
 |---|---|---|
-| bf16, whole call | **686–687 GB/s** (897–899 µs) | **623–624 GB/s** (988–989 µs) |
-| bf16, kernel only | 694 GB/s | — |
-| fp8, whole call | **590–592 GB/s** (520–523 µs) | 623–625 GB/s (986–989 µs) |
-| bf16, `num_sms=128` | **716 GB/s** (861 µs) | **651 GB/s** (946 µs) |
+| bf16 | **690.8 GB/s** (892.0 µs) | **644.5–645.4 GB/s** (954.7–956.1 µs) |
+| fp8 | **595.4–596.8 GB/s** (516.2–517.5 µs) | 644.8–645.0 GB/s (955.4–955.7 µs) |
+| bf16, `num_sms=128` | **718.2–718.3 GB/s** (857.9–858.0 µs) | **659.0–659.6 GB/s** (934.1–935.1 µs) |
 
 `num_sms` is the whole knob. Dispatch is one launch whose grid-wide rendezvous
 needs every block resident, so it cannot exceed the device's 148 SMs, but
@@ -228,26 +228,26 @@ the per-128 fp32 scales packed in alongside, plus alignment padding (see
 gap is the kernel's fixed phases -- notify, dedup, count exchange, metadata
 stores -- costing the same in absolute terms against a payload half the size.
 
-Where the time goes in a bf16 dispatch (887µs kernel, 897µs call):
+From a trace, a bf16 dispatch is 865.9 µs of kernel inside an 892.0 µs call, so
+about 26 µs is host and launch. It is one kernel now, so the phases inside it no
+longer have a launch boundary to be separated at; the scatter is nearly all of
+it and runs at the `put_warp` roofline, with the count exchange (~19 µs) and the
+entry and exit barriers (~44 µs) the only other measurable pieces.
 
-| | |
-|---|---|
-| scatter | ~822 µs (749 GB/s — at the `put_warp` roofline of 731–739) |
-| entry + exit barriers | ~44 µs |
-| count exchange | ~19 µs |
-| host | ~9 µs |
-
-combine splits into ~850µs of store-back (725 GB/s, likewise at the roofline)
-and ~125µs of local reduce (733MB at ~5.9 TB/s).
+Combine's two kernels are 866.6 µs of remote store-back and 114.6 µs of local
+reduce (733 MB at ~6.4 TB/s), an 88/12 split. Those sum to more than the 955 µs
+whole call because the trace isolates each call behind a full synchronise, so
+the store-back pays its cross-rank entry barrier in full every iteration where
+a pipelined benchmark does not.
 
 Fewer SMs, same shape:
 
 | #SMs | dispatch | combine |
 |---|---|---|
-| 64 | 686–688 GB/s | 623–625 GB/s |
-| 24 | 598 GB/s | 545–546 GB/s |
+| 64 | 690.8 GB/s | 644.5–645.4 GB/s |
+| 24 | 599.5–599.6 GB/s | 567.4–568.8 GB/s |
 
-That is −13% / −13% against DeepEP's −11% / −9% over the same range. At 24 SMs
+That is −13% / −12% against DeepEP's −11% / −9% over the same range. At 24 SMs
 each block already carries 16 warps, past the point where `put_warp` saturates,
 so widening blocks does not help (1024 threads against 512 is ~1% at either
 end): what runs out is SM count itself.
@@ -293,8 +293,8 @@ on combine's store-back, about 7%, which is this port's roofline for
 `put_warp`. It gives that back to the epilogues -- writing rows straight into
 their final compact index costs a wait for the count exchange (~19 µs) and
 saves a whole extra pass over the payload. It also degrades more gracefully as
-SMs are taken away: from 64 to 24, this port loses 13% on both collectives
-against DeepEP's 11% and 9%.
+SMs are taken away: from 64 to 24, this port loses 13% and 12% against
+DeepEP's 11% and 9%.
 
 Note too that DeepEP's dispatch epilogue *produces* `recv_x`, so it cannot
 overlap the expert computation that consumes it, and that its own headline
