@@ -185,9 +185,8 @@ def combine_kernel(
                                 # barrier into it.
                                 for e in T.serial(lane, hidden, 32):
                                     acc = T.alloc_var(T.float32, init=0.0)
-                                    for j in range(max_k):
-                                        if j < cnt:
-                                            acc = acc + T.Cast(T.float32, x[group_rows[pair * max_k + j] * hidden + e])
+                                    for j in T.serial(cnt):
+                                        acc = acc + T.Cast(T.float32, x[group_rows[pair * max_k + j] * hidden + e])
                                     reduce_scratch[scratch_warp * hidden + e] = T.Cast(dtype, acc)
                                 T.sync_warp()
                                 T.put_warp(
@@ -228,8 +227,7 @@ def combine_kernel(
             # writes to `acc`, and it keeps a token whose every selection was
             # masked off from losing its bias.
             if num_bias >= 1:
-                for i in T.Parallel(hidden):
-                    acc[i] = bias_0[token, i]
+                T.copy(bias_0[token, :], acc)
             else:
                 T.clear(acc)
             if num_bias >= 2:

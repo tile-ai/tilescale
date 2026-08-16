@@ -121,26 +121,22 @@ The entry barrier moves with it. It stops a peer's next round from overwriting
 data this rank has not finished reading, which is needed whether or not the
 layout was recomputed, so when ``cached`` it opens the scatter instead.
 
-**One launch, unless the grids differ** (``scatter_sms``). Phases 1-2 compute a
-layout and phase 3 moves the payload. They are one kernel by default, with
-``T.sync_grid()`` between them carrying what phase 2 wrote -- and they were two
+**One launch.** Phases 1-2 compute a layout and phase 3 moves the payload, with
+``T.sync_grid()`` between them carrying what phase 2 wrote. They were two
 kernels for a while, because a launch boundary carries it just as well and
-costs nothing to measure: 881.7us split against 883.7 fused, the extra launch
-absorbed by the ``exchange_done`` spinner it replaced.
+costs nothing on an idle device -- 881.7us split against 883.7 fused.
 
-Nothing on an idle device, that is. Behind a large GEMM the boundary costs
-118.7us, because the notify releases all of its SMs on the way out and the
-GEMM's pending waves take them back before the scatter can ask for them. The
-same gap solo is 1.9us. Fusing is worth nineteen points of overlap for two
-microseconds of standalone throughput, so it is the default; see the section on
+Behind a large GEMM it costs 118.7us, because the notify releases all of its
+SMs on the way out and the GEMM's pending waves take them back before phase 3
+can ask for them. The same gap solo is 1.9us. That is nineteen points of
+overlap for two microseconds of standalone throughput; see the section on
 overlap.
 
-What splitting still buys is a scatter wider than the notify's grid. The fused
-kernel's ``sync_grid`` needs every block resident, which pins both phases to
-``num_sms``, so ``scatter_sms`` -- and only ``scatter_sms`` -- takes the split
-path: at 128 blocks dispatch is 868.4us bf16 against 899.0 fused, about 3%.
-That is a standalone win at the cost of the overlap one, which is the trade the
-knob now names.
+The split also let phase 3 run on a wider grid than the notify, which one
+``sync_grid``-bearing kernel cannot express. That turned out not to be worth
+keeping either: widening the whole grid beats it outright, 860.6us at
+``num_sms=128`` against 867.1 for a 64-wide notify and a 128-wide scatter, and
+the notify does not care whether it has 64 blocks or 128 for its 26us of work.
 
 It is not DeepEP's split. DeepEP cuts *after* the movement, into a copy
 epilogue that compacts rows staged per sender; this port's scatter already
@@ -149,11 +145,6 @@ here is before the movement instead, and the piece it isolates -- 34.7us of
 layout computation, constant across dtypes -- is the piece a cached ``handle=``
 dispatch would skip outright.
 
-``scatter_sms`` defaults to ``num_sms``, which is what selects the fused path. A
-caller who set ``num_sms`` low to leave the rest of the device for expert
-compute did not thereby ask for a scatter that takes it back, so widening is
-opt-in -- and a caller who wants the device to itself is exactly the caller for
-whom the split's standalone win is the right one.
 """
 
 import tilelang
@@ -190,7 +181,6 @@ def dispatch_kernel(
     expert_alignment: int = 1,
     zero_padding: bool = True,
     expand_capacity: int = 0,
-    scatter_sms: int = 0,
     cached: bool = False,
 ):
     assert threads % 32 == 0
@@ -204,10 +194,6 @@ def dispatch_kernel(
     n_dst = num_experts if do_expand else num_ranks
     warps_per_cta = threads // 32
     total_warps = num_sms * warps_per_cta
-    # The scatter is its own launch, so it is free to be wider than the
-    # notify grid. See the module docstring.
-    scatter_blocks = scatter_sms or num_sms
-    scatter_warps = scatter_blocks * warps_per_cta
     cap = num_max_tokens_per_rank
     total_capacity = cap * num_ranks
     # Deduplicated, `total_capacity` is a bound no routing can exceed. Expanded
@@ -245,356 +231,6 @@ def dispatch_kernel(
     # happen to be per-local-expert.
     count_dim = experts_per_rank if do_expand else 1
     seg_dim = experts_per_rank + 1 if do_expand else 1
-
-    # The phases are macros so that both launch packagings below can share
-    # them, and they live here rather than inside `main` because the eager
-    # builder hoists a prim_func's nested `def`s out of its scope.
-    @T.macro
-    def notify_phase(
-        bx,
-        topk_idx,
-        notify_done,
-        exchange_done,
-        send_count,
-        count_matrix,
-        send_base,
-        psum_recv_count,
-        num_recv,
-        send_rank_mask,
-        barrier,
-        expert_count,
-        expert_offset,
-        expand_overflow,
-    ):
-        tid = T.get_thread_binding()
-        lane = tid % 32
-        local_warp = tid // 32
-        warp = bx * warps_per_cta + local_warp
-        # Through a variable, not `T.get_rank()` inline: inline leaves the
-        # index range unknown, so bounds checking wraps every
-        # `buf[my_rank ...]` in an `if_then_else` that `address_of` rejects.
-        my_rank = T.alloc_var(T.int32, init=T.get_rank())
-
-        # Entry barrier, DeepEP's `kDispatchTag0`: stops a peer's *next*
-        # round from writing this rank's `count_matrix` before this round's
-        # reset has landed. The exit barrier cannot -- it only says a peer
-        # reached it, after which the peer may finish and relaunch. Its own
-        # slot, disjoint from the exit barrier's; see buffer.py.
-        T.barrier_blocks(barrier[0])
-
-        # ---------------- Phase 1: count ----------------
-        blk_count = T.alloc_shared((warps_per_cta * n_dst,), "int32")
-        # Flat, one row per warp, and deliberately untouched by any tile-level
-        # op: keeping `T.copy`/`T.atomic_add` away from it is what keeps the
-        # compiler from inserting block-wide barriers into warp-scoped code.
-        for i in T.serial(tid, warps_per_cta * n_dst, threads):
-            blk_count[i] = 0
-        T.sync_threads()
-
-        for token in T.serial(warp, num_tokens, total_warps):
-            expert = T.alloc_var(T.int32)
-            dst_rank = T.alloc_var(T.int32)
-            expert = -1
-            if lane < topk:
-                expert = topk_idx[token, lane]
-            dst_rank = -1
-            if expert >= 0:
-                dst_rank = expert // experts_per_rank
-            # Expanding, the destination *is* the expert, and the dedup
-            # below is a no-op: DeepEP asserts a token's top-k entries are
-            # distinct experts, so the lanes are already pairwise-distinct.
-            # The counter stays atomic-free for the same reason either way.
-            dst = expert if do_expand else dst_rank
-            leader = T.alloc_var(T.int32, init=_dedup_leader(dst, lane))
-            if leader == 1 and dst >= 0:
-                # No atomic: after dedup the lanes reaching here hold
-                # pairwise-distinct destinations, and each warp owns its own
-                # slice, so no two threads ever touch the same counter.
-                at = local_warp * n_dst + dst
-                blk_count[at] = blk_count[at] + 1
-            # Record the destination set here rather than in the scatter:
-            # combine needs it, and gathering it costs a round of shuffles
-            # that has no business being on the data path.
-            # Rank granularity even when expanding: combine reduces over
-            # ranks either way. Expanding, `leader` is per-expert and this
-            # needs a dedup of its own; not expanding, `dst` *is* `dst_rank`,
-            # so reuse it rather than issue a second warp-collective
-            # `T.match_any_sync` per token for the same answer.
-            if do_expand:
-                rank_leader = T.alloc_var(T.int32, init=_dedup_leader(dst_rank, lane))
-            else:
-                rank_leader = leader
-            rank_mask = T.alloc_var(T.int32, init=0)
-            for k in range(topk):
-                dst_k = T.alloc_var(T.int32)
-                lead_k = T.alloc_var(T.int32)
-                dst_k = T.shfl_sync(dst_rank, k)
-                lead_k = T.shfl_sync(rank_leader, k)
-                if lead_k == 1 and dst_k >= 0:
-                    rank_mask = rank_mask + (1 << dst_k)
-            if lane == 0:
-                send_rank_mask[token] = rank_mask
-        T.sync_threads()
-
-        for d in T.serial(tid, n_dst, threads):
-            folded = T.alloc_var(T.int32, init=0)
-            for w in range(warps_per_cta):
-                folded = folded + blk_count[w * n_dst + d]
-            if folded > 0:
-                T.atom_add(send_count[d], folded, scope="gpu")
-        T.sync_threads()
-        if tid == 0:
-            T.atom_add(notify_done[0], 1, scope="gpu", sem="release")
-
-        # ---------------- Phase 2: exchange ----------------
-        if bx == 0 and local_warp == 0:
-            if lane == 0:
-                T.wait_ge(notify_done[0], num_sms, scope=T.WaitScope.GPU, semantics=T.WaitSemantics.ACQUIRE)
-            T.sync_warp()
-
-            # Publish this rank's count vector to every peer, so all ranks
-            # hold the same `count_matrix`.
-            #
-            # One fence, then relaxed stores. Per-store `sem="release"` cost
-            # 4.4%: each carries a `fence.release.sys` that waits for prior
-            # writes to cross NVLink, serialising eight round trips to
-            # publish 64 integers. Peers read `count_matrix` directly and
-            # infer nothing else from it, so the stores need no ordering
-            # against each other.
-            T.fence_sys()
-            # `n_dst` is `num_ranks` unless expanding, where it is
-            # `num_experts` and the row no longer fits one lane each.
-            for p in range(num_ranks):
-                for c in T.serial(lane, n_dst, 32):
-                    T.st(count_matrix[my_rank * n_dst + c], send_count[c], scope="sys", sem="relaxed", dst_pe=p)
-            T.sync_warp()
-            for s in range(num_ranks):
-                for c in T.serial(lane, n_dst, 32):
-                    T.wait_ge(count_matrix[s * n_dst + c], 0, scope=T.WaitScope.SYS, semantics=T.WaitSemantics.ACQUIRE)
-            T.sync_warp()
-
-            # Lane d: where my rows start inside destination d's output.
-            # Expanding, `d` is an expert and this is only the offset
-            # *within* that expert's segment; the segment base is added
-            # below, once every destination's aligned layout is known.
-            for d in T.serial(lane, n_dst, 32):
-                base = T.alloc_var(T.int32, init=0)
-                for s in T.serial(my_rank):
-                    base = base + count_matrix[s * n_dst + d]
-                send_base[d] = base
-            T.sync_warp()
-
-            if do_expand:
-                # Every destination lays its output out the same way, from
-                # the same count matrix, so each rank can reconstruct all of
-                # them and nobody has to be told. Lane p handles peer p.
-                if lane < num_ranks:
-                    seg = T.alloc_var(T.int32, init=0)
-                    for e in range(experts_per_rank):
-                        total = T.alloc_var(T.int32, init=0)
-                        for s in range(num_ranks):
-                            total = total + count_matrix[s * n_dst + lane * experts_per_rank + e]
-                        # My rows for this expert sit at the segment base
-                        # plus the offset among earlier senders.
-                        send_base[lane * experts_per_rank + e] = seg + send_base[lane * experts_per_rank + e]
-                        # Aligned, so the next segment starts on a boundary
-                        # a grouped GEMM can consume.
-                        seg = seg + T.ceildiv(total, expert_alignment) * expert_alignment
-                        if lane == my_rank:
-                            expert_count[e] = total
-                            expert_offset[e + 1] = seg
-                    # `seg` is now this destination's aligned total. Known
-                    # to every rank before a single payload byte has moved,
-                    # which is what makes the capacity check free.
-                    if lane == my_rank:
-                        expert_offset[0] = 0
-                        num_recv[0] = seg
-                        if seg > recv_capacity:
-                            expand_overflow[0] = seg
-                    if seg > recv_capacity:
-                        # Skip this destination entirely rather than write
-                        # past its buffer. It raises its own flag.
-                        for e in range(experts_per_rank):
-                            send_base[lane * experts_per_rank + e] = -1
-            else:
-                # Lane 0: my own receive prefix sum (DeepEP's
-                # `psum_num_recv_tokens_per_scaleup_rank`) and total.
-                if lane == 0:
-                    psum = T.alloc_var(T.int32, init=0)
-                    for s in range(num_ranks):
-                        psum = psum + count_matrix[s * num_ranks + my_rank]
-                        psum_recv_count[s] = psum
-                    num_recv[0] = psum
-            T.sync_warp()
-            if lane == 0:
-                T.atom_add(exchange_done[0], 1, scope="gpu", sem="release")
-
-    @T.macro
-    def scatter_phase(
-        bx,
-        x,
-        topk_idx,
-        topk_weights,
-        notify_done,
-        exchange_done,
-        send_count,
-        count_matrix,
-        send_base,
-        num_recv,
-        slot_counter,
-        barrier,
-        recv_x,
-        recv_src_rank,
-        recv_src_token,
-        recv_topk_idx,
-        recv_topk_weights,
-        recv_expert_stats,
-        expert_count,
-        expert_offset,
-    ):
-        tid = T.get_thread_binding()
-        lane = tid % 32
-        local_warp = tid // 32
-        warp = bx * warps_per_cta + local_warp
-        # Through a variable, not `T.get_rank()` inline: inline leaves the
-        # index range unknown, so bounds checking wraps every
-        # `buf[my_rank ...]` in an `if_then_else` that `address_of` rejects.
-        my_rank = T.alloc_var(T.int32, init=T.get_rank())
-
-        # With no notify kernel ahead of it, the scatter owns the entry
-        # barrier. It is not about the layout -- it stops a peer's next
-        # round from landing on data this rank is still reading -- so it is
-        # needed either way, just in whichever kernel goes first.
-        if cached:
-            T.barrier_blocks(barrier[0])
-
-        # ---------------- Phase 3: scatter ----------------
-        for token in T.serial(warp, num_tokens, scatter_warps):
-            expert = T.alloc_var(T.int32)
-            dst_rank = T.alloc_var(T.int32)
-            slot = T.alloc_var(T.int32)
-            expert = -1
-            if lane < topk:
-                expert = topk_idx[token, lane]
-            dst_rank = -1
-            if expert >= 0:
-                dst_rank = expert // experts_per_rank
-            dst = expert if do_expand else dst_rank
-            leader = T.alloc_var(T.int32, init=_dedup_leader(dst, lane))
-            # Every destination of this token claims its slot at once, one
-            # atomic per owning lane. `send_base[dst] < 0` marks a
-            # destination phase 2 found would overflow, which only the
-            # expanded layout can hit -- deduplicated, capacity is a hard
-            # bound -- but the condition is the same either way and
-            # `send_base` is eight hot integers.
-            slot = -1
-            if leader == 1 and dst >= 0 and send_base[dst] >= 0:
-                slot = T.atom_add(slot_counter[dst], 1, scope="gpu")
-
-            for k in range(topk):
-                dst_k = T.alloc_var(T.int32)
-                slot_k = T.alloc_var(T.int32)
-                dst_k = T.shfl_sync(dst, k)
-                # Expanding, the destination is an expert and the peer that
-                # owns it has to be shuffled separately; otherwise they are
-                # the same value and the second shuffle is pure cost.
-                if do_expand:
-                    pe_k = T.shfl_sync(dst_rank, k)
-                else:
-                    pe_k = dst_k
-                slot_k = T.shfl_sync(slot, k)
-                if slot_k >= 0:
-                    # The final index on the destination -- known here only
-                    # because phase 2 handed every rank the full count
-                    # matrix. Expanding, it is already inside the right
-                    # expert's segment.
-                    idx_k = T.alloc_var(T.int32, init=send_base[dst_k] + slot_k)
-                    T.put_warp(
-                        src=T.address_of(x[token, 0]),
-                        dst=T.address_of(recv_x[idx_k * row_width]),
-                        size=row_width,
-                        dst_pe=pe_k,
-                    )
-                    if lane == 0:
-                        T.st(recv_src_rank[idx_k], my_rank, scope="sys", sem="relaxed", dst_pe=pe_k)
-                        T.st(recv_src_token[idx_k], token, scope="sys", sem="relaxed", dst_pe=pe_k)
-                    if lane < topk:
-                        local_expert = T.alloc_var(T.int32, init=-1)
-                        if do_expand:
-                            # This row *is* one (token, expert) pair, and
-                            # `dst_k` is that expert. Marking the token's
-                            # other local experts here too would have the
-                            # epilogue weight every one of the token's rows
-                            # by the same sum, and combine would add them up.
-                            if expert == dst_k:
-                                local_expert = expert - pe_k * experts_per_rank
-                        elif pe_k * experts_per_rank <= expert and expert < (pe_k + 1) * experts_per_rank:
-                            local_expert = expert - pe_k * experts_per_rank
-                        T.st(recv_topk_idx[idx_k * topk + lane], local_expert, scope="sys", sem="relaxed", dst_pe=pe_k)
-                        T.st(recv_topk_weights[idx_k * topk + lane], topk_weights[token, lane], scope="sys", sem="relaxed", dst_pe=pe_k)
-
-        T.barrier_blocks(barrier[num_ranks])
-
-        # Reset for the next call. The `T.sync_grid()` is load-bearing:
-        # `tl::barrier_blocks` rendezvouses *ranks*, not this rank's own
-        # blocks, so behind it alone block 0 zeroes `slot_counter` while
-        # other blocks are still claiming slots -- which silently produces
-        # duplicate (src_rank, src_token) rows. DeepEP's `gpu_barrier` uses
-        # `this_grid().sync()` for exactly this.
-        T.sync_grid()
-
-        # ---------------- Alignment padding ----------------
-        # The scatter writes only real rows, so the gap between an expert's
-        # count and its aligned segment end still holds whatever the last
-        # call put there. A grouped GEMM reading the aligned segment would
-        # consume it, so clear it -- DeepEP's `kDoZeroPadding`, and for the
-        # same reason. Rows, not bytes: one warp per padding row, strided
-        # over the whole grid.
-        if do_expand and zero_padding:
-            for e in range(experts_per_rank):
-                pad_begin = T.alloc_var(T.int32, init=expert_offset[e] + expert_count[e])
-                pad_end = T.alloc_var(T.int32, init=expert_offset[e + 1])
-                for row in T.serial(pad_begin + warp, pad_end, scatter_warps):
-                    for i in T.serial(lane, row_width, 32):
-                        recv_x[row * row_width + i] = T.Cast(row_dtype, 0)
-                    if lane == 0:
-                        # A padding row belongs to no sender and no token;
-                        # combine skips anything marked this way.
-                        recv_src_rank[row] = -1
-                        recv_src_token[row] = -1
-                    if lane < topk:
-                        recv_topk_idx[row * topk + lane] = -1
-                        recv_topk_weights[row * topk + lane] = T.Cast(T.float32, 0)
-
-        # ---------------- Per-expert receive stats (optional) ----------------
-        # Counted here, on the receiver, rather than exchanged like the rank
-        # counts: `recv_topk_idx` already holds the local expert for every
-        # received (row, top-k slot) and -1 elsewhere, so the answer is a
-        # local scan of something this rank was going to be handed anyway.
-        # DeepEP derives it in notify instead, from a per-expert count
-        # vector it already exchanges -- it has one because the expanded
-        # layout needs per-expert offsets. This port's layout does not, and
-        # widening the exchange from `num_ranks` to `num_experts` entries
-        # per rank to avoid a scan that costs microseconds is a bad trade.
-        #
-        # Behind the exit barrier and `sync_grid`, so every peer's stores
-        # have landed and this rank's own blocks are past the scatter.
-        if collect_expert_stats:
-            n_recv = T.alloc_var(T.int32, init=num_recv[0])
-            for i in T.serial(bx * threads + tid, n_recv * topk, scatter_blocks * threads):
-                local_expert = T.alloc_var(T.int32, init=recv_topk_idx[i])
-                if local_expert >= 0:
-                    T.atom_add(recv_expert_stats[local_expert], 1, scope="gpu")
-
-        if bx == 0:
-            for d in T.serial(tid, n_dst, threads):
-                send_count[d] = 0
-                slot_counter[d] = 0
-            for c in T.serial(tid, num_ranks * n_dst, threads):
-                count_matrix[c] = -1
-            if tid == 0:
-                notify_done[0] = 0
-                exchange_done[0] = 0
 
     @T.prim_func
     def main(
@@ -646,84 +282,302 @@ def dispatch_kernel(
         # counters, so every block has to be resident at once. `num_sms`
         # defaults to the device's SM count (see buffer.py) and one block per SM
         # always fits.
-        # One launch when the grids match, which is the default, because the
-        # seam between two launches is not free while something else holds the
-        # device: the notify gives up its SMs on the way out and a resident GEMM
-        # takes them back before the scatter can ask. Measured, that seam is
-        # 1.9us on an idle device and 118.7us behind an 8192-square GEMM, and
-        # closing it is worth nineteen points of overlap. See the module
-        # docstring.
-        fused = scatter_blocks == num_sms
-        if not cached or fused:
-            with T.Kernel(num_sms, threads=threads) as bx:
-                if not cached:
-                    notify_phase(
-                        bx,
-                        topk_idx,
-                        notify_done,
-                        exchange_done,
-                        send_count,
-                        count_matrix,
-                        send_base,
-                        psum_recv_count,
-                        num_recv,
-                        send_rank_mask,
-                        barrier,
-                        expert_count,
-                        expert_offset,
-                        expand_overflow,
-                    )
-                if fused:
-                    # Carries phase 2's stores to phase 3 now that no launch
-                    # boundary does, and `barrier_blocks` rendezvouses ranks
-                    # rather than this rank's own blocks.
-                    T.sync_grid()
-                    scatter_phase(
-                        bx,
-                        x,
-                        topk_idx,
-                        topk_weights,
-                        notify_done,
-                        exchange_done,
-                        send_count,
-                        count_matrix,
-                        send_base,
-                        num_recv,
-                        slot_counter,
-                        barrier,
-                        recv_x,
-                        recv_src_rank,
-                        recv_src_token,
-                        recv_topk_idx,
-                        recv_topk_weights,
-                        recv_expert_stats,
-                        expert_count,
-                        expert_offset,
-                    )
+        with T.Kernel(num_sms, threads=threads) as bx:
+            # Through a variable, not `T.get_rank()` inline: inline leaves the
+            # index range unknown, so bounds checking wraps every
+            # `buf[my_rank ...]` in an `if_then_else` that `address_of` rejects.
+            tid = T.get_thread_binding()
+            lane = tid % 32
+            local_warp = tid // 32
+            warp = bx * warps_per_cta + local_warp
+            my_rank = T.alloc_var(T.int32, init=T.get_rank())
 
-        if not fused:
-            with T.Kernel(scatter_blocks, threads=threads) as bx:
-                scatter_phase(
-                    bx,
-                    x,
-                    topk_idx,
-                    topk_weights,
-                    notify_done,
-                    exchange_done,
-                    send_count,
-                    count_matrix,
-                    send_base,
-                    num_recv,
-                    slot_counter,
-                    barrier,
-                    recv_x,
-                    recv_src_rank,
-                    recv_src_token,
-                    recv_topk_idx,
-                    recv_topk_weights,
-                    recv_expert_stats,
-                    expert_count,
-                    expert_offset,
-                )
+            if not cached:
+                # Entry barrier, DeepEP's `kDispatchTag0`: stops a peer's *next*
+                # round from writing this rank's `count_matrix` before this round's
+                # reset has landed. The exit barrier cannot -- it only says a peer
+                # reached it, after which the peer may finish and relaunch. Its own
+                # slot, disjoint from the exit barrier's; see buffer.py.
+                T.barrier_blocks(barrier[0])
+
+                # ---------------- Phase 1: count ----------------
+                blk_count = T.alloc_shared((warps_per_cta * n_dst,), "int32")
+                # Flat, one row per warp, and deliberately untouched by any tile-level
+                # op: keeping `T.copy`/`T.atomic_add` away from it is what keeps the
+                # compiler from inserting block-wide barriers into warp-scoped code.
+                for i in T.serial(tid, warps_per_cta * n_dst, threads):
+                    blk_count[i] = 0
+                T.sync_threads()
+
+                for token in T.serial(warp, num_tokens, total_warps):
+                    expert = T.alloc_var(T.int32, init=-1)
+                    dst_rank = T.alloc_var(T.int32, init=-1)
+                    if lane < topk:
+                        expert = topk_idx[token, lane]
+                    if expert >= 0:
+                        dst_rank = expert // experts_per_rank
+                    # Expanding, the destination *is* the expert, and the dedup
+                    # below is a no-op: DeepEP asserts a token's top-k entries are
+                    # distinct experts, so the lanes are already pairwise-distinct.
+                    # The counter stays atomic-free for the same reason either way.
+                    dst = expert if do_expand else dst_rank
+                    leader = T.alloc_var(T.int32, init=_dedup_leader(dst, lane))
+                    if leader == 1 and dst >= 0:
+                        # No atomic: after dedup the lanes reaching here hold
+                        # pairwise-distinct destinations, and each warp owns its own
+                        # slice, so no two threads ever touch the same counter.
+                        at = local_warp * n_dst + dst
+                        blk_count[at] = blk_count[at] + 1
+                    # Record the destination set here rather than in the scatter:
+                    # combine needs it, and gathering it costs a round of shuffles
+                    # that has no business being on the data path.
+                    # Rank granularity even when expanding: combine reduces over
+                    # ranks either way. Expanding, `leader` is per-expert and this
+                    # needs a dedup of its own; not expanding, `dst` *is* `dst_rank`,
+                    # so reuse it rather than issue a second warp-collective
+                    # `T.match_any_sync` per token for the same answer.
+                    if do_expand:
+                        rank_leader = T.alloc_var(T.int32, init=_dedup_leader(dst_rank, lane))
+                    else:
+                        rank_leader = leader
+                    rank_mask = T.alloc_var(T.int32, init=0)
+                    for k in range(topk):
+                        dst_k = T.alloc_var(T.int32, init=T.shfl_sync(dst_rank, k))
+                        lead_k = T.alloc_var(T.int32, init=T.shfl_sync(rank_leader, k))
+                        if lead_k == 1 and dst_k >= 0:
+                            rank_mask = rank_mask + (1 << dst_k)
+                    if lane == 0:
+                        send_rank_mask[token] = rank_mask
+                T.sync_threads()
+
+                for d in T.serial(tid, n_dst, threads):
+                    folded = T.alloc_var(T.int32, init=0)
+                    for w in range(warps_per_cta):
+                        folded = folded + blk_count[w * n_dst + d]
+                    if folded > 0:
+                        T.atom_add(send_count[d], folded, scope="gpu")
+                T.sync_threads()
+                if tid == 0:
+                    T.atom_add(notify_done[0], 1, scope="gpu", sem="release")
+
+                # ---------------- Phase 2: exchange ----------------
+                if bx == 0 and local_warp == 0:
+                    if lane == 0:
+                        T.wait_ge(notify_done[0], num_sms, scope=T.WaitScope.GPU, semantics=T.WaitSemantics.ACQUIRE)
+                    T.sync_warp()
+
+                    # Publish this rank's count vector to every peer, so all ranks
+                    # hold the same `count_matrix`.
+                    #
+                    # One fence, then relaxed stores. Per-store `sem="release"` cost
+                    # 4.4%: each carries a `fence.release.sys` that waits for prior
+                    # writes to cross NVLink, serialising eight round trips to
+                    # publish 64 integers. Peers read `count_matrix` directly and
+                    # infer nothing else from it, so the stores need no ordering
+                    # against each other.
+                    T.fence_sys()
+                    # `n_dst` is `num_ranks` unless expanding, where it is
+                    # `num_experts` and the row no longer fits one lane each.
+                    for p in range(num_ranks):
+                        for c in T.serial(lane, n_dst, 32):
+                            T.st(count_matrix[my_rank * n_dst + c], send_count[c], scope="sys", sem="relaxed", dst_pe=p)
+                    T.sync_warp()
+                    for s in range(num_ranks):
+                        for c in T.serial(lane, n_dst, 32):
+                            T.wait_ge(count_matrix[s * n_dst + c], 0, scope=T.WaitScope.SYS, semantics=T.WaitSemantics.ACQUIRE)
+                    T.sync_warp()
+
+                    # Lane d: where my rows start inside destination d's output.
+                    # Expanding, `d` is an expert and this is only the offset
+                    # *within* that expert's segment; the segment base is added
+                    # below, once every destination's aligned layout is known.
+                    for d in T.serial(lane, n_dst, 32):
+                        base = T.alloc_var(T.int32, init=0)
+                        for s in T.serial(my_rank):
+                            base = base + count_matrix[s * n_dst + d]
+                        send_base[d] = base
+                    T.sync_warp()
+
+                    if do_expand:
+                        # Every destination lays its output out the same way, from
+                        # the same count matrix, so each rank can reconstruct all of
+                        # them and nobody has to be told. Lane p handles peer p.
+                        if lane < num_ranks:
+                            seg = T.alloc_var(T.int32, init=0)
+                            for e in range(experts_per_rank):
+                                total = T.alloc_var(T.int32, init=0)
+                                for s in range(num_ranks):
+                                    total = total + count_matrix[s * n_dst + lane * experts_per_rank + e]
+                                # My rows for this expert sit at the segment base
+                                # plus the offset among earlier senders.
+                                send_base[lane * experts_per_rank + e] = seg + send_base[lane * experts_per_rank + e]
+                                # Aligned, so the next segment starts on a boundary
+                                # a grouped GEMM can consume.
+                                seg = seg + T.ceildiv(total, expert_alignment) * expert_alignment
+                                if lane == my_rank:
+                                    expert_count[e] = total
+                                    expert_offset[e + 1] = seg
+                            # `seg` is now this destination's aligned total. Known
+                            # to every rank before a single payload byte has moved,
+                            # which is what makes the capacity check free.
+                            if lane == my_rank:
+                                expert_offset[0] = 0
+                                num_recv[0] = seg
+                                if seg > recv_capacity:
+                                    expand_overflow[0] = seg
+                            if seg > recv_capacity:
+                                # Skip this destination entirely rather than write
+                                # past its buffer. It raises its own flag.
+                                for e in range(experts_per_rank):
+                                    send_base[lane * experts_per_rank + e] = -1
+                    else:
+                        # Lane 0: my own receive prefix sum (DeepEP's
+                        # `psum_num_recv_tokens_per_scaleup_rank`) and total.
+                        if lane == 0:
+                            psum = T.alloc_var(T.int32, init=0)
+                            for s in range(num_ranks):
+                                psum = psum + count_matrix[s * num_ranks + my_rank]
+                                psum_recv_count[s] = psum
+                            num_recv[0] = psum
+                    T.sync_warp()
+                    if lane == 0:
+                        T.atom_add(exchange_done[0], 1, scope="gpu", sem="release")
+
+            # Everything phase 2 published has to be visible to phase 3, and
+            # `barrier_blocks` rendezvouses ranks rather than this rank's own
+            # blocks, so the grid sync is what carries it now that the launch
+            # boundary is gone. Same guarantee the spin on `exchange_done` and
+            # then the launch boundary each gave in turn.
+            T.sync_grid()
+
+            # With no notify kernel ahead of it, the scatter owns the entry
+            # barrier. It is not about the layout -- it stops a peer's next
+            # round from landing on data this rank is still reading -- so it is
+            # needed either way, just in whichever kernel goes first.
+            if cached:
+                T.barrier_blocks(barrier[0])
+
+            # ---------------- Phase 3: scatter ----------------
+            for token in T.serial(warp, num_tokens, total_warps):
+                expert = T.alloc_var(T.int32, init=-1)
+                dst_rank = T.alloc_var(T.int32, init=-1)
+                slot = T.alloc_var(T.int32, init=-1)
+                if lane < topk:
+                    expert = topk_idx[token, lane]
+                if expert >= 0:
+                    dst_rank = expert // experts_per_rank
+                dst = expert if do_expand else dst_rank
+                leader = T.alloc_var(T.int32, init=_dedup_leader(dst, lane))
+                # Every destination of this token claims its slot at once, one
+                # atomic per owning lane. `send_base[dst] < 0` marks a
+                # destination phase 2 found would overflow, which only the
+                # expanded layout can hit -- deduplicated, capacity is a hard
+                # bound -- but the condition is the same either way and
+                # `send_base` is eight hot integers.
+                if leader == 1 and dst >= 0 and send_base[dst] >= 0:
+                    slot = T.atom_add(slot_counter[dst], 1, scope="gpu")
+
+                for k in range(topk):
+                    dst_k = T.alloc_var(T.int32, init=T.shfl_sync(dst, k))
+                    slot_k = T.alloc_var(T.int32, init=T.shfl_sync(slot, k))
+                    # Expanding, the destination is an expert and the peer that
+                    # owns it has to be shuffled separately; otherwise they are
+                    # the same value and the second shuffle is pure cost.
+                    if do_expand:
+                        pe_k = T.shfl_sync(dst_rank, k)
+                    else:
+                        pe_k = dst_k
+                    if slot_k >= 0:
+                        # The final index on the destination -- known here only
+                        # because phase 2 handed every rank the full count
+                        # matrix. Expanding, it is already inside the right
+                        # expert's segment.
+                        idx_k = T.alloc_var(T.int32, init=send_base[dst_k] + slot_k)
+                        T.put_warp(
+                            src=T.address_of(x[token, 0]),
+                            dst=T.address_of(recv_x[idx_k * row_width]),
+                            size=row_width,
+                            dst_pe=pe_k,
+                        )
+                        if lane == 0:
+                            T.st(recv_src_rank[idx_k], my_rank, scope="sys", sem="relaxed", dst_pe=pe_k)
+                            T.st(recv_src_token[idx_k], token, scope="sys", sem="relaxed", dst_pe=pe_k)
+                        if lane < topk:
+                            local_expert = T.alloc_var(T.int32, init=-1)
+                            if do_expand:
+                                # This row *is* one (token, expert) pair, and
+                                # `dst_k` is that expert. Marking the token's
+                                # other local experts here too would have the
+                                # epilogue weight every one of the token's rows
+                                # by the same sum, and combine would add them up.
+                                if expert == dst_k:
+                                    local_expert = expert - pe_k * experts_per_rank
+                            elif pe_k * experts_per_rank <= expert and expert < (pe_k + 1) * experts_per_rank:
+                                local_expert = expert - pe_k * experts_per_rank
+                            T.st(recv_topk_idx[idx_k * topk + lane], local_expert, scope="sys", sem="relaxed", dst_pe=pe_k)
+                            T.st(recv_topk_weights[idx_k * topk + lane], topk_weights[token, lane], scope="sys", sem="relaxed", dst_pe=pe_k)
+
+            T.barrier_blocks(barrier[num_ranks])
+
+            # Reset for the next call. The `T.sync_grid()` is load-bearing:
+            # `tl::barrier_blocks` rendezvouses *ranks*, not this rank's own
+            # blocks, so behind it alone block 0 zeroes `slot_counter` while
+            # other blocks are still claiming slots -- which silently produces
+            # duplicate (src_rank, src_token) rows. DeepEP's `gpu_barrier` uses
+            # `this_grid().sync()` for exactly this.
+            T.sync_grid()
+
+            # ---------------- Alignment padding ----------------
+            # The scatter writes only real rows, so the gap between an expert's
+            # count and its aligned segment end still holds whatever the last
+            # call put there. A grouped GEMM reading the aligned segment would
+            # consume it, so clear it -- DeepEP's `kDoZeroPadding`, and for the
+            # same reason. Rows, not bytes: one warp per padding row, strided
+            # over the whole grid.
+            if do_expand and zero_padding:
+                for e in range(experts_per_rank):
+                    pad_begin = T.alloc_var(T.int32, init=expert_offset[e] + expert_count[e])
+                    pad_end = T.alloc_var(T.int32, init=expert_offset[e + 1])
+                    for row in T.serial(pad_begin + warp, pad_end, total_warps):
+                        for i in T.serial(lane, row_width, 32):
+                            recv_x[row * row_width + i] = T.Cast(row_dtype, 0)
+                        if lane == 0:
+                            # A padding row belongs to no sender and no token;
+                            # combine skips anything marked this way.
+                            recv_src_rank[row] = -1
+                            recv_src_token[row] = -1
+                        if lane < topk:
+                            recv_topk_idx[row * topk + lane] = -1
+                            recv_topk_weights[row * topk + lane] = T.Cast(T.float32, 0)
+
+            # ---------------- Per-expert receive stats (optional) ----------------
+            # Counted here, on the receiver, rather than exchanged like the rank
+            # counts: `recv_topk_idx` already holds the local expert for every
+            # received (row, top-k slot) and -1 elsewhere, so the answer is a
+            # local scan of something this rank was going to be handed anyway.
+            # DeepEP derives it in notify instead, from a per-expert count
+            # vector it already exchanges -- it has one because the expanded
+            # layout needs per-expert offsets. This port's layout does not, and
+            # widening the exchange from `num_ranks` to `num_experts` entries
+            # per rank to avoid a scan that costs microseconds is a bad trade.
+            #
+            # Behind the exit barrier and `sync_grid`, so every peer's stores
+            # have landed and this rank's own blocks are past the scatter.
+            if collect_expert_stats:
+                n_recv = T.alloc_var(T.int32, init=num_recv[0])
+                for i in T.serial(bx * threads + tid, n_recv * topk, num_sms * threads):
+                    local_expert = T.alloc_var(T.int32, init=recv_topk_idx[i])
+                    if local_expert >= 0:
+                        T.atom_add(recv_expert_stats[local_expert], 1, scope="gpu")
+
+            if bx == 0:
+                for d in T.serial(tid, n_dst, threads):
+                    send_count[d] = 0
+                    slot_counter[d] = 0
+                for c in T.serial(tid, num_ranks * n_dst, threads):
+                    count_matrix[c] = -1
+                if tid == 0:
+                    notify_done[0] = 0
+                    exchange_done[0] = 0
 
     return main

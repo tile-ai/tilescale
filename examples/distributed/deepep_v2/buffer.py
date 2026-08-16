@@ -219,7 +219,6 @@ class Buffer:
         combine_threads: int = 1024,
         reduce_threads: int = 256,
         pipeline_depth: int = 2,
-        scatter_sms: int = 0,
         comm_stream_priority: int = None,
         do_expand: bool = False,
         expert_alignment: int = 1,
@@ -441,11 +440,6 @@ class Buffer:
         # driving its own overlap usually wants: the `synchronize` it does
         # blocks the *host*, so a bounded run-ahead and a fully asynchronous
         # call are not the same thing.
-        # Dispatch's scatter is a separate launch from its notify, so it can
-        # use a wider grid; 0 means the same as `num_sms`. Worth about 4% at
-        # 128 against the default 64, and opt-in because a caller who capped
-        # `num_sms` to leave room for expert compute did not ask for it back.
-        self.scatter_sms = scatter_sms
         self.pipeline_depth = pipeline_depth
         self._in_flight: deque = deque()
 
@@ -464,7 +458,7 @@ class Buffer:
 
     def _get_dispatch_kernel(self, num_tokens: int, collect_expert_stats: bool = False, num_sms: int = 0, cached: bool = False):
         num_sms = self._resolve_num_sms(num_sms)
-        key = (num_tokens, collect_expert_stats, num_sms, self.scatter_sms, cached)
+        key = (num_tokens, collect_expert_stats, num_sms, cached)
         if key not in self._dispatch_kernels:
             kernel = dispatch_kernel(
                 num_tokens,
@@ -483,7 +477,6 @@ class Buffer:
                 self.expert_alignment,
                 self.zero_padding,
                 self.recv_capacity,
-                self.scatter_sms,
                 cached,
             )
             kernel.compile_group = self.group
@@ -514,6 +507,45 @@ class Buffer:
             kernel.initialize(allocator=self.allocator)
             self._combine_kernels[key] = kernel
         return self._combine_kernels[key]
+
+    def _begin_comm(self, previous_event, allocate_on_comm_stream):
+        """Join the communication stream to what this call must follow.
+
+        DeepEP's `stream_control_prologue`. Anything the caller has to convert
+        or allocate belongs *before* this rather than inside the stream block it
+        opens: the first operation queued on the communication stream takes the
+        one block admission per iteration that a resident GEMM is not already
+        holding, and it should be the collective rather than a 3 us cast. See
+        kernels/dispatch.py on overlap.
+        """
+        compute_stream = torch.cuda.current_stream()
+        if previous_event is not None:
+            assert allocate_on_comm_stream, "previous_event requires allocate_on_comm_stream"
+            self.comm_stream.wait_event(previous_event.event)
+        else:
+            self.comm_stream.wait_stream(compute_stream)
+        return compute_stream
+
+    def _end_comm(self, compute_stream, temporaries, async_finish, allocate_on_comm_stream):
+        """Record the finish event, and keep the temporaries alive across the
+        handover: they were allocated on the communication stream and the caller
+        reads them on its own.
+
+        `allocate_on_comm_stream` carries them on the event instead of calling
+        `record_stream`, which CUDA graph capture does not permit.
+        """
+        finish_event = torch.cuda.Event()
+        finish_event.record(self.comm_stream)
+        if not async_finish:
+            compute_stream.wait_stream(self.comm_stream)
+        elif not allocate_on_comm_stream:
+            for t in temporaries:
+                t.record_stream(compute_stream)
+        event = EventOverlap(
+            finish_event if async_finish else None,
+            temporaries if async_finish and allocate_on_comm_stream else (),
+        )
+        return finish_event, event
 
     def dispatch(
         self,
@@ -585,22 +617,13 @@ class Buffer:
             )
         num_tokens = x.shape[0]
         num_sms = self._resolve_num_sms(num_sms)
-        compute_stream = torch.cuda.current_stream()
-        # Converted here, on the caller's stream, rather than inside the
-        # communication-stream block below. Whichever operation is queued first
-        # on the communication stream gets the one admission slot per iteration
-        # that is not taxed by a resident GEMM (see the module docstring in
-        # kernels/dispatch.py on overlap); a 3us cast taking it and leaving the
-        # 850us collective to pay the ~130us stall costs 141us of hidden time.
-        # `wait_stream` is issued after this, so it still covers them.
+        # Converted on the caller's stream, before the communication stream is
+        # joined to it: a 3 us cast queued first on the communication stream
+        # takes the admission the 850 us collective behind it then has to wait
+        # for, which measured 141 us of hidden time. See `_begin_comm`.
         topk_idx_i32 = topk_idx if cached else topk_idx.to(torch.int32).contiguous()
         topk_weights_f32 = topk_weights if cached else topk_weights.to(torch.float32).contiguous()
-
-        if previous_event is not None:
-            assert allocate_on_comm_stream, "previous_event requires allocate_on_comm_stream"
-            self.comm_stream.wait_event(previous_event.event)
-        else:
-            self.comm_stream.wait_stream(compute_stream)
+        compute_stream = self._begin_comm(previous_event, allocate_on_comm_stream)
 
         with torch.cuda.stream(self.comm_stream):
             # Nothing is reset here: the kernel does it at the end of every
@@ -654,28 +677,18 @@ class Buffer:
             else:
                 expert_count = expert_offset = expand_overflow = None
 
-        finish_event = torch.cuda.Event()
-        finish_event.record(self.comm_stream)
+        temporaries = tuple(
+            t
+            for t in (topk_idx_i32, topk_weights_f32, num_recv, psum_recv_count, expert_count, expert_offset, expand_overflow)
+            if t is not None
+        )
+        finish_event, event = self._end_comm(compute_stream, temporaries, async_finish, allocate_on_comm_stream)
 
         # Keep the CPU from running arbitrarily far ahead. See `pipeline_depth`.
         if self.pipeline_depth:
             self._in_flight.append(finish_event)
             while len(self._in_flight) > self.pipeline_depth:
                 self._in_flight.popleft().synchronize()
-
-        # Allocated on the communication stream, read by the caller on its
-        # own: something has to keep them alive across the handover.
-        temporaries = tuple(
-            t
-            for t in (topk_idx_i32, topk_weights_f32, num_recv, psum_recv_count, expert_count, expert_offset, expand_overflow)
-            if t is not None
-        )
-        if async_finish:
-            if not allocate_on_comm_stream:
-                for t in temporaries:
-                    t.record_stream(compute_stream)
-        else:
-            compute_stream.wait_stream(self.comm_stream)
 
         if not cached:
             self._layout_generation += 1
@@ -695,10 +708,6 @@ class Buffer:
             expert_count,
             expert_offset,
             expand_overflow,
-        )
-        event = EventOverlap(
-            finish_event if async_finish else None,
-            temporaries if async_finish and allocate_on_comm_stream else (),
         )
         # FP8: the packed uint8 buffer, unpacked with `reference.per_token_cast_back`.
         return (self.recv_x, self.recv_topk_idx, self.recv_topk_weights, handle, event)
@@ -749,12 +758,7 @@ class Buffer:
         x_flat = x_contig.reshape(-1)
         num_sms = self._resolve_num_sms(num_sms or handle.num_sms)
         num_tokens = handle.num_tokens
-        compute_stream = torch.cuda.current_stream()
-        if previous_event is not None:
-            assert allocate_on_comm_stream, "previous_event requires allocate_on_comm_stream"
-            self.comm_stream.wait_event(previous_event.event)
-        else:
-            self.comm_stream.wait_stream(compute_stream)
+        compute_stream = self._begin_comm(previous_event, allocate_on_comm_stream)
         with torch.cuda.stream(self.comm_stream):
             kernel = self._get_combine_kernel(num_tokens, len(biases), num_sms)
             kernel(
@@ -771,26 +775,15 @@ class Buffer:
                 *bias_args,
                 self.combined[:num_tokens],
             )
-        finish_event = torch.cuda.Event()
-        finish_event.record(self.comm_stream)
         # Only a `contiguous()` copy belongs to this call; a reshape view of
         # the caller's own tensor does not, and the output is buffer-owned and
         # outlives any single call.
         temporaries = () if x_contig is x else (x_contig,)
-        if async_finish:
-            if not allocate_on_comm_stream:
-                for t in temporaries:
-                    t.record_stream(compute_stream)
-        else:
-            compute_stream.wait_stream(self.comm_stream)
         # No pipeline bound here, unlike `dispatch`, and the asymmetry is not
         # understood: bounding dispatch is worth 634 -> 530 -> 460 GB/s over
         # successive runs, bounding this one costs 626 -> 610. Measured, not
         # reasoned; re-measure over several runs before changing either.
-        event = EventOverlap(
-            finish_event if async_finish else None,
-            temporaries if async_finish and allocate_on_comm_stream else (),
-        )
+        _, event = self._end_comm(compute_stream, temporaries, async_finish, allocate_on_comm_stream)
         return self.combined[:num_tokens], event
 
     def close(self):

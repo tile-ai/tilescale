@@ -210,14 +210,13 @@ numbers 30–60% off.
 | bf16, whole call | **686–687 GB/s** (897–899 µs) | **623–624 GB/s** (988–989 µs) |
 | bf16, kernel only | 694 GB/s | — |
 | fp8, whole call | **590–592 GB/s** (520–523 µs) | 623–625 GB/s (986–989 µs) |
-| bf16, `scatter_sms=128` | **703–716 GB/s** (861–877 µs) | unchanged |
-| fp8, `scatter_sms=128` | **613–617 GB/s** (499–503 µs) | unchanged |
+| bf16, `num_sms=128` | **716 GB/s** (861 µs) | **651 GB/s** (946 µs) |
 
-The last two rows are the same kernels on a wider scatter grid. Dispatch is two
-launches, and only the first needs a persistent grid, so the scatter is free to
-use more of the device than `num_sms` allows -- worth 3.4% on bf16 and 4.0% on
-fp8. Opt-in, because a caller who capped `num_sms` to leave room for expert
-compute did not ask for it back. See `kernels/dispatch.py`.
+`num_sms` is the whole knob. Dispatch is one launch whose grid-wide rendezvous
+needs every block resident, so it cannot exceed the device's 148 SMs, but
+anything up to that is fair game: 898.1 µs at 64, 873.6 at 96, 861.0 at 128.
+The default leaves the rest of the device for expert compute; a caller who
+wants dispatch to have it says so.
 
 Combine is bf16 whichever dtype dispatch used, and measures the same either
 way, as it should.
@@ -413,13 +412,15 @@ there is nothing for a comm block to be placed beside, and the placement still
 waits for a full SM to drain.
 
 Never giving the SMs up works instead, and that just means one kernel. The
-kernel was one before it was split for `scatter_sms`, the split's own numbers
-put the fusion at 883.7 us against 881.7, and the measurement above says the
-boundary costs 118.7 us of overlap. So the fusion is the default and the split
-survives for the case that motivated it -- a scatter grid wider than the notify's,
-which one `sync_grid`-bearing kernel cannot express. Standalone is unchanged at
-899.0 us bf16, 982.8 combine, 522.8 fp8, and `scatter_sms=128` still gives
-868.4 us on the split path.
+kernel was one before it was split so the scatter could use a wider grid than
+the notify; the split's own numbers put the fusion at 883.7 us against 881.7,
+and the measurement above says the boundary costs 118.7 us of overlap.
+
+The wider scatter grid did not survive the fusion, and did not need to. Giving
+the *whole* fused kernel the wider grid beats the split arrangement outright --
+861.0 us at `num_sms=128` against 867.1 for a 64-wide notify and a 128-wide
+scatter -- so the knob that expressed it is gone and `num_sms` is the only one
+left. Standalone is unchanged at 898.1 us bf16, 984.5 combine, 521.3 fp8.
 
 Standalone performance is unchanged -- 898-900 us bf16 dispatch, 984-985
 combine, 522 fp8, all within the spread of the numbers above -- so this costs
