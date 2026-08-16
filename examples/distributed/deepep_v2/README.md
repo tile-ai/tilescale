@@ -326,11 +326,12 @@ to match the collective, on an idle machine:
 |---|---|---|---|---|---|
 | before | 672.4 us | 891.8 | 1568.9 | 1538.4 | 29.7 us (4%) |
 | + stream priority | 671.0 us | 891.5 | 1566.2 | 1279.9 | 286.3 us (43%) |
-| + cast hoisted | 675.8 us | 890.9 | 1566.7 | **1135.8** | **430.9 us (64%)** |
+| + cast hoisted | 675.8 us | 890.9 | 1566.7 | 1135.8 | 430.9 us (64%) |
+| + fused launch | 673.5 us | 889.8 | 1563.3 | **1004.4** | **558.9 us (83%)** |
 
-Two one-line fixes, and the reason each is worth what it is worth is worth
-writing down, because six plausible theories were measured and rejected before
-the first one.
+Three fixes, DeepEP measures 81% on the same benchmark, and the reason each is
+worth what it is worth is worth writing down -- six plausible theories were
+measured and rejected before the first one.
 
 A private stream buys *eligibility*, not *admission*. The trace shows the
 collective becoming eligible the instant the previous scatter ends, and then
@@ -384,12 +385,41 @@ it -- puts the collective's own kernel first in the queue. Worth 144.6 us, or
 Isolated first from the caller side, by pre-converting the tensors so the
 buffer's cast becomes a no-op: 285.0 us hidden with the cast, 425.7 without.
 
-DeepEP is at 81%, and the gap left is one more instance of the same thing. Both
-sides pay the admission tax, but this port pays it twice per iteration, once
-per launch (mean 267.6 us), where DeepEP pays it at most once (mean 81.5 us):
-its epilogue is pre-admitted through programmatic dependent launch, so the seam
-between its two kernels is *negative*, -30.9 us. Ours is a full stall. That is
-the next thing to try.
+**The third fix: do not hand the SMs back between our own two kernels.** With
+the first two in, the timeline reads:
+
+```
+cast     1170.8 ->  1173.4     2.6 us
+GEMM     1173.1 ->  2070.4   897.3 us   g=2048
+notify   1299.3 ->  1325.9    26.6 us   126.2 us after the GEMM
+scatter  1444.6 ->  2279.3   834.6 us   118.7 us after the notify
+```
+
+The scatter overruns the GEMM by 208.9 us and that overrun is all of what is
+still unhidden. It is not that the scatter runs slowly while sharing the device
+-- 834.6 us here against 844.1 solo, so it does not -- it is that it starts
+271.5 us late. Of that, 126.2 us is the first admission, which DeepEP pays too,
+and **118.7 us is the gap between our own two kernels**. Solo the same gap is
+1.9 us: sixty-two times wider under contention, because the notify releases all
+64 SMs when it exits and the GEMM has twelve waves queued to take them back.
+
+DeepEP does not pay that seam. Its epilogue is pre-admitted through programmatic
+dependent launch, so the boundary between its two kernels measures *negative*,
+-30.9 us. Tried that first, since TileLang exposes it: `T.pdl_sync()` on the
+dependent kernels, verified in the generated CUDA and in the launch path, worth
+**8.2 us**. Pre-admission lets the dependent grid be *placed* while the primary
+is resident, but a GEMM CTA holds 213 KB of the SM's 228 KB of shared memory, so
+there is nothing for a comm block to be placed beside, and the placement still
+waits for a full SM to drain.
+
+Never giving the SMs up works instead, and that just means one kernel. The
+kernel was one before it was split for `scatter_sms`, the split's own numbers
+put the fusion at 883.7 us against 881.7, and the measurement above says the
+boundary costs 118.7 us of overlap. So the fusion is the default and the split
+survives for the case that motivated it -- a scatter grid wider than the notify's,
+which one `sync_grid`-bearing kernel cannot express. Standalone is unchanged at
+899.0 us bf16, 982.8 combine, 522.8 fp8, and `scatter_sms=128` still gives
+868.4 us on the split path.
 
 Standalone performance is unchanged -- 898-900 us bf16 dispatch, 984-985
 combine, 522 fp8, all within the spread of the numbers above -- so this costs
