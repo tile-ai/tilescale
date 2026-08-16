@@ -289,6 +289,9 @@ private:
     if (op->op.same_as(tl::access_ptr())) {
       return VisitAccessPtrCall(op);
     }
+    if (op->op.same_as(builtin::address_of())) {
+      return VisitAddressOfCall(op);
+    }
 
     PrimExpr expr = IRMutatorWithAnalyzer::VisitExpr_(op);
     const auto *call_node = expr.as<CallNode>();
@@ -318,6 +321,21 @@ private:
     }
     safe_value = analyzer_->Simplify(safe_value);
     return if_then_else(CombineConditions(conditions), call, safe_value);
+  }
+
+  // `address_of` yields a pointer, not a value. Rewriting its argument into
+  // `if_then_else(cond, load, safe)` would ask for the address of a
+  // conditional, which every consumer rejects ("address_of argument must be a
+  // BufferLoad"). Visit the indices so nested rewrites still happen, but keep
+  // the argument a BufferLoad; whoever dereferences the pointer is responsible
+  // for the bound, exactly as for `tl.access_ptr` above.
+  PrimExpr VisitAddressOfCall(const CallNode *op) {
+    ICHECK_EQ(op->args.size(), 1U) << "address_of expects 1 arg";
+    auto visit_expr = [this](const PrimExpr &expr) {
+      return this->VisitExpr(expr);
+    };
+    Array<PrimExpr> args{detail::VisitAccessPtrBase(op->args[0], visit_expr)};
+    return Call(op->dtype, op->op, args, op->annotations, op->span);
   }
 
   PrimExpr VisitAccessPtrCall(const CallNode *op) {
