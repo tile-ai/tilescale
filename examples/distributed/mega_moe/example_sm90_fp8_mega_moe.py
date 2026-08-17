@@ -23,15 +23,6 @@ from tilelang.distributed.allocator import get_allocator
 from tilelang.distributed.bench import do_bench
 from tilelang.distributed.host import init_dist
 
-from pipeline_trace import (
-    GLOBAL_TIMER_SOURCE,
-    L1_TRACE_ROLES,
-    L2_TRACE_ROLES,
-    TRACE_FIELDS,
-    save_pipeline_trace_png,
-    trace_schedule_steps,
-)
-
 os.environ.setdefault("NCCL_DEBUG", "ERROR")
 
 
@@ -43,14 +34,6 @@ MODEL_CONFIGS = {
 
 FP8_MAX = 448.0
 SCALE_GRANULARITY = 128
-
-
-def ceil_div(x: int, y: int) -> int:
-    return (x + y - 1) // y
-
-
-def align_up(x: int, alignment: int) -> int:
-    return ceil_div(x, alignment) * alignment
 
 
 def resolve_model_config(args: argparse.Namespace) -> Tuple[str, dict[str, int]]:
@@ -66,52 +49,12 @@ def resolve_model_config(args: argparse.Namespace) -> Tuple[str, dict[str, int]]
     return ("custom" if is_custom else args.model_config), model
 
 
-def classify_shape(hidden: int, intermediate_hidden: int) -> str:
-    if 3072 <= hidden < 5120 and 1536 <= intermediate_hidden < 2560:
-        return "compact"
-    if 5120 <= hidden <= 8192 and 2560 <= intermediate_hidden <= 4096:
-        return "wide"
-    return "generic"
-
-
 def normalize_experts_per_wave(num_experts: int, requested: int) -> int:
     requested = min(max(requested, 1), num_experts)
     for candidate in range(requested, num_experts + 1):
         if num_experts % candidate == 0:
             return candidate
     return num_experts
-
-
-def select_generic_experts_per_wave(
-    intermediate_hidden: int,
-    routed_tokens: int,
-    num_experts_per_rank: int,
-    num_sms: int,
-    block_m: int = 64,
-    block_n: int = 256,
-) -> int:
-    if routed_tokens < num_experts_per_rank or routed_tokens > 4 * num_experts_per_rank:
-        return num_experts_per_rank
-
-    expected_tokens = ceil_div(routed_tokens, num_experts_per_rank)
-    num_m_blocks = ceil_div(expected_tokens, block_m)
-    num_n_blocks = 2 * intermediate_hidden // block_n
-    blocks_per_expert = num_m_blocks * num_n_blocks
-    requested = min(
-        num_experts_per_rank,
-        ceil_div(2 * num_sms, blocks_per_expert),
-    )
-    if blocks_per_expert < num_sms:
-        max_candidate = min(num_experts_per_rank, 2 * requested)
-        requested = max(
-            range(requested, max_candidate + 1),
-            key=lambda candidate: (
-                1.0
-                if num_experts_per_rank % candidate == 0
-                else (num_experts_per_rank % candidate) / candidate
-            ),
-        )
-    return normalize_experts_per_wave(num_experts_per_rank, requested)
 
 
 def select_manual_warp_configs(
@@ -123,18 +66,40 @@ def select_manual_warp_configs(
     num_sms: int,
 ) -> Tuple[str, dict[str, int], dict[str, int]]:
     """Select the TileScale counterpart of DeepGEMM SM90 schedule families."""
-    shape_family = classify_shape(hidden, intermediate_hidden)
+    if 3072 <= hidden < 5120 and 1536 <= intermediate_hidden < 2560:
+        shape_family = "compact"
+    elif 5120 <= hidden <= 8192 and 2560 <= intermediate_hidden <= 4096:
+        shape_family = "wide"
+    else:
+        shape_family = "generic"
+
     routed_tokens = num_tokens * num_topk
     high_sm = num_sms >= 100
 
     l1_stages = 5
     l2_stages = 3
-    generic_experts_per_wave = select_generic_experts_per_wave(
-        intermediate_hidden,
-        routed_tokens,
-        num_experts_per_rank,
-        num_sms,
-    )
+    generic_experts_per_wave = num_experts_per_rank
+    if num_experts_per_rank <= routed_tokens <= 4 * num_experts_per_rank:
+        expected_tokens = (routed_tokens + num_experts_per_rank - 1) // num_experts_per_rank
+        num_m_blocks = (expected_tokens + 63) // 64
+        blocks_per_expert = num_m_blocks * (2 * intermediate_hidden // 256)
+        requested = min(
+            num_experts_per_rank,
+            (2 * num_sms + blocks_per_expert - 1) // blocks_per_expert,
+        )
+        if blocks_per_expert < num_sms:
+            max_candidate = min(num_experts_per_rank, 2 * requested)
+            requested = max(
+                range(requested, max_candidate + 1),
+                key=lambda candidate: (
+                    1.0
+                    if num_experts_per_rank % candidate == 0
+                    else (num_experts_per_rank % candidate) / candidate
+                ),
+            )
+        generic_experts_per_wave = normalize_experts_per_wave(
+            num_experts_per_rank, requested
+        )
     l1_experts_per_wave = l2_experts_per_wave = generic_experts_per_wave
     if high_sm and shape_family == "compact":
         if routed_tokens <= 32 * num_experts_per_rank:
@@ -251,18 +216,17 @@ def fused_l1_swiglu_manual_warp_kernel(
     threads: int = 384,
     pipeline_stages: int = 5,
     num_experts_per_wave: int | None = None,
-    enable_pipeline_trace: bool = False,
 ):
     num_experts_per_rank = num_experts // num_ranks
     num_experts_per_wave = num_experts_per_wave or num_experts_per_rank
     assert num_experts_per_rank % num_experts_per_wave == 0
     num_scale_groups = hidden // SCALE_GRANULARITY
     num_routes = num_tokens * num_topk
-    num_m_blocks = ceil_div(capacity, block_m)
-    num_n_blocks = ceil_div(l1_n, block_n)
+    num_m_blocks = T.ceildiv(capacity, block_m)
+    num_n_blocks = T.ceildiv(l1_n, block_n)
     num_expert_waves = num_experts_per_rank // num_experts_per_wave
     max_tiles_per_expert_wave = num_experts_per_wave * num_m_blocks * num_n_blocks
-    max_tile_rounds_per_expert_wave = ceil_div(max_tiles_per_expert_wave, num_sms)
+    max_tile_rounds_per_expert_wave = T.ceildiv(max_tiles_per_expert_wave, num_sms)
     num_k_blocks = hidden // block_k
     # CTA roles: warps 0-1 dispatch, warps 2-3 TMA, then WGMMA warpgroups.
     warp_size = 32
@@ -299,7 +263,7 @@ def fused_l1_swiglu_manual_warp_kernel(
         recv_counts: T.Tensor((num_experts_per_rank,), T.int32),
         route_slots: T.Tensor((num_tokens, num_topk), T.int32),
         arrivals: T.Tensor(
-            (num_experts_per_rank, ceil_div(capacity, block_m)), T.uint32
+            (num_experts_per_rank, T.ceildiv(capacity, block_m)), T.uint32
         ),
         recv_x: T.Tensor((num_experts_per_rank, capacity, hidden), T.float8_e4m3fn),
         recv_x_sf: T.Tensor((num_experts_per_rank, capacity, num_scale_groups), T.float32),
@@ -318,19 +282,9 @@ def fused_l1_swiglu_manual_warp_kernel(
             T.float32,
         ),
         barrier: T.Tensor((num_ranks,), T.int32),
-        pipeline_trace: T.Tensor(
-            (
-                num_sms,
-                L1_TRACE_ROLES,
-                num_expert_waves * max_tile_rounds_per_expert_wave,
-                TRACE_FIELDS,
-            ),
-            T.int64,
-        ),
     ):
         T.annotate_pass_configs({tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True})
         with T.Kernel(num_sms, threads=threads) as bid:
-            T.import_source(GLOBAL_TIMER_SOURCE)
             tx = T.get_thread_binding()
             src_rank = T.alloc_local((1,), T.int32)
             src_rank[0] = T.get_rank()
@@ -350,68 +304,62 @@ def fused_l1_swiglu_manual_warp_kernel(
 
             if bid == 0:
                 if tx < route_threads:
-                    for reset_wave in T.serial(ceil_div(num_experts, route_threads)):
-                        reset_expert = tx + reset_wave * route_threads
-                        if reset_expert < num_experts:
-                            route_counts[src_rank[0], reset_expert] = 0
+                    for reset_expert in T.serial(tx, num_experts, route_threads):
+                        route_counts[src_rank[0], reset_expert] = 0
                     T.sync_threads(7, route_threads)
 
-                    for assign_wave in T.serial(ceil_div(num_routes, route_threads)):
-                        assign_route = tx + assign_wave * route_threads
-                        if assign_route < num_routes:
-                            assign_token = assign_route // num_topk
-                            assign_topk = assign_route % num_topk
-                            assign_expert = topk_idx[assign_token, assign_topk]
-                            if assign_expert >= 0 and assign_expert < num_experts:
-                                route_slots[assign_token, assign_topk] = T.atomic_add(
-                                    route_counts[src_rank[0], assign_expert],
-                                    1,
-                                    memory_order="relaxed",
-                                    return_prev=True,
-                                )
-                            else:
-                                route_slots[assign_token, assign_topk] = -1
+                    for assign_route in T.serial(tx, num_routes, route_threads):
+                        assign_token = assign_route // num_topk
+                        assign_topk = assign_route % num_topk
+                        assign_expert = topk_idx[assign_token, assign_topk]
+                        if assign_expert >= 0 and assign_expert < num_experts:
+                            route_slots[assign_token, assign_topk] = T.atomic_add(
+                                route_counts[src_rank[0], assign_expert],
+                                1,
+                                memory_order="relaxed",
+                                return_prev=True,
+                            )
+                        else:
+                            route_slots[assign_token, assign_topk] = -1
                     T.sync_threads(7, route_threads)
 
-                    for publish_wave in T.serial(ceil_div(num_experts * num_ranks, route_threads)):
-                        publish_idx = tx + publish_wave * route_threads
-                        if publish_idx < num_experts * num_ranks:
-                            publish_rank = publish_idx // num_experts
-                            publish_expert = publish_idx % num_experts
-                            if publish_rank != src_rank[0]:
-                                T.st(
-                                    route_counts[src_rank[0], publish_expert],
-                                    route_counts[src_rank[0], publish_expert],
-                                    dst_pe=publish_rank,
-                                )
+                    for publish_idx in T.serial(
+                        tx, num_experts * num_ranks, route_threads
+                    ):
+                        publish_rank = publish_idx // num_experts
+                        publish_expert = publish_idx % num_experts
+                        if publish_rank != src_rank[0]:
+                            T.st(
+                                route_counts[src_rank[0], publish_expert],
+                                route_counts[src_rank[0], publish_expert],
+                                dst_pe=publish_rank,
+                            )
 
                 T.barrier_blocks(barrier[0])
 
                 if tx < route_threads:
-                    for count_wave in T.serial(ceil_div(num_experts_per_rank, route_threads)):
-                        count_local_expert = tx + count_wave * route_threads
-                        if count_local_expert < num_experts_per_rank:
-                            recv_count = T.alloc_var(T.int32, init=0)
-                            recv_expert = src_rank[0] * num_experts_per_rank + count_local_expert
-                            for count_rank in T.serial(num_ranks):
-                                recv_count += route_counts[count_rank, recv_expert]
-                            recv_counts[count_local_expert] = recv_count
+                    for count_local_expert in T.serial(
+                        tx, num_experts_per_rank, route_threads
+                    ):
+                        recv_count = T.alloc_var(T.int32, init=0)
+                        recv_expert = src_rank[0] * num_experts_per_rank + count_local_expert
+                        for count_rank in T.serial(num_ranks):
+                            recv_count += route_counts[count_rank, recv_expert]
+                        recv_counts[count_local_expert] = recv_count
 
-                    for prefix_wave in T.serial(ceil_div(num_routes, route_threads)):
-                        prefix_route = tx + prefix_wave * route_threads
-                        if prefix_route < num_routes:
-                            prefix_token = prefix_route // num_topk
-                            prefix_topk = prefix_route % num_topk
-                            prefix_expert = topk_idx[prefix_token, prefix_topk]
-                            prefix_slot = T.alloc_var(
-                                T.int32,
-                                init=route_slots[prefix_token, prefix_topk],
-                            )
-                            if prefix_token < num_tokens and prefix_expert >= 0 and prefix_expert < num_experts and prefix_slot >= 0:
-                                for prefix_rank in T.serial(num_ranks):
-                                    if prefix_rank < src_rank[0]:
-                                        prefix_slot += route_counts[prefix_rank, prefix_expert]
-                                route_slots[prefix_token, prefix_topk] = prefix_slot
+                    for prefix_route in T.serial(tx, num_routes, route_threads):
+                        prefix_token = prefix_route // num_topk
+                        prefix_topk = prefix_route % num_topk
+                        prefix_expert = topk_idx[prefix_token, prefix_topk]
+                        prefix_slot = T.alloc_var(
+                            T.int32,
+                            init=route_slots[prefix_token, prefix_topk],
+                        )
+                        if prefix_token < num_tokens and prefix_expert >= 0 and prefix_expert < num_experts and prefix_slot >= 0:
+                            for prefix_rank in T.serial(num_ranks):
+                                if prefix_rank < src_rank[0]:
+                                    prefix_slot += route_counts[prefix_rank, prefix_expert]
+                            route_slots[prefix_token, prefix_topk] = prefix_slot
 
             T.sync_grid()
 
@@ -423,66 +371,49 @@ def fused_l1_swiglu_manual_warp_kernel(
             dispatch_warp = tx // warp_size
             dispatch_lane = tx % warp_size
             if tx < dispatch_threads:
-                if enable_pipeline_trace:
-                    if dispatch_lane == 0:
-                        pipeline_trace[bid, dispatch_warp, 0, 0] = T.call_extern(
-                            "int64", "tl_globaltimer_ns"
+                for metadata_route in T.serial(
+                    bid * dispatch_threads + tx,
+                    num_routes,
+                    num_sms * dispatch_threads,
+                ):
+                    metadata_token = metadata_route // num_topk
+                    metadata_topk = metadata_route % num_topk
+                    metadata_expert = topk_idx[metadata_token, metadata_topk]
+                    metadata_slot = route_slots[metadata_token, metadata_topk]
+                    if metadata_expert >= 0 and metadata_slot >= 0 and metadata_slot < capacity:
+                        metadata_rank = metadata_expert // num_experts_per_rank
+                        metadata_local_expert = metadata_expert % num_experts_per_rank
+                        T.st(
+                            recv_weights[metadata_local_expert, metadata_slot],
+                            topk_weights[metadata_token, metadata_topk],
+                            dst_pe=metadata_rank,
                         )
-                for metadata_wave in T.serial(ceil_div(num_routes, num_sms * dispatch_threads)):
-                    metadata_route = (
-                        bid * dispatch_threads
-                        + tx
-                        + metadata_wave * num_sms * dispatch_threads
-                    )
-                    if metadata_route < num_routes:
-                        metadata_token = metadata_route // num_topk
-                        metadata_topk = metadata_route % num_topk
-                        metadata_expert = topk_idx[metadata_token, metadata_topk]
-                        metadata_slot = route_slots[metadata_token, metadata_topk]
-                        if metadata_expert >= 0 and metadata_slot >= 0 and metadata_slot < capacity:
-                            metadata_rank = metadata_expert // num_experts_per_rank
-                            metadata_local_expert = metadata_expert % num_experts_per_rank
-                            T.st(
-                                recv_weights[metadata_local_expert, metadata_slot],
-                                topk_weights[metadata_token, metadata_topk],
-                                dst_pe=metadata_rank,
-                            )
-                            T.st(
-                                src_tokens[metadata_local_expert, metadata_slot],
-                                metadata_token,
-                                dst_pe=metadata_rank,
-                            )
-                            T.st(
-                                src_topk[metadata_local_expert, metadata_slot],
-                                metadata_topk,
-                                dst_pe=metadata_rank,
-                            )
-                            T.st(
-                                src_ranks[metadata_local_expert, metadata_slot],
-                                src_rank[0],
-                                scope="sys",
-                                sem="release",
-                                dst_pe=metadata_rank,
-                            )
-
-                if enable_pipeline_trace:
-                    if dispatch_lane == 0:
-                        pipeline_trace[bid, dispatch_warp, 0, 1] = T.call_extern(
-                            "int64", "tl_globaltimer_ns"
+                        T.st(
+                            src_tokens[metadata_local_expert, metadata_slot],
+                            metadata_token,
+                            dst_pe=metadata_rank,
                         )
-                        pipeline_trace[bid, dispatch_warp, 0, 2] = T.call_extern(
-                            "int64", "tl_globaltimer_ns"
+                        T.st(
+                            src_topk[metadata_local_expert, metadata_slot],
+                            metadata_topk,
+                            dst_pe=metadata_rank,
+                        )
+                        T.st(
+                            src_ranks[metadata_local_expert, metadata_slot],
+                            src_rank[0],
+                            scope="sys",
+                            sem="release",
+                            dst_pe=metadata_rank,
                         )
 
-                for pull_wave in T.serial(ceil_div(num_experts_per_rank * capacity, num_sms * dispatch_warps)):
-                    pull_idx = (
-                        bid * dispatch_warps
-                        + dispatch_warp
-                        + pull_wave * num_sms * dispatch_warps
-                    )
+                for pull_idx in T.serial(
+                    bid * dispatch_warps + dispatch_warp,
+                    num_experts_per_rank * capacity,
+                    num_sms * dispatch_warps,
+                ):
                     pull_expert = pull_idx // capacity
                     pull_slot = pull_idx % capacity
-                    if pull_expert < num_experts_per_rank and pull_slot < recv_counts[pull_expert]:
+                    if pull_slot < recv_counts[pull_expert]:
                         if dispatch_lane == dispatch_leader_lane:
                             T.wait_ge(
                                 src_ranks[pull_expert, pull_slot],
@@ -515,12 +446,6 @@ def fused_l1_swiglu_manual_warp_kernel(
                                 scope="gpu",
                                 sem="release",
                             )
-
-                if enable_pipeline_trace:
-                    if dispatch_lane == 0:
-                        pipeline_trace[bid, dispatch_warp, 0, 3] = T.call_extern(
-                            "int64", "tl_globaltimer_ns"
-                        )
 
             if tx >= producer_begin and tx < producer_end:
                 producer_step = T.alloc_var(T.int32, init=0)
@@ -573,11 +498,6 @@ def fused_l1_swiglu_manual_warp_kernel(
                                     producer_tile_offset -= producer_expert_tiles
 
                         if producer_expert >= 0 and producer_n * block_n < l1_n:
-                            if enable_pipeline_trace:
-                                if tx == producer_begin:
-                                    pipeline_trace[bid, 2, producer_schedule_step, 0] = T.call_extern(
-                                        "int64", "tl_globaltimer_ns"
-                                    )
                             producer_arrivals = T.min(
                                 block_m,
                                 recv_counts[producer_expert] - producer_m * block_m,
@@ -590,11 +510,6 @@ def fused_l1_swiglu_manual_warp_kernel(
                                     semantics=T.WaitSemantics.ACQUIRE,
                                 )
                             T.sync_threads(5, producer_threads)
-                            if enable_pipeline_trace:
-                                if tx == producer_begin:
-                                    pipeline_trace[bid, 2, producer_schedule_step, 1] = T.call_extern(
-                                        "int64", "tl_globaltimer_ns"
-                                    )
                             for producer_k in T.serial(num_k_blocks):
                                 producer_stage = (producer_step + producer_k) % pipeline_stages
                                 producer_phase = ((producer_step + producer_k) // pipeline_stages) & 1
@@ -629,11 +544,6 @@ def fused_l1_swiglu_manual_warp_kernel(
                                         barrier=stage_barriers[producer_stage],
                                     )
                                 T.mbarrier_arrive(stage_barriers[producer_stage])
-                            if enable_pipeline_trace:
-                                if tx == producer_begin:
-                                    pipeline_trace[bid, 2, producer_schedule_step, 2] = T.call_extern(
-                                        "int64", "tl_globaltimer_ns"
-                                    )
                             producer_step += num_k_blocks
                             producer_wave_tile += num_sms
 
@@ -708,11 +618,6 @@ def fused_l1_swiglu_manual_warp_kernel(
                                     consumer_tile_offset -= consumer_expert_tiles
 
                         if consumer_expert >= 0 and consumer_n * block_n < l1_n:
-                            if enable_pipeline_trace:
-                                if tx == math_begin:
-                                    pipeline_trace[bid, 3, consumer_schedule_step, 3] = T.call_extern(
-                                        "int64", "tl_globaltimer_ns"
-                                    )
                             T.clear(partial)
                             T.clear(accum)
                             for consumer_k in T.serial(num_k_blocks):
@@ -722,12 +627,6 @@ def fused_l1_swiglu_manual_warp_kernel(
                                     stage_barriers[consumer_stage],
                                     consumer_phase,
                                 )
-                                if consumer_k == 0:
-                                    if enable_pipeline_trace:
-                                        if tx == math_begin:
-                                            pipeline_trace[bid, 3, consumer_schedule_step, 0] = T.call_extern(
-                                                "int64", "tl_globaltimer_ns"
-                                            )
                                 T.gemm(
                                     a_shared[consumer_stage, :, :],
                                     b_shared[consumer_stage, :, :],
@@ -769,11 +668,6 @@ def fused_l1_swiglu_manual_warp_kernel(
                                 T.clear(partial)
                                 T.mbarrier_arrive(stage_barriers[pipeline_stages + consumer_stage])
                             consumer_step += num_k_blocks
-                            if enable_pipeline_trace:
-                                if tx == math_begin:
-                                    pipeline_trace[bid, 3, consumer_schedule_step, 1] = T.call_extern(
-                                        "int64", "tl_globaltimer_ns"
-                                    )
                             for i, j in T.Parallel(block_m, block_n // 2):
                                 gate[i, j] = accum[i, (j // 8) * 16 + j % 8]
                             for i, j in T.Parallel(block_m, block_n // 2):
@@ -818,11 +712,6 @@ def fused_l1_swiglu_manual_warp_kernel(
                                     consumer_n * (block_n // 2),
                                 ],
                             )
-                            if enable_pipeline_trace:
-                                if tx == math_begin:
-                                    pipeline_trace[bid, 3, consumer_schedule_step, 2] = T.call_extern(
-                                        "int64", "tl_globaltimer_ns"
-                                    )
                             consumer_wave_tile += num_sms
 
                     if (
@@ -852,18 +741,17 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
     threads: int = 384,
     pipeline_stages: int = 3,
     num_experts_per_wave: int | None = None,
-    enable_pipeline_trace: bool = False,
 ):
     num_experts_per_wave = num_experts_per_wave or num_experts_per_rank
     assert num_experts_per_rank % num_experts_per_wave == 0
-    num_m_blocks = ceil_div(capacity, block_m)
-    num_n_blocks = ceil_div(hidden, block_n)
+    num_m_blocks = T.ceildiv(capacity, block_m)
+    num_n_blocks = T.ceildiv(hidden, block_n)
     num_expert_waves = num_experts_per_rank // num_experts_per_wave
     max_tiles_per_expert_wave = num_experts_per_wave * num_m_blocks * num_n_blocks
-    max_tile_rounds_per_expert_wave = ceil_div(max_tiles_per_expert_wave, num_sms)
+    max_tile_rounds_per_expert_wave = T.ceildiv(max_tiles_per_expert_wave, num_sms)
     num_k_blocks = intermediate_hidden // block_k
-    num_reduce_n_blocks = ceil_div(hidden, reduce_block_h)
-    num_reduce_m_blocks = ceil_div(num_tokens, reduce_block_m)
+    num_reduce_n_blocks = T.ceildiv(hidden, reduce_block_h)
+    num_reduce_m_blocks = T.ceildiv(num_tokens, reduce_block_m)
     num_reduce_tiles = num_reduce_n_blocks * num_reduce_m_blocks
     # GEMM roles: warps 0-1 idle, warps 2-3 TMA, then two WGMMA
     # warpgroups. After the grid barrier, warps 0-3 perform top-k reduction.
@@ -919,18 +807,8 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
         combine: T.Tensor((num_tokens, num_topk, hidden), T.bfloat16),
         barrier: T.Tensor((num_ranks,), T.int32),
         out: T.Tensor((num_tokens, hidden), T.bfloat16),
-        pipeline_trace: T.Tensor(
-            (
-                num_sms,
-                L2_TRACE_ROLES,
-                num_expert_waves * max_tile_rounds_per_expert_wave,
-                TRACE_FIELDS,
-            ),
-            T.int64,
-        ),
     ):
         with T.Kernel(num_sms, threads=threads) as bid:
-            T.import_source(GLOBAL_TIMER_SOURCE)
             tx = T.get_thread_binding()
             a_shared = T.alloc_shared(
                 (pipeline_stages, block_m, block_k),
@@ -1008,11 +886,6 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                             and producer_n * block_n < hidden
                             and num_k_blocks * block_k == intermediate_hidden
                         ):
-                            if enable_pipeline_trace:
-                                if tx == producer_begin:
-                                    pipeline_trace[bid, 0, producer_schedule_step, 0] = T.call_extern(
-                                        "int64", "tl_globaltimer_ns"
-                                    )
                             for producer_k in T.serial(num_k_blocks):
                                 producer_stage = (producer_step + producer_k) % pipeline_stages
                                 producer_phase = ((producer_step + producer_k) // pipeline_stages) & 1
@@ -1044,11 +917,6 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                                     producer_k,
                                 ]
                                 T.mbarrier_arrive(stage_barriers[producer_stage])
-                            if enable_pipeline_trace:
-                                if tx == producer_begin:
-                                    pipeline_trace[bid, 0, producer_schedule_step, 1] = T.call_extern(
-                                        "int64", "tl_globaltimer_ns"
-                                    )
                             producer_step += num_k_blocks
                             producer_wave_tile += num_sms
 
@@ -1122,11 +990,6 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                             and consumer_n * block_n < hidden
                             and num_k_blocks * block_k == intermediate_hidden
                         ):
-                            if enable_pipeline_trace:
-                                if tx == math_begin:
-                                    pipeline_trace[bid, 1, consumer_schedule_step, 3] = T.call_extern(
-                                        "int64", "tl_globaltimer_ns"
-                                    )
                             T.clear(partial)
                             T.clear(accum)
                             for consumer_k in T.serial(num_k_blocks):
@@ -1136,12 +999,6 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                                     stage_barriers[consumer_stage],
                                     consumer_phase,
                                 )
-                                if consumer_k == 0:
-                                    if enable_pipeline_trace:
-                                        if tx == math_begin:
-                                            pipeline_trace[bid, 1, consumer_schedule_step, 0] = T.call_extern(
-                                                "int64", "tl_globaltimer_ns"
-                                            )
                                 T.gemm(
                                     a_shared[consumer_stage, :, :],
                                     b_shared[consumer_stage, :, :],
@@ -1172,11 +1029,6 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                                 T.clear(partial)
                                 T.mbarrier_arrive(stage_barriers[pipeline_stages + consumer_stage])
                             consumer_step += num_k_blocks
-                            if enable_pipeline_trace:
-                                if tx == math_begin:
-                                    pipeline_trace[bid, 1, consumer_schedule_step, 1] = T.call_extern(
-                                        "int64", "tl_globaltimer_ns"
-                                    )
                             T.copy(accum, out_shared)
                             scatter_warp = (tx - math_begin) // warp_size
                             for row_in_warp in T.serial(rows_per_math_warp):
@@ -1211,11 +1063,6 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                                             dst_pe=dst_rank,
                                             unroll_factor=1,
                                         )
-                            if enable_pipeline_trace:
-                                if tx == math_begin:
-                                    pipeline_trace[bid, 1, consumer_schedule_step, 2] = T.call_extern(
-                                        "int64", "tl_globaltimer_ns"
-                                    )
                             consumer_wave_tile += num_sms
 
                     if (
@@ -1232,39 +1079,26 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
 
             if tx < reduce_threads:
                 reduce_accum = T.alloc_fragment((reduce_block_m, reduce_block_h), T.float32)
-                if enable_pipeline_trace:
-                    if tx == 0:
-                        pipeline_trace[bid, 2, 0, 0] = T.call_extern(
-                            "int64", "tl_globaltimer_ns"
-                        )
-                for reduce_wave in T.serial(ceil_div(num_reduce_tiles, num_sms)):
-                    reduce_tile = bid + reduce_wave * num_sms
-                    if reduce_tile < num_reduce_tiles:
-                        reduce_n = reduce_tile % num_reduce_n_blocks
-                        reduce_m = reduce_tile // num_reduce_n_blocks
-                        T.clear(reduce_accum)
-                        for topk_slot in T.serial(num_topk):
-                            for i, j in T.Parallel(reduce_block_m, reduce_block_h):
-                                if reduce_m * reduce_block_m + i < num_tokens:
-                                    reduce_accum[i, j] += combine[
-                                        reduce_m * reduce_block_m + i,
-                                        topk_slot,
-                                        reduce_n * reduce_block_h + j,
-                                    ]
-                        T.copy(reduce_accum, reduce_shared)
-                        T.copy(
-                            reduce_shared,
-                            out[
-                                reduce_m * reduce_block_m,
-                                reduce_n * reduce_block_h,
-                            ],
-                        )
-                if enable_pipeline_trace:
-                    if tx == 0:
-                        pipeline_trace[bid, 2, 0, 1] = T.call_extern(
-                            "int64", "tl_globaltimer_ns"
-                        )
-
+                for reduce_tile in T.serial(bid, num_reduce_tiles, num_sms):
+                    reduce_n = reduce_tile % num_reduce_n_blocks
+                    reduce_m = reduce_tile // num_reduce_n_blocks
+                    T.clear(reduce_accum)
+                    for topk_slot in T.serial(num_topk):
+                        for i, j in T.Parallel(reduce_block_m, reduce_block_h):
+                            if reduce_m * reduce_block_m + i < num_tokens:
+                                reduce_accum[i, j] += combine[
+                                    reduce_m * reduce_block_m + i,
+                                    topk_slot,
+                                    reduce_n * reduce_block_h + j,
+                                ]
+                    T.copy(reduce_accum, reduce_shared)
+                    T.copy(
+                        reduce_shared,
+                        out[
+                            reduce_m * reduce_block_m,
+                            reduce_n * reduce_block_h,
+                        ],
+                    )
     return main
 
 
@@ -1302,7 +1136,8 @@ def _allocator_size_bytes(
         + num_topk * (3 * i32 + fp32)
         + (num_topk + 1) * hidden * bf16
     )
-    return align_up(weight_bytes + weight_scale_bytes + pool_bytes + input_bytes + 2**27, 2**20)
+    total_bytes = weight_bytes + weight_scale_bytes + pool_bytes + input_bytes + 2**27
+    return (total_bytes + 2**20 - 1) // 2**20 * 2**20
 
 
 def _gather_cat(tensor: torch.Tensor, group: dist.ProcessGroup) -> torch.Tensor:
@@ -1371,8 +1206,6 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     num_topk = model["num_topk"]
     num_tokens = args.num_tokens
     activation_clamp = args.activation_clamp
-    pipeline_trace_path = getattr(args, "pipeline_trace", None)
-    enable_pipeline_trace = pipeline_trace_path is not None
 
     assert num_tokens > 0
     assert hidden >= 512 and hidden % 256 == 0
@@ -1380,11 +1213,13 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     assert num_experts > 0 and num_experts % num_local_ranks == 0
     assert 0 < num_topk <= min(32, num_experts)
     num_experts_per_rank = num_experts // num_local_ranks
-    average_recv = ceil_div(num_tokens * num_local_ranks * num_topk, num_experts)
+    average_recv = (
+        num_tokens * num_local_ranks * num_topk + num_experts - 1
+    ) // num_experts
     capacity = (
         args.capacity
         if args.capacity is not None
-        else align_up(max(average_recv * 2, 64), 64)
+        else (max(average_recv * 2, 64) + 63) // 64 * 64
     )
     assert capacity >= 64 and capacity % 64 == 0
 
@@ -1421,22 +1256,6 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         if requested is not None:
             assert requested > 0 and num_experts_per_rank % requested == 0
             config["num_experts_per_wave"] = requested
-    l1_trace_steps = trace_schedule_steps(
-        num_experts_per_rank,
-        l1_config["num_experts_per_wave"],
-        capacity,
-        l1_config["block_m"],
-        ceil_div(2 * intermediate_hidden, l1_config["block_n"]),
-        num_sms,
-    )
-    l2_trace_steps = trace_schedule_steps(
-        num_experts_per_rank,
-        l2_config["num_experts_per_wave"],
-        capacity,
-        l2_config["block_m"],
-        ceil_div(hidden, l2_config["block_n"]),
-        num_sms,
-    )
     kernel_specs = [
         fused_l1_swiglu_manual_warp_kernel(
             num_tokens,
@@ -1448,7 +1267,6 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             capacity,
             num_sms,
             activation_clamp=activation_clamp,
-            enable_pipeline_trace=enable_pipeline_trace,
             **l1_config,
         ),
         fused_l2_scatter_reduce_manual_warp_kernel(
@@ -1460,7 +1278,6 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             num_ranks,
             capacity,
             num_sms,
-            enable_pipeline_trace=enable_pipeline_trace,
             **l2_config,
         ),
     ]
@@ -1528,7 +1345,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     src_topk = allocator_tensor((num_experts_per_rank, capacity), torch.int32, allocator=allocator)
     route_slots = allocator_tensor((num_tokens, num_topk), torch.int32, allocator=allocator)
     arrivals = allocator_tensor(
-        (num_experts_per_rank, ceil_div(capacity, 64)),
+        (num_experts_per_rank, (capacity + 63) // 64),
         torch.uint32,
         allocator=allocator,
     )
@@ -1540,16 +1357,6 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     )
     combine = allocator_tensor((num_tokens, num_topk, hidden), torch.bfloat16, allocator=allocator)
     out = allocator_tensor((num_tokens, hidden), torch.bfloat16, allocator=allocator)
-    l1_pipeline_trace = torch.zeros(
-        (num_sms, L1_TRACE_ROLES, l1_trace_steps, TRACE_FIELDS),
-        dtype=torch.int64,
-        device="cuda",
-    )
-    l2_pipeline_trace = torch.zeros(
-        (num_sms, L2_TRACE_ROLES, l2_trace_steps, TRACE_FIELDS),
-        dtype=torch.int64,
-        device="cuda",
-    )
 
     def reset_state():
         route_counts.zero_()
@@ -1561,8 +1368,6 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         recv_weights.zero_()
         src_ranks.fill_(-1)
         combine.zero_()
-        l1_pipeline_trace.zero_()
-        l2_pipeline_trace.zero_()
         torch.cuda.synchronize()
         dist.barrier(group=group)
 
@@ -1587,7 +1392,6 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             l2_x,
             l2_x_sf,
             barrier,
-            l1_pipeline_trace,
         )
         if check_capacity:
             local_max = recv_counts.max()
@@ -1605,7 +1409,6 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             combine,
             barrier,
             out,
-            l2_pipeline_trace,
         )
         return out
 
@@ -1630,52 +1433,6 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         diff = calc_diff(actual, expected)
         assert diff < args.diff_tol, f"rank {local_rank}: diff={diff} exceeds {args.diff_tol}"
         print(f"rank {local_rank} check passed, diff={diff:.6f}")
-
-    if enable_pipeline_trace:
-        dist.barrier(group=group)
-        if local_rank == 0:
-            if getattr(args, "pipeline_trace_ctas", None):
-                selected_ctas = [
-                    int(value)
-                    for value in args.pipeline_trace_ctas.split(",")
-                    if value.strip()
-                ]
-            else:
-                local_counts = recv_counts.detach().cpu().tolist()
-
-                def first_wave_tiles(config, output_size):
-                    experts_per_wave = config["num_experts_per_wave"]
-                    block_m = config["block_m"]
-                    num_n_blocks = ceil_div(output_size, config["block_n"])
-                    return sum(
-                        ceil_div(min(int(count), capacity), block_m) * num_n_blocks
-                        for count in local_counts[:experts_per_wave]
-                    )
-
-                selected_ctas = [0, num_sms - 1]
-                for wave_tiles in (
-                    first_wave_tiles(l1_config, 2 * intermediate_hidden),
-                    first_wave_tiles(l2_config, hidden),
-                ):
-                    if 0 < wave_tiles < num_sms:
-                        selected_ctas.extend((wave_tiles - 1, wave_tiles))
-            selected_ctas = sorted(
-                {cta for cta in selected_ctas if 0 <= cta < num_sms}
-            )
-            trace_output = save_pipeline_trace_png(
-                l1_pipeline_trace,
-                l2_pipeline_trace,
-                pipeline_trace_path,
-                selected_ctas,
-                (
-                    f"TileScale SM90 Mega MoE pipeline: {model_name}, "
-                    f"M={num_tokens}, ranks={num_ranks}, "
-                    f"epw={l1_config['num_experts_per_wave']}/"
-                    f"{l2_config['num_experts_per_wave']}"
-                ),
-            )
-            print(f"pipeline trace: {trace_output} (CTAs={selected_ctas})")
-        dist.barrier(group=group)
 
     if args.rep > 0:
         reset_state()
@@ -1715,8 +1472,6 @@ if __name__ == "__main__":
     parser.add_argument("--capacity", type=int, default=None)
     parser.add_argument("--l1-experts-per-wave", type=int, default=None)
     parser.add_argument("--l2-experts-per-wave", type=int, default=None)
-    parser.add_argument("--pipeline-trace", type=str, default=None)
-    parser.add_argument("--pipeline-trace-ctas", type=str, default=None)
     parser.add_argument("--activation-clamp", type=float, default=10.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--diff-tol", type=float, default=0.01)
