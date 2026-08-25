@@ -225,9 +225,44 @@ def alloc_cluster_barrier(arrive_count: int | list[int]) -> Buffer:
     return buffer
 
 
-def alloc_tmem(shape: ShapeType, dtype: DType) -> Buffer:
+def alloc_raw_cluster_barrier(arrive_count: int | list[int]) -> Buffer:
+    """Allocate a raw cluster barrier (uint64_t, no cutlass wrapper).
+
+    Uses raw mbarrier PTX protocol compatible with shared::cta TMA.
+    Required for NUMA parallel TMA where each CTA issues its own TMA
+    to local shared memory with per-thread arrive_expect_tx.
+
+    Args:
+        arrive_count (int | list[int]): The number of arrives needed per barrier phase
+
+    Returns:
+        T.Buffer: A TVM buffer object allocated as a raw cluster barrier
+    """
+    if isinstance(arrive_count, int):
+        arrive_count = [arrive_count]
+    else:
+        arrive_count = list(arrive_count)
+    buffer = T.sblock_alloc_buffer((len(arrive_count),), _dtypes.uint64, scope="shared.raw_cluster_barrier")
+    arrive_count_exprs = [IntImm("int32", c) for c in arrive_count]
+    sblock_attr({"barrier_init": {buffer.data: arrive_count_exprs}})
+
+    return buffer
+
+
+def alloc_tmem(
+    shape: ShapeType,
+    dtype: DType,
+    *,
+    alias: Buffer | None = None,
+    col_offset: int = 0,
+) -> Buffer:
     """
     Allocate a Tensor Memory (TMEM) buffer for use with 5th generation Tensor Core operations (e.g., TCGEN5.MMA).
+
+    When ``alias`` is supplied, the new buffer SHARES physical TMEM columns
+    with ``alias`` — no extra ``tcgen05.alloc`` is issued; ``col_offset`` is
+    the TMEM column offset from the alias parent's base address. The caller
+    owns the lifetime contract; tilelang does not verify it.
 
     TMEM is a dedicated on-chip memory introduced in Blackwell GPUs, designed to reduce register pressure and enable asynchronous, single-threaded MMA operations. It is organized as a 2D array of 512 columns by 128 rows (lanes), with each cell being 32 bits. Allocation is performed in units of columns, and every lane of a column is allocated together.
 
@@ -254,7 +289,24 @@ def alloc_tmem(shape: ShapeType, dtype: DType) -> Buffer:
     """
 
     assert len(shape) == 2, "shape must be a 2D tensor for TMEM allocation"
-    return T.sblock_alloc_buffer(shape, dtype, scope="shared.tmem")
+    if alias is None and col_offset != 0:
+        raise ValueError("col_offset is only valid with alias=...")
+    if alias is not None and col_offset < 0:
+        raise ValueError(f"col_offset must be >= 0, got {col_offset}")
+    buf = T.sblock_alloc_buffer(shape, dtype, scope="shared.tmem")
+    if alias is not None:
+        # Stash the alias info on the enclosing block. The lower_shared_tmem
+        # C++ pass picks this up: it skips the tcgen05.alloc for `buf` and
+        # instead emits `buf_addr[0] = alias_addr[0] + col_offset` after the
+        # parent's init. Keys/values use BUFFER objects (not their data Vars):
+        # Buffer identity is stable across the script parser while Vars are
+        # replaced by later passes.
+        sblock_attr({
+            "tmem_alias_buffers": {
+                buf: [alias, IntImm("int32", int(col_offset))]
+            }
+        })
+    return buf
 
 
 ReducerOp = Literal["sum", "max", "min"]

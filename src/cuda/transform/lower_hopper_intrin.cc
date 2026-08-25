@@ -26,6 +26,37 @@ using namespace tirx;
 using namespace ffi;
 
 #if (CUDA_MAJOR_VERSION >= 12)
+Var GetDescriptorBaseVar(const PrimExpr &expr) {
+  if (const auto *var = expr.as<VarNode>()) {
+    return tvm::ffi::GetRef<Var>(var);
+  }
+  if (const auto *call = expr.as<CallNode>()) {
+    if (call->op.same_as(tl::access_ptr())) {
+      ICHECK_EQ(call->args.size(), 3U)
+          << "tl.access_ptr expects 3 args: (BufferLoad, extent, rw_mask)";
+      const auto *load = call->args[0].as<BufferLoadNode>();
+      ICHECK(load) << "tl.access_ptr arg0 must be BufferLoad";
+      const auto *var = load->buffer->data.as<VarNode>();
+      ICHECK(var) << "TMA descriptor access_ptr buffer data must be a Var";
+      return tvm::ffi::GetRef<Var>(var);
+    }
+    if (call->op.same_as(builtin::tvm_access_ptr())) {
+      ICHECK_GE(call->args.size(), 2U);
+      const auto *var = call->args[1].as<VarNode>();
+      ICHECK(var) << "tvm_access_ptr data argument must be a Var";
+      return tvm::ffi::GetRef<Var>(var);
+    }
+  }
+  LOG(FATAL) << "TMA descriptor global address must be a Var, tl.access_ptr, "
+                "or tvm_access_ptr, but got: "
+             << expr;
+  throw;
+}
+
+PrimExpr NormalizeDescriptorBaseArg(const PrimExpr &expr) {
+  return GetDescriptorBaseVar(expr);
+}
+
 class LowerHopperIntrin : public StmtExprMutator {
 public:
   static PrimFunc Substitute(PrimFunc &f, bool disable_shuffle_elect) {
@@ -157,17 +188,11 @@ public:
         if (prefetch_calls_.empty()) {
           return AttrStmt(op->node, op->attr_key, op->value, body);
         } else {
-          Array<Stmt> stmt_seq;
-          PrimExpr condition;
-          if (!disable_shuffle_elect_) {
-            condition = Call(DataType::Bool(), tl_shuffle_elect(), {0});
-          } else {
-            condition = EQ(iv->var, 0);
-          }
           auto stmts = prefetch_calls_;
-          auto stmt_ = IfThenElse(condition,
-                                  stmts.size() > 1 ? SeqStmt(stmts) : stmts[0]);
-          stmt_seq.push_back(stmt_);
+          Array<Stmt> stmt_seq;
+          Stmt prefetch_seq = stmts.size() > 1 ? SeqStmt(stmts) : stmts[0];
+          PrimExpr thread0 = iv->var == IntImm(iv->var.dtype(), 0);
+          stmt_seq.push_back(IfThenElse(thread0, prefetch_seq));
           stmt_seq.push_back(body);
           Stmt result = SeqStmt(stmt_seq);
           prefetch_calls_.clear();
@@ -189,7 +214,8 @@ public:
       } else {
         bool is_remote = call->op.same_as(create_remote_tma_descriptor());
         int base_arg_index = is_remote ? 3 : 2;
-        String name = call->args[base_arg_index].as<Var>().value()->name_hint;
+        Var base_var = GetDescriptorBaseVar(call->args[base_arg_index]);
+        String name = base_var->name_hint;
         std::string suffix = "_desc";
         if (is_remote) {
           suffix += "_pe";
@@ -202,8 +228,7 @@ public:
         Array<PrimExpr> init_desc_args = MakeInitDescArgs(call_ref, var);
         init_desc_arg_map_.Set(var, init_desc_args);
         desc_inits_.push_back(
-            {call->args[base_arg_index].as<Var>().value().get(),
-             MakeInitDescStmt(var, init_desc_args), false});
+            {base_var.get(), MakeInitDescStmt(var, init_desc_args), false});
         prefetch_calls_.push_back(
             Evaluate(Call(DataType::Handle(), builtin::call_extern(),
                           {StringImm("tl::prefetch_tma_descriptor"), var})));
@@ -257,8 +282,14 @@ private:
       ICHECK(0) << call->op;
     }
     init_desc_args.push_back(var);
-    init_desc_args.insert(init_desc_args.end(), call->args.begin(),
-                          call->args.end());
+    size_t base_index =
+        call->op.same_as(create_remote_tma_descriptor()) ? 3 : 2;
+    init_desc_args.reserve(call->args.size() + 2);
+    for (size_t i = 0; i < call->args.size(); ++i) {
+      init_desc_args.push_back(i == base_index
+                                   ? NormalizeDescriptorBaseArg(call->args[i])
+                                   : call->args[i]);
+    }
     return init_desc_args;
   }
 

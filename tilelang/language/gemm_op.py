@@ -120,6 +120,9 @@ def _gemm_impl(
     # The C++ side checks if arg 16 is a BufferLoadNode before using it,
     # so a non-BufferLoad value will be correctly ignored.
     mbar_arg = mbar if mbar is not None else tirx.const(0, dtype="int32")
+    # Record the current scale context (Phase-2 metadata; not consumed by lowering).
+    from tilelang.language.scale import merge_scale_context_annotations
+    annotations = merge_scale_context_annotations(annotations)
     return tirx.call_intrin(
         "handle",
         tirx.op.Op.get(op_key),
@@ -412,6 +415,10 @@ def tcgen05_gemm_blockscaled(
 
     # Block-scaled always uses Square policy (1x1 warp partition)
     policy = GemmWarpPolicy.Square
+
+    # Record the current scale context (Phase-2 metadata; not consumed by lowering).
+    from tilelang.language.scale import merge_scale_context_annotations
+    ann = merge_scale_context_annotations(ann)
 
     return tirx.call_intrin(
         "handle",

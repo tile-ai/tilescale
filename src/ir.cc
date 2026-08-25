@@ -317,6 +317,8 @@ KernelLaunchFrame KernelLaunch(const Array<PrimExpr> &grid_size,
   }
 
   auto empty_block = tvm::script::ir_builder::tirx::Block(DeviceMainBlockName);
+  empty_block->reads = Array<tvm::tirx::BufferRegion>();
+  empty_block->writes = Array<tvm::tirx::BufferRegion>();
   Map<String, Any> block_annotations =
       attrs.defined() ? attrs : Map<String, Any>{};
   empty_block->annotations = block_annotations;

@@ -101,6 +101,8 @@ template <int thread_extent> TL_DEVICE bool tl_shuffle_elect() {
     //   (1) We are in warp 0 of the block.
     //   (2) We are the elected lane in this warp.
     return cutlass::canonical_warp_idx_sync() == 0 && cute::elect_one_sync();
+  } else if constexpr (thread_extent == 1) {
+    return true;
   } else if constexpr (thread_extent == 32) {
     return cute::elect_one_sync();
   }

@@ -945,18 +945,27 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       if ((condition_prop.depends_on_runtime &&
            !condition_prop.is_block_uniform) ||
           condition_prop.requires_hoist) {
-        LOG(WARNING)
-            << "[ThreadSync] Hoisting sync from inside if to before if. "
-            << "Condition is not safe for in-if sync: " << op->condition;
-        for (const auto &sync : syncs_in_then) {
-          syncs_inserted_.erase(sync);
-        }
-        for (const auto &sync : syncs_in_else) {
-          syncs_inserted_.erase(sync);
-        }
+        // For thread-divergent conditions (warp specialization like tx<32,
+        // tx<64), do NOT hoist syncs. These branches rely on mbarrier/cluster
+        // barriers for synchronization. Hoisting __syncthreads__ merges them
+        // into sequential execution, deadlocking the pipeline.
+        // Only hoist for requires_hoist cases that are NOT thread-divergent.
+        bool is_thread_divergent = condition_prop.depends_on_runtime &&
+                                   !condition_prop.is_block_uniform;
+        if (!is_thread_divergent) {
+          LOG(WARNING)
+              << "[ThreadSync] Hoisting sync from inside if to before if. "
+              << "Condition is not safe for in-if sync: " << op->condition;
+          for (const auto &sync : syncs_in_then) {
+            syncs_inserted_.erase(sync);
+          }
+          for (const auto &sync : syncs_in_else) {
+            syncs_inserted_.erase(sync);
+          }
 
-        // Insert sync before the if-statement itself
-        insert_syncs(op);
+          // Insert sync before the if-statement itself
+          insert_syncs(op);
+        }
       }
     }
 

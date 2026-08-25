@@ -659,6 +659,7 @@ private:
   bool IsSpecialTaggedMemory(const StorageScope &scope) {
     return !scope.tag.empty() && scope.tag != ".dyn" &&
            scope.tag != ".barrier" && scope.tag != ".cluster_barrier" &&
+           scope.tag != ".raw_cluster_barrier" &&
            scope.tag != ".workspace" && scope.tag != ".vtcm" &&
            scope.tag != ".var" && scope.tag.find(".descriptor") != 0;
   }

@@ -10,6 +10,8 @@ from tvm.tirx import FloatImm, tvm_tuple
 
 __all__ = [
     "use_swizzle",
+    "use_2cta_tmem",
+    "device_func",
     "annotate_layout",
     "annotate_safe_value",
     "annotate_l2_hit_ratio",
@@ -24,6 +26,43 @@ def use_swizzle(panel_size: int, order: str = "row", enable: bool = True):
     if not enable:
         return None
     return attr(None, "threadblock_swizzle_pattern", tvm_tuple(device_func, panel_size))
+
+
+def use_2cta_tmem(
+    enable: bool = True,
+    *,
+    mbarrier_init_thread: int | None = None,
+    tmem_alloc_warp: int | None = None,
+    compact_shared_state: bool = False,
+):
+    """Request cta_group::2 tensor-memory alloc/dealloc.
+
+    The caller owns schedule-specific policy such as which thread initializes
+    barriers, which warp allocates TMEM, and whether shared-state compaction is
+    safe for the kernel layout.
+    """
+    if not enable:
+        return None
+    attrs = {"use_2cta": 1}
+    if mbarrier_init_thread is not None:
+        attrs["mbarrier_init_thread"] = mbarrier_init_thread
+    if tmem_alloc_warp is not None:
+        attrs["tmem_alloc_warp"] = tmem_alloc_warp
+    if compact_shared_state:
+        attrs["pragma_tl_compact_shared_state"] = 1
+    return sblock_attr(attrs)
+
+
+def device_func(enable: bool = True):
+    """Outline the following statement subtree as a CUDA device function.
+
+    This is intentionally a codegen-only control surface. It preserves the DSL
+    body but emits it as a separate `static __device__ __noinline__` helper so
+    ptxas can allocate registers independently from the caller.
+    """
+    if not enable:
+        return None
+    return attr(None, "tl.device_func", 1)
 
 
 def annotate_layout(layout_map: dict):
@@ -77,7 +116,10 @@ def annotate_min_blocks_per_sm(n: int):
                 T.annotate_min_blocks_per_sm(2)
     ...         ...
     """
-    assert isinstance(n, int) and n > 0, "n must be a positive integer"
+    # n=0 emits `__launch_bounds__(N, 0)` which CUDA interprets as "no minBlocks
+    # constraint" — useful when one warpgroup needs more regs than the default
+    # 64K/N per-thread budget would allow (with setmaxnreg redistributing later).
+    assert isinstance(n, int) and n >= 0, "n must be non-negative"
     return attr(None, "tl.min_blocks_per_sm", n)
 
 

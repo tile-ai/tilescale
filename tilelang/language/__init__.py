@@ -26,6 +26,7 @@ from .loop import (
     Unroll,  # noqa: F401
     Vectorized,  # noqa: F401
 )
+from .scale import Scale, scale, current_scale  # noqa: F401
 from .frame import has_let_value, get_let_value  # noqa: F401
 from .math_intrinsics import *  # noqa: F401
 from .kernel import (
@@ -47,6 +48,7 @@ from .allocate import (
     alloc_global,  # noqa: F401
     alloc_barrier,  # noqa: F401
     alloc_cluster_barrier,  # noqa: F401
+    alloc_raw_cluster_barrier,  # noqa: F401
     alloc_tmem,  # noqa: F401
     alloc_reducer,  # noqa: F401
     alloc_descriptor,  # noqa: F401
@@ -60,6 +62,7 @@ from .copy_op import (  # noqa: F401
     copy,
     async_copy,
     tma_copy,
+    tma_copy_per_thread,
     tma_gather4,
     tma_gather4_bytes,
     tma_scatter4,
@@ -148,6 +151,8 @@ from .annotations import (  # noqa: F401
     annotate_l2_hit_ratio,
     annotate_restrict_buffers,
     annotate_min_blocks_per_sm,
+    use_2cta_tmem,
+    device_func,
 )
 
 from .random import (
@@ -167,6 +172,7 @@ from .cluster import (
     cluster_wait,  # noqa: F401
     cluster_sync,  # noqa: F401
     block_rank_in_cluster,  # noqa: F401
+    get_smid,  # noqa: F401
     clc_try_cancel,  # noqa: F401
     clc_try_cancel_multicast,  # noqa: F401
     clc_is_canceled,  # noqa: F401

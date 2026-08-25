@@ -447,7 +447,8 @@ private:
 
   static bool IsBarrierBuffer(const Buffer &buffer) {
     String scope = buffer.scope();
-    return scope == "shared.barrier" || scope == "shared.cluster_barrier";
+    return scope == "shared.barrier" || scope == "shared.cluster_barrier" ||
+           scope == "shared.raw_cluster_barrier";
   }
 };
 

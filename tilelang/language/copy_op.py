@@ -143,6 +143,10 @@ def copy(
     if loop_layout is not None and "parallel_loop_layout" not in ann:
         ann["parallel_loop_layout"] = loop_layout
 
+    # Record the current scale context (Phase-2 metadata; not consumed by lowering).
+    from tilelang.language.scale import merge_scale_context_annotations
+    ann = merge_scale_context_annotations(ann)
+
     return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.copy"), src, dst, annotations=ann if ann else None)
 
 
@@ -233,6 +237,10 @@ def async_copy(
         ann["coalesced_width"] = coalesced_width
     if loop_layout is not None and "parallel_loop_layout" not in ann:
         ann["parallel_loop_layout"] = loop_layout
+
+    # Record the current scale context (Phase-2 metadata; not consumed by lowering).
+    from tilelang.language.scale import merge_scale_context_annotations
+    ann = merge_scale_context_annotations(ann)
 
     return tirx.call_intrin(
         "handle",
@@ -341,7 +349,40 @@ def tma_copy(
     if "dst_pe" not in ann and dst_pe is not None:
         ann["dst_pe"] = dst_pe
 
+    # Record the current scale context (Phase-2 metadata; not consumed by lowering).
+    from tilelang.language.scale import merge_scale_context_annotations
+    ann = merge_scale_context_annotations(ann)
+
     return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.tma_copy"), src, dst, annotations=ann if ann else None)
+
+
+def tma_copy_per_thread(
+    src: BufferLikeType,
+    dst: BufferLikeType,
+    *,
+    barrier=None,
+    eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
+    src_pe: int | tirx.PrimExpr | None = None,
+    dst_pe: int | tirx.PrimExpr | None = None,
+    annotations: dict | None = None,
+) -> tirx.PrimExpr | tirx.Stmt:
+    """TMA copy where every active caller thread issues one TMA transaction.
+
+    This is for schedules that intentionally shard a TMA load across lanes.
+    The caller must ensure the active thread set, destination slices, and
+    mbarrier expected byte count match the issued transactions.
+    """
+    ann = annotations.copy() if annotations else {}
+    ann["no_elect"] = 1
+    return tma_copy(
+        src,
+        dst,
+        barrier=barrier,
+        eviction_policy=eviction_policy,
+        src_pe=src_pe,
+        dst_pe=dst_pe,
+        annotations=ann,
+    )
 
 
 _TMA_SUPPORTED_DTYPES = frozenset(

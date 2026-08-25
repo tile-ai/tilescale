@@ -9,6 +9,7 @@ __all__ = [
     "cluster_wait",
     "cluster_sync",
     "block_rank_in_cluster",
+    "get_smid",
     "clc_try_cancel",
     "clc_try_cancel_multicast",
     "clc_is_canceled",
@@ -47,6 +48,11 @@ def cluster_sync() -> tirx.PrimExpr:
 def block_rank_in_cluster() -> tirx.PrimExpr:
     """Return the 1-D rank of the calling CTA within its cluster (%%cluster_ctarank)."""
     return tirx.call_intrin("int32", tirx.op.Op.get("tl.block_rank_in_cluster"))
+
+
+def get_smid() -> tirx.PrimExpr:
+    """Return the hardware SM ID of the current thread block (%%smid)."""
+    return tirx.call_intrin("int32", tirx.op.Op.get("tl.get_smid"))
 
 
 def clc_try_cancel(result, mbarrier) -> tirx.PrimExpr:

@@ -31,7 +31,20 @@ from tilelang.distributed.shared_memory import (
     _mc_release_handle,
     _mc_unmap,
     _mc_get_aligned_size,
+    _supports_multicast_posix,
+    _supports_vmm_posix,
+    _vmm_alloc_size,
+    _vmm_export_posix_fd,
+    _vmm_import_posix_fd,
+    _vmm_malloc_posix,
+    _mc_create_posix,
+    _mc_export_posix_fd,
+    _mc_import_posix_fd,
+    _mc_map_posix,
+    _mc_unmap_posix,
+    _mc_get_aligned_size_posix,
 )
+from tilelang.distributed.fd_exchange import broadcast_fd, exchange_fds
 from tilelang.utils.target import parse_device
 
 __all__ = ["BaseAllocator", "get_allocator"]
@@ -183,6 +196,7 @@ class BaseAllocator:
         self._mcast_phys_ptr = 0
         self._mcast_aligned_size = 0
         self._mcast_handle = 0
+        self._mcast_handle_mode = None
         self._use_multicast = False
         self._group_size = 1
         self._group_root_global_rank = 0
@@ -246,6 +260,17 @@ class BaseAllocator:
             self._mcast_size_requested = positive_integer(self._mcast_size_requested, "mcast_size")
         self._device = parse_device(self._device_request)
         self._use_vmm = _resolve_use_vmm(self._use_vmm_requested, self._is_distributed)
+        self._vmm_handle_mode = None
+        if self._use_vmm:
+            if _supports_vmm_fabric():
+                self._vmm_handle_mode = "fabric"
+            elif _supports_vmm_posix():
+                self._vmm_handle_mode = "posix"
+            else:
+                raise RuntimeError(
+                    "use_vmm=True but neither fabric (IMEX) nor POSIX-fd VMM handles are "
+                    "available on this system; pass use_vmm=False to use IPC allocations"
+                )
 
     def _validate_distributed_configuration(self, group_rank: int) -> None:
         """Collectively validate invariants before any allocation is created."""
@@ -277,8 +302,9 @@ class BaseAllocator:
             failures.append(f"this process has group rank {group_rank}, but local_rank={self._local_rank!r}")
         if self._num_local_ranks != self._group_size:
             failures.append(f"num_local_ranks={self._num_local_ranks!r}, but process-group size is {self._group_size}")
-        if self._mcast_size_requested is not None and not self._use_vmm:
-            failures.append("mcast_size requires use_vmm=True")
+        # NOTE: mcast_size does not require use_vmm — the multicast physical
+        # buffer is a separate cuMemCreate allocation independent of whether
+        # the base pool is VMM or cudaMalloc/IPC.
 
         if failures:
             raise ValueError("invalid distributed allocator configuration (" + "; ".join(failures) + ")")
@@ -291,9 +317,17 @@ class BaseAllocator:
             raise RuntimeError("this PyTorch version cannot resolve the global rank of a subgroup")
 
     def _prepare_multicast(self) -> None:
-        if not _supports_multicast():
+        # Prefer fabric handles (multi-node capable, requires IMEX); fall back
+        # to POSIX fds exchanged over Unix sockets (single-node, no IMEX).
+        # Both probes are host-level, so all single-node ranks agree.
+        if _supports_multicast():
+            self._mcast_handle_mode = "fabric"
+            self._mcast_aligned_size = _mc_get_aligned_size(self._mcast_size_requested, self._num_local_ranks)
+        elif _supports_multicast_posix():
+            self._mcast_handle_mode = "posix"
+            self._mcast_aligned_size = _mc_get_aligned_size_posix(self._mcast_size_requested, self._num_local_ranks)
+        else:
             raise RuntimeError("Multicast unavailable; check GPU, driver, fabric, and IMEX configuration")
-        self._mcast_aligned_size = _mc_get_aligned_size(self._mcast_size_requested, self._num_local_ranks)
 
     def _rollback_failed_initialization(self) -> RuntimeError | None:
         """Rollback construction without exposing freed owners to peer mappings."""
@@ -354,7 +388,10 @@ class BaseAllocator:
         self._set_device("allocator initialization")
 
         if self._use_vmm:
-            ptr_val = _vmm_malloc(self.size)
+            if self._vmm_handle_mode == "posix":
+                ptr_val = _vmm_malloc_posix(self.size)
+            else:
+                ptr_val = _vmm_malloc(self.size)
             self._base_ptr.value = ptr_val
         else:
             rc = _libcudart.cudaMalloc(ctypes.byref(self._base_ptr), ctypes.c_size_t(self.size))
@@ -367,35 +404,55 @@ class BaseAllocator:
         """Create multicast object and map, following multi-process fabric pattern."""
         num_devices = self._num_local_ranks
         aligned = self._mcast_aligned_size
+        posix = self._mcast_handle_mode == "posix"
 
-        # Allocate physical memory (reuses vmm_malloc, same fabric handle type)
+        # Allocate physical memory (cuMemCreate with a matching handle type)
         def allocate_physical_storage():
-            self._mcast_phys_ptr = _vmm_malloc(aligned)
+            self._mcast_phys_ptr = _vmm_malloc_posix(aligned) if posix else _vmm_malloc(aligned)
 
         self._collective_stage("allocate multicast physical storage", allocate_physical_storage)
 
-        # Rank 0 creates MC object, exports fabric handle; broadcast to all
-        def create_and_export():
-            if self._local_rank != 0:
-                return None
-            self._mcast_handle = _mc_create(aligned, num_devices)
-            return bytes(_mc_export_handle(self._mcast_handle))
+        if posix:
+            # Rank 0 creates the MC object; its fd travels over SCM_RIGHTS.
+            def create_object():
+                if self._local_rank == 0:
+                    self._mcast_handle = _mc_create_posix(aligned, num_devices)
 
-        mcast_fabric_bytes = self._collective_stage("create multicast object", create_and_export)
+            self._collective_stage("create multicast object", create_object)
 
-        def broadcast_handle():
-            obj_list = [mcast_fabric_bytes]
-            dist.broadcast_object_list(obj_list, src=self._group_root_global_rank, group=self._group)
-            return obj_list[0]
+            def share_handle():
+                my_fd = int(_mc_export_posix_fd(self._mcast_handle)) if self._local_rank == 0 else -1
+                fd = broadcast_fd(my_fd, self._local_rank, self._group_size, self._group, self._group_root_global_rank)
+                try:
+                    if self._local_rank != 0:
+                        self._mcast_handle = _mc_import_posix_fd(fd)
+                finally:
+                    os.close(fd)
 
-        mcast_fabric_bytes = self._collective_stage("broadcast multicast object", broadcast_handle)
+            self._collective_stage("share multicast object", share_handle)
+        else:
+            # Rank 0 creates MC object, exports fabric handle; broadcast to all
+            def create_and_export():
+                if self._local_rank != 0:
+                    return None
+                self._mcast_handle = _mc_create(aligned, num_devices)
+                return bytes(_mc_export_handle(self._mcast_handle))
 
-        # Non-rank-0 import the MC handle
-        def import_handle():
-            if self._local_rank != 0:
-                self._mcast_handle = _mc_import_handle(mcast_fabric_bytes)
+            mcast_fabric_bytes = self._collective_stage("create multicast object", create_and_export)
 
-        self._collective_stage("import multicast object", import_handle)
+            def broadcast_handle():
+                obj_list = [mcast_fabric_bytes]
+                dist.broadcast_object_list(obj_list, src=self._group_root_global_rank, group=self._group)
+                return obj_list[0]
+
+            mcast_fabric_bytes = self._collective_stage("broadcast multicast object", broadcast_handle)
+
+            # Non-rank-0 import the MC handle
+            def import_handle():
+                if self._local_rank != 0:
+                    self._mcast_handle = _mc_import_handle(mcast_fabric_bytes)
+
+            self._collective_stage("import multicast object", import_handle)
 
         # Each rank adds its own device
         self._collective_stage(
@@ -411,7 +468,8 @@ class BaseAllocator:
 
         # Each rank maps the MC object to a local VA
         def map_multicast_object():
-            self._mcast_base_ptr = _mc_map(self._mcast_handle, aligned, num_devices)
+            mc_map_fn = _mc_map_posix if posix else _mc_map
+            self._mcast_base_ptr = mc_map_fn(self._mcast_handle, aligned, num_devices)
             self._mcast_ptr = self._mcast_base_ptr
 
         self._collective_stage("map multicast object", map_multicast_object)
@@ -523,7 +581,8 @@ class BaseAllocator:
             mcast_base_ptr = self._mcast_base_ptr
             self._mcast_base_ptr = 0
             self._mcast_ptr = 0
-            _mc_unmap(mcast_base_ptr, self._mcast_aligned_size, self._num_local_ranks)
+            mc_unmap_fn = _mc_unmap_posix if getattr(self, "_mcast_handle_mode", None) == "posix" else _mc_unmap
+            mc_unmap_fn(mcast_base_ptr, self._mcast_aligned_size, self._num_local_ranks)
 
         if getattr(self, "_mcast_handle", 0) and self._mcast_handle:
             mcast_handle = self._mcast_handle
@@ -569,6 +628,9 @@ class BaseAllocator:
         self._table = None
 
     def _init_table(self):
+        if self._use_vmm and self._vmm_handle_mode == "posix":
+            return self._init_table_posix()
+
         # Synchronize handles (VMM or IPC)
         handles = [None] * self._group_size
 
@@ -605,6 +667,56 @@ class BaseAllocator:
             self._buffer_ptrs.copy_(host_ptrs)
 
         self._collective_stage("import allocation handles", import_handles)
+
+        def finalize_pointer_table():
+            self._table_size = 2 + self._group_size
+            self._table = torch.empty(self._table_size, dtype=torch.uint64, device="cpu")
+            self._table[0] = self._local_rank
+            self._table[1] = self._group_size
+            self._table[2:] = self._buffer_ptrs
+
+        self._collective_stage("finalize peer pointer table", finalize_pointer_table)
+
+    def _init_table_posix(self):
+        """Peer-table setup for POSIX-fd VMM allocations (no IMEX).
+
+        Fds cannot travel through object collectives, so each rank's base
+        allocation fd is exchanged full-mesh over SCM_RIGHTS Unix sockets.
+        """
+
+        def export_fd():
+            fd = int(_vmm_export_posix_fd(self._base_ptr.value))
+            size = int(_vmm_alloc_size(self._base_ptr.value))
+            return fd, size
+
+        local_fd, local_size = self._collective_stage("export allocation handles", export_fd)
+
+        sizes = [None] * self._group_size
+        dist.all_gather_object(sizes, local_size, group=self._group)
+
+        def allocate_peer_pointer_table():
+            self._buffer_ptrs = torch.empty(self._group_size, dtype=torch.uint64, device=f"cuda:{self._device}")
+
+        self._collective_stage("allocate peer pointer table", allocate_peer_pointer_table)
+
+        def exchange_and_import():
+            fds = exchange_fds(local_fd, self._local_rank, self._group_size, self._group, self._group_root_global_rank)
+            self._peer_ptr_values = [0] * self._group_size
+            try:
+                for peer_rank, fd in enumerate(fds):
+                    if peer_rank == self._local_rank:
+                        self._peer_ptr_values[peer_rank] = self._base_ptr.value
+                    else:
+                        self._peer_ptr_values[peer_rank] = _vmm_import_posix_fd(fd, sizes[peer_rank])
+            finally:
+                for fd in fds:
+                    if fd >= 0:
+                        os.close(fd)
+
+            host_ptrs = torch.tensor(self._peer_ptr_values, dtype=torch.uint64)
+            self._buffer_ptrs.copy_(host_ptrs)
+
+        self._collective_stage("import allocation handles", exchange_and_import)
 
         def finalize_pointer_table():
             self._table_size = 2 + self._group_size

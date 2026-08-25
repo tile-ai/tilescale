@@ -21,6 +21,10 @@
 #include <string>
 #include <vector>
 
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
+
 #include "cuda/stubs/dynlib.h"
 #include "support/check.h"
 
@@ -448,11 +452,12 @@ static void cu_mem_set_access_devices(void *ptr, size_t size, int num_devices) {
                              static_cast<size_t>(num_devices)));
 }
 
-static bool can_create_fabric_allocation(CUdevice device) {
+static bool can_create_pinned_allocation(CUdevice device,
+                                         CUmemAllocationHandleType handle_type) {
   CUmemAllocationProp prop = {};
   prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
   prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-  prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
+  prop.requestedHandleTypes = handle_type;
   prop.location.id = device;
 
   size_t granularity = 0;
@@ -471,10 +476,15 @@ static bool can_create_fabric_allocation(CUdevice device) {
   return cuMemRelease(handle) == CUDA_SUCCESS;
 }
 
-static bool can_create_multicast_object(int device_count) {
+static bool can_create_fabric_allocation(CUdevice device) {
+  return can_create_pinned_allocation(device, CU_MEM_HANDLE_TYPE_FABRIC);
+}
+
+static bool can_create_multicast_object(int device_count,
+                                        CUmemAllocationHandleType handle_type) {
   CUmulticastObjectProp prop = {};
   prop.numDevices = static_cast<unsigned int>(device_count);
-  prop.handleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
+  prop.handleTypes = handle_type;
 
   size_t granularity = 0;
   CUresult result = cuMulticastGetGranularity(
@@ -492,24 +502,44 @@ static bool can_create_multicast_object(int device_count) {
   }
 
   bool ok = false;
-  CUmemFabricHandle fabric_handle;
-  result = cuMemExportToShareableHandle(&fabric_handle, mc_handle,
-                                        CU_MEM_HANDLE_TYPE_FABRIC, 0);
-  if (result == CUDA_SUCCESS) {
-    CUmemGenericAllocationHandle imported_handle;
-    result = cuMemImportFromShareableHandle(&imported_handle, &fabric_handle,
-                                            CU_MEM_HANDLE_TYPE_FABRIC);
+  if (handle_type == CU_MEM_HANDLE_TYPE_FABRIC) {
+    CUmemFabricHandle fabric_handle;
+    result = cuMemExportToShareableHandle(&fabric_handle, mc_handle,
+                                          CU_MEM_HANDLE_TYPE_FABRIC, 0);
     if (result == CUDA_SUCCESS) {
-      ok = cuMemRelease(imported_handle) == CUDA_SUCCESS;
+      CUmemGenericAllocationHandle imported_handle;
+      result = cuMemImportFromShareableHandle(&imported_handle, &fabric_handle,
+                                              CU_MEM_HANDLE_TYPE_FABRIC);
+      if (result == CUDA_SUCCESS) {
+        ok = cuMemRelease(imported_handle) == CUDA_SUCCESS;
+      }
     }
   }
+#if !defined(_WIN32)
+  else if (handle_type == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR) {
+    int fd = -1;
+    result = cuMemExportToShareableHandle(
+        &fd, mc_handle, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0);
+    if (result == CUDA_SUCCESS) {
+      CUmemGenericAllocationHandle imported_handle;
+      result = cuMemImportFromShareableHandle(
+          &imported_handle, reinterpret_cast<void *>(static_cast<intptr_t>(fd)),
+          CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR);
+      if (result == CUDA_SUCCESS) {
+        ok = cuMemRelease(imported_handle) == CUDA_SUCCESS;
+      }
+      close(fd);
+    }
+  }
+#endif
 
   return cuMemRelease(mc_handle) == CUDA_SUCCESS && ok;
 }
 
 // ---------- VMM malloc/free ----------
 
-static int64_t vmm_malloc_impl(int64_t size_raw) {
+static int64_t vmm_malloc_with_type(int64_t size_raw,
+                                    CUmemAllocationHandleType handle_type) {
   const size_t requested_size = checked_positive_size(size_raw, "size");
 
   CUdevice device;
@@ -518,7 +548,7 @@ static int64_t vmm_malloc_impl(int64_t size_raw) {
   CUmemAllocationProp prop = {};
   prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
   prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-  prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
+  prop.requestedHandleTypes = handle_type;
   prop.location.id = device;
 
   size_t granularity = 0;
@@ -544,6 +574,25 @@ static int64_t vmm_malloc_impl(int64_t size_raw) {
   address_guard.Disarm();
 
   return result;
+}
+
+static int64_t vmm_malloc_impl(int64_t size_raw) {
+  return vmm_malloc_with_type(size_raw, CU_MEM_HANDLE_TYPE_FABRIC);
+}
+
+// Granularity-aligned size of the mapping backing `ptr` (needed by importers,
+// since cuMemMap must cover the full allocation).
+static int64_t vmm_alloc_size_impl(int64_t ptr_val) {
+  void *ptr = reinterpret_cast<void *>(checked_address(ptr_val, "ptr"));
+  size_t size = 0;
+  SM_CU_CHECK(cuMemGetAddressRange_v2(NULL, &size, (CUdeviceptr)ptr));
+  return static_cast<int64_t>(size);
+}
+
+// POSIX-FD flavor: works on Linux without IMEX channels.
+static int64_t vmm_malloc_posix_impl(int64_t size_raw) {
+  return vmm_malloc_with_type(size_raw,
+                              CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR);
 }
 
 static void vmm_free_impl(int64_t ptr_val) {
@@ -621,6 +670,53 @@ static int64_t open_vmm_handle_impl(ffi::Bytes handle_bytes) {
 }
 
 static void close_vmm_handle_impl(int64_t ptr_val) { vmm_free_impl(ptr_val); }
+
+#if !defined(_WIN32)
+// Export the allocation backing `ptr` as a POSIX file descriptor. The caller
+// owns the returned fd (pass it to a peer process via SCM_RIGHTS, then close).
+static int64_t vmm_export_posix_fd_impl(int64_t ptr_val) {
+  void *ptr = reinterpret_cast<void *>(checked_address(ptr_val, "ptr"));
+  CUmemGenericAllocationHandle handle;
+  SM_CU_CHECK(cuMemRetainAllocationHandle(&handle, ptr));
+  ScopedGenericAllocationHandle handle_guard(handle);
+
+  int fd = -1;
+  SM_CU_CHECK(cuMemExportToShareableHandle(
+      &fd, handle, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0));
+  SM_CU_CHECK(cuMemRelease(handle));
+  handle_guard.Disarm();
+  return static_cast<int64_t>(fd);
+}
+
+// Import a peer allocation from a POSIX fd received over SCM_RIGHTS and map
+// it into this process. The caller still owns (and should close) the fd.
+static int64_t vmm_import_posix_fd_impl(int64_t fd_val, int64_t size_raw) {
+  const size_t size = checked_positive_size(size_raw, "size");
+  const int fd = static_cast<int>(fd_val);
+  if (fd < 0) {
+    LOG_FATAL << "vmm_import_posix_fd: invalid fd " << fd_val;
+  }
+
+  CUmemGenericAllocationHandle alloc_handle;
+  SM_CU_CHECK(cuMemImportFromShareableHandle(
+      &alloc_handle, reinterpret_cast<void *>(static_cast<intptr_t>(fd)),
+      CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
+  ScopedGenericAllocationHandle handle_guard(alloc_handle);
+
+  CUdeviceptr ptr = 0;
+  SM_CU_CHECK(cuMemAddressReserve(&ptr, size, 0, 0, 0));
+  ScopedVirtualAddress address_guard(ptr, size);
+  SM_CU_CHECK(cuMemMap(ptr, size, 0, alloc_handle, 0));
+  address_guard.MarkMapped();
+  cu_mem_set_access_all(reinterpret_cast<void *>((uintptr_t)ptr), size);
+  SM_CU_CHECK(cuMemRelease(alloc_handle));
+  handle_guard.Disarm();
+  const int64_t result = checked_output_address(ptr, "vmm_import_posix_fd");
+  address_guard.Disarm();
+
+  return result;
+}
+#endif
 
 // ---------- IPC handle ----------
 
@@ -715,21 +811,86 @@ static bool supports_multicast_impl() {
     if (!supported)
       return false;
   }
-  return can_create_multicast_object(device_count);
+  return can_create_multicast_object(device_count, CU_MEM_HANDLE_TYPE_FABRIC);
+}
+
+// POSIX-FD flavor of the probes: usable on Linux single-node setups without
+// IMEX channels (fabric handles require IMEX; POSIX fds only require peer
+// processes on the same host exchanging fds over SCM_RIGHTS).
+static bool supports_vmm_posix_impl() {
+#if defined(_WIN32)
+  return false;
+#else
+  if (!SharedMemoryDriverAPI::Get()->HasVMM()) {
+    return false;
+  }
+
+  int device_count = 0;
+  cudaError_t err = cudaGetDeviceCount(&device_count);
+  if (err != cudaSuccess || device_count == 0)
+    return false;
+
+  for (int i = 0; i < device_count; ++i) {
+    CUdevice dev = static_cast<CUdevice>(i);
+    int supported = 0;
+    CUresult result = cuDeviceGetAttribute(
+        &supported,
+        CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR_SUPPORTED, dev);
+    if (result != CUDA_SUCCESS || !supported) {
+      return false;
+    }
+    if (!can_create_pinned_allocation(dev,
+                                      CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR))
+      return false;
+  }
+  return true;
+#endif
+}
+
+static bool supports_multicast_posix_impl() {
+#if defined(_WIN32)
+  return false;
+#else
+  if (!SharedMemoryDriverAPI::Get()->HasMulticast()) {
+    return false;
+  }
+
+  if (!supports_vmm_posix_impl()) {
+    return false;
+  }
+
+  int device_count = 0;
+  cudaError_t err = cudaGetDeviceCount(&device_count);
+  if (err != cudaSuccess || device_count == 0)
+    return false;
+
+  for (int i = 0; i < device_count; ++i) {
+    CUdevice dev = static_cast<CUdevice>(i);
+    int supported = 0;
+    CUresult result = cuDeviceGetAttribute(
+        &supported, CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED, dev);
+    if (result != CUDA_SUCCESS || !supported) {
+      return false;
+    }
+  }
+  return can_create_multicast_object(device_count,
+                                     CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR);
+#endif
 }
 
 // ---------- Multicast (NVSwitch) ----------
 // Multi-process multi-GPU with fabric handles (same as vmm_malloc).
 // Each process manages one GPU. MC handle shared via fabric export/import.
 
-// Create multicast object with FABRIC handle type, returns handle as int64.
-static int64_t mc_create_impl(int64_t size_raw, int64_t num_devices) {
+// Create multicast object, returns handle as int64.
+static int64_t mc_create_with_type(int64_t size_raw, int64_t num_devices,
+                                   CUmemAllocationHandleType handle_type) {
   const size_t requested_size = checked_positive_size(size_raw, "size");
   const int device_count = checked_device_count(num_devices, "num_devices");
 
   CUmulticastObjectProp prop = {};
   prop.numDevices = static_cast<unsigned int>(device_count);
-  prop.handleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
+  prop.handleTypes = handle_type;
 
   size_t granularity = 0;
   SM_CU_CHECK(cuMulticastGetGranularity(&granularity, &prop,
@@ -746,6 +907,15 @@ static int64_t mc_create_impl(int64_t size_raw, int64_t num_devices) {
   handle_guard.Disarm();
 
   return result;
+}
+
+static int64_t mc_create_impl(int64_t size_raw, int64_t num_devices) {
+  return mc_create_with_type(size_raw, num_devices, CU_MEM_HANDLE_TYPE_FABRIC);
+}
+
+static int64_t mc_create_posix_impl(int64_t size_raw, int64_t num_devices) {
+  return mc_create_with_type(size_raw, num_devices,
+                             CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR);
 }
 
 // Export multicast handle as fabric handle bytes (for sharing across processes)
@@ -778,6 +948,38 @@ static int64_t mc_import_handle_impl(ffi::Bytes handle_bytes) {
   return result;
 }
 
+#if !defined(_WIN32)
+// Export multicast handle as a POSIX fd (caller owns and closes the fd).
+static int64_t mc_export_posix_fd_impl(int64_t mc_handle_val) {
+  CUmemGenericAllocationHandle mc_handle =
+      checked_handle(mc_handle_val, "mc_handle");
+
+  int fd = -1;
+  SM_CU_CHECK(cuMemExportToShareableHandle(
+      &fd, mc_handle, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0));
+  return static_cast<int64_t>(fd);
+}
+
+// Import multicast handle from a POSIX fd received over SCM_RIGHTS. The
+// caller still owns (and should close) the fd.
+static int64_t mc_import_posix_fd_impl(int64_t fd_val) {
+  const int fd = static_cast<int>(fd_val);
+  if (fd < 0) {
+    LOG_FATAL << "mc_import_posix_fd: invalid fd " << fd_val;
+  }
+
+  CUmemGenericAllocationHandle mc_handle;
+  SM_CU_CHECK(cuMemImportFromShareableHandle(
+      &mc_handle, reinterpret_cast<void *>(static_cast<intptr_t>(fd)),
+      CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
+  ScopedGenericAllocationHandle handle_guard(mc_handle);
+  const int64_t result = checked_output_handle(mc_handle, "mc_import_posix_fd");
+  handle_guard.Disarm();
+
+  return result;
+}
+#endif
+
 // Add a device to the multicast object
 static void mc_add_device_impl(int64_t mc_handle_val, int64_t device_id) {
   CUmemGenericAllocationHandle mc_handle =
@@ -808,21 +1010,28 @@ static void mc_bind_mem_impl(int64_t mc_handle_val, int64_t ptr_val,
   handle_guard.Disarm();
 }
 
+static size_t mc_granularity(int device_count,
+                             CUmemAllocationHandleType handle_type) {
+  CUmulticastObjectProp prop = {};
+  prop.numDevices = static_cast<unsigned int>(device_count);
+  prop.handleTypes = handle_type;
+
+  size_t granularity = 0;
+  SM_CU_CHECK(cuMulticastGetGranularity(&granularity, &prop,
+                                        CU_MULTICAST_GRANULARITY_RECOMMENDED));
+  return granularity;
+}
+
 // Map multicast object to a VA, returns mc_ptr. Does NOT release handle.
-static int64_t mc_map_impl(int64_t mc_handle_val, int64_t size_raw,
-                           int64_t num_devices) {
+static int64_t mc_map_with_type(int64_t mc_handle_val, int64_t size_raw,
+                                int64_t num_devices,
+                                CUmemAllocationHandleType handle_type) {
   CUmemGenericAllocationHandle mc_handle =
       checked_handle(mc_handle_val, "mc_handle");
   const size_t requested_size = checked_positive_size(size_raw, "size");
   const int device_count = checked_device_count(num_devices, "num_devices");
 
-  CUmulticastObjectProp prop = {};
-  prop.numDevices = static_cast<unsigned int>(device_count);
-  prop.handleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
-
-  size_t granularity = 0;
-  SM_CU_CHECK(cuMulticastGetGranularity(&granularity, &prop,
-                                        CU_MULTICAST_GRANULARITY_RECOMMENDED));
+  const size_t granularity = mc_granularity(device_count, handle_type);
   const size_t size =
       checked_align_to_granularity(requested_size, granularity, "size");
 
@@ -839,6 +1048,18 @@ static int64_t mc_map_impl(int64_t mc_handle_val, int64_t size_raw,
   return result;
 }
 
+static int64_t mc_map_impl(int64_t mc_handle_val, int64_t size_raw,
+                           int64_t num_devices) {
+  return mc_map_with_type(mc_handle_val, size_raw, num_devices,
+                          CU_MEM_HANDLE_TYPE_FABRIC);
+}
+
+static int64_t mc_map_posix_impl(int64_t mc_handle_val, int64_t size_raw,
+                                 int64_t num_devices) {
+  return mc_map_with_type(mc_handle_val, size_raw, num_devices,
+                          CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR);
+}
+
 // Release a multicast handle (call after map)
 static void mc_release_handle_impl(int64_t mc_handle_val) {
   CUmemGenericAllocationHandle mc_handle =
@@ -849,19 +1070,14 @@ static void mc_release_handle_impl(int64_t mc_handle_val) {
 }
 
 // Free multicast VA mapping
-static void mc_unmap_impl(int64_t mc_ptr_val, int64_t size_raw,
-                          int64_t num_devices) {
+static void mc_unmap_with_type(int64_t mc_ptr_val, int64_t size_raw,
+                               int64_t num_devices,
+                               CUmemAllocationHandleType handle_type) {
   void *ptr = reinterpret_cast<void *>(checked_address(mc_ptr_val, "mc_ptr"));
   const size_t requested_size = checked_positive_size(size_raw, "size");
   const int device_count = checked_device_count(num_devices, "num_devices");
 
-  CUmulticastObjectProp prop = {};
-  prop.numDevices = static_cast<unsigned int>(device_count);
-  prop.handleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
-
-  size_t granularity = 0;
-  SM_CU_CHECK(cuMulticastGetGranularity(&granularity, &prop,
-                                        CU_MULTICAST_GRANULARITY_RECOMMENDED));
+  const size_t granularity = mc_granularity(device_count, handle_type);
   const size_t size =
       checked_align_to_granularity(requested_size, granularity, "size");
 
@@ -872,20 +1088,39 @@ static void mc_unmap_impl(int64_t mc_ptr_val, int64_t size_raw,
   address_guard.Disarm();
 }
 
+static void mc_unmap_impl(int64_t mc_ptr_val, int64_t size_raw,
+                          int64_t num_devices) {
+  mc_unmap_with_type(mc_ptr_val, size_raw, num_devices,
+                     CU_MEM_HANDLE_TYPE_FABRIC);
+}
+
+static void mc_unmap_posix_impl(int64_t mc_ptr_val, int64_t size_raw,
+                                int64_t num_devices) {
+  mc_unmap_with_type(mc_ptr_val, size_raw, num_devices,
+                     CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR);
+}
+
 // Get the aligned size for multicast
-static int64_t mc_get_aligned_size_impl(int64_t size_raw, int64_t num_devices) {
+static int64_t mc_get_aligned_size_with_type(
+    int64_t size_raw, int64_t num_devices,
+    CUmemAllocationHandleType handle_type) {
   const size_t requested_size = checked_positive_size(size_raw, "size");
   const int device_count = checked_device_count(num_devices, "num_devices");
 
-  CUmulticastObjectProp prop = {};
-  prop.numDevices = static_cast<unsigned int>(device_count);
-  prop.handleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
-
-  size_t granularity = 0;
-  SM_CU_CHECK(cuMulticastGetGranularity(&granularity, &prop,
-                                        CU_MULTICAST_GRANULARITY_RECOMMENDED));
+  const size_t granularity = mc_granularity(device_count, handle_type);
   return static_cast<int64_t>(
       checked_align_to_granularity(requested_size, granularity, "size"));
+}
+
+static int64_t mc_get_aligned_size_impl(int64_t size_raw, int64_t num_devices) {
+  return mc_get_aligned_size_with_type(size_raw, num_devices,
+                                       CU_MEM_HANDLE_TYPE_FABRIC);
+}
+
+static int64_t mc_get_aligned_size_posix_impl(int64_t size_raw,
+                                              int64_t num_devices) {
+  return mc_get_aligned_size_with_type(size_raw, num_devices,
+                                       CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR);
 }
 
 // ---------- sync helpers ----------
@@ -966,6 +1201,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   // VMM
   refl::GlobalDef().def("tl.shared_memory.vmm_malloc", vmm_malloc_impl);
   refl::GlobalDef().def("tl.shared_memory.vmm_free", vmm_free_impl);
+  refl::GlobalDef().def("tl.shared_memory.vmm_alloc_size", vmm_alloc_size_impl);
   refl::GlobalDef().def("tl.shared_memory.create_vmm_handle",
                         create_vmm_handle_impl);
   refl::GlobalDef().def("tl.shared_memory.open_vmm_handle",
@@ -986,6 +1222,31 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                         sync_ipc_handles_impl);
 
   // Support detection
+#if !defined(_WIN32)
+  // POSIX-FD flavors (Linux single-node, no IMEX required)
+  refl::GlobalDef().def("tl.shared_memory.vmm_malloc_posix",
+                        vmm_malloc_posix_impl);
+  refl::GlobalDef().def("tl.shared_memory.vmm_export_posix_fd",
+                        vmm_export_posix_fd_impl);
+  refl::GlobalDef().def("tl.shared_memory.vmm_import_posix_fd",
+                        vmm_import_posix_fd_impl);
+  refl::GlobalDef().def("tl.shared_memory.supports_vmm_posix",
+                        supports_vmm_posix_impl);
+  refl::GlobalDef().def("tl.shared_memory.supports_multicast_posix",
+                        supports_multicast_posix_impl);
+  refl::GlobalDef().def("tl.shared_memory.mc_create_posix",
+                        mc_create_posix_impl);
+  refl::GlobalDef().def("tl.shared_memory.mc_export_posix_fd",
+                        mc_export_posix_fd_impl);
+  refl::GlobalDef().def("tl.shared_memory.mc_import_posix_fd",
+                        mc_import_posix_fd_impl);
+  refl::GlobalDef().def("tl.shared_memory.mc_map_posix", mc_map_posix_impl);
+  refl::GlobalDef().def("tl.shared_memory.mc_unmap_posix",
+                        mc_unmap_posix_impl);
+  refl::GlobalDef().def("tl.shared_memory.mc_get_aligned_size_posix",
+                        mc_get_aligned_size_posix_impl);
+#endif
+
   refl::GlobalDef().def("tl.shared_memory.supports_vmm_fabric",
                         supports_vmm_fabric_impl);
   refl::GlobalDef().def("tl.shared_memory.supports_multicast",

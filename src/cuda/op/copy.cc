@@ -156,6 +156,8 @@ bool GetDisableTMA(const CopyNode &op) {
   return GetBoolAnnotation(op, "disable_tma");
 }
 
+bool GetNoElect(const CopyNode &op) { return GetBoolAnnotation(op, "no_elect"); }
+
 bool GetIsTmaCopy(const CopyNode &op) {
   return GetBoolAnnotation(op, "is_tma_copy");
 }
@@ -826,18 +828,36 @@ LayoutMap Copy::InferTMemLayout(const CopyNode &op, const LayoutInferArgs &T,
   if (!T.layout_map.count(reg_buf) && T.layout_map.count(tmem_buf)) {
     Layout tmem_layout = T.layout_map[tmem_buf];
     Array<IterVar> logical_coords = op.MakeIterVars();
-    Array<PrimExpr> logical_coords_var = {logical_coords[0]->var,
-                                          logical_coords[1]->var};
-    Array<PrimExpr> phy_indices = tmem_layout->Forward(logical_coords_var);
+    int tmem_side = is_tmem_load ? 0 : 1;
+    Array<PrimExpr> logical_indices = op.MakeIndices(logical_coords, tmem_side);
 
     arith::Analyzer analyzer;
     for (const auto &iv : logical_coords) {
       analyzer.Bind(iv->var, iv->dom);
     }
+    std::unordered_map<Var, PrimExpr, ObjectPtrHash, ObjectPtrEqual>
+        loop_min_subst;
+    for (const auto &iv : logical_coords) {
+      loop_min_subst[iv->var] = iv->dom->min;
+    }
+    Array<PrimExpr> tmem_start_logical_indices;
+    tmem_start_logical_indices.reserve(logical_indices.size());
+    for (const PrimExpr &idx : logical_indices) {
+      tmem_start_logical_indices.push_back(
+          analyzer.Simplify(Substitute(idx, loop_min_subst)));
+    }
+
+    Array<PrimExpr> phy_indices = tmem_layout->Forward(logical_indices);
+    Array<PrimExpr> tmem_start_phy_indices =
+        tmem_layout->Forward(tmem_start_logical_indices);
+    Array<PrimExpr> relative_phy_indices = {
+        analyzer.Simplify(phy_indices[0] - tmem_start_phy_indices[0]),
+        analyzer.Simplify(phy_indices[1] - tmem_start_phy_indices[1])};
+
     arith::ConstIntBound phy_row_bounds =
-        analyzer.const_int_bound(phy_indices[0]);
+        analyzer.const_int_bound(relative_phy_indices[0]);
     arith::ConstIntBound phy_col_bounds =
-        analyzer.const_int_bound(phy_indices[1]);
+        analyzer.const_int_bound(relative_phy_indices[1]);
     Range row_dom = Range(static_cast<int>(phy_row_bounds->min_value),
                           static_cast<int>(phy_row_bounds->max_value + 1));
     Range col_dom = Range(static_cast<int>(phy_col_bounds->min_value),
@@ -866,10 +886,10 @@ LayoutMap Copy::InferTMemLayout(const CopyNode &op, const LayoutInferArgs &T,
       if (!is_success) {
         continue;
       }
-      Fragment logical_coord2frag =
-          Fragment(logical_coords, tmem_coord2frag->Forward(phy_indices),
-                   tmem_coord2frag->ForwardThread(phy_indices, std::nullopt),
-                   make_itervar("rep", 1));
+      Fragment logical_coord2frag = Fragment(
+          logical_coords, tmem_coord2frag->Forward(relative_phy_indices),
+          tmem_coord2frag->ForwardThread(relative_phy_indices, std::nullopt),
+          make_itervar("rep", 1));
       results.Set(reg_buf,
                   logical_coord2frag->BindThreadRange(T.thread_bounds));
       break;
@@ -1520,8 +1540,6 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &T,
          is_const_int(loop_vars[1]->dom->min) &&
          is_const_int(loop_vars[1]->dom->extent))
       << "Tensor memory copy requires loop bounds to be constant integers";
-  int64_t logical_row_min = *as_const_int(loop_vars[0]->dom->min);
-  int64_t logical_col_min = *as_const_int(loop_vars[1]->dom->min);
 
   constexpr int WARP_SIZE = 32;
   constexpr int WARPGROUP_SIZE = 4 * WARP_SIZE;
@@ -1548,13 +1566,32 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &T,
   Layout tmem_layout = T.layout_map[tmem_buf];
   Fragment reg_layout = Downcast<Fragment>(T.layout_map[reg_buf]);
 
-  Array<PrimExpr> logical_indices = op.MakeIndices(loop_vars, tmem_side);
-  Array<PrimExpr> phy_indices = tmem_layout->Forward(logical_indices);
+  int reg_side = is_ld ? 1 : 0;
+  Array<PrimExpr> tmem_logical_indices = op.MakeIndices(loop_vars, tmem_side);
+  Array<PrimExpr> reg_logical_indices = op.MakeIndices(loop_vars, reg_side);
+  Array<PrimExpr> phy_indices = tmem_layout->Forward(tmem_logical_indices);
+
+  std::unordered_map<Var, PrimExpr, ObjectPtrHash, ObjectPtrEqual>
+      loop_min_subst;
+  for (const auto &iv : loop_vars) {
+    loop_min_subst[iv->var] = iv->dom->min;
+  }
+  Array<PrimExpr> tmem_start_logical_indices;
+  tmem_start_logical_indices.reserve(tmem_logical_indices.size());
+  for (const PrimExpr &idx : tmem_logical_indices) {
+    tmem_start_logical_indices.push_back(
+        analyzer->Simplify(Substitute(idx, loop_min_subst)));
+  }
+  Array<PrimExpr> tmem_start_phy_indices =
+      tmem_layout->Forward(tmem_start_logical_indices);
+  Array<PrimExpr> relative_phy_indices = {
+      analyzer->Simplify(phy_indices[0] - tmem_start_phy_indices[0]),
+      analyzer->Simplify(phy_indices[1] - tmem_start_phy_indices[1])};
 
   arith::ConstIntBound phy_row_bounds =
-      analyzer->const_int_bound(phy_indices[0]);
+      analyzer->const_int_bound(relative_phy_indices[0]);
   arith::ConstIntBound phy_col_bounds =
-      analyzer->const_int_bound(phy_indices[1]);
+      analyzer->const_int_bound(relative_phy_indices[1]);
   int tmem_phy_row_min = phy_row_bounds->min_value;
   int tmem_phy_row_max = phy_row_bounds->max_value;
   int tmem_phy_col_min = phy_col_bounds->min_value;
@@ -1588,14 +1625,14 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &T,
       }
 
       PrimExpr target_thread =
-          target_frag->ForwardThread(phy_indices, std::nullopt);
+          target_frag->ForwardThread(relative_phy_indices, std::nullopt);
       PrimExpr reg_thread =
-          reg_layout->ForwardThread(logical_indices, std::nullopt);
+          reg_layout->ForwardThread(reg_logical_indices, std::nullopt);
       if (!analyzer->CanProveEqual(target_thread, reg_thread)) {
         continue;
       }
-      PrimExpr target_reg = target_frag->Forward(phy_indices)[0];
-      PrimExpr reg_val = reg_layout->Forward(logical_indices)[0];
+      PrimExpr target_reg = target_frag->Forward(relative_phy_indices)[0];
+      PrimExpr reg_val = reg_layout->Forward(reg_logical_indices)[0];
       if (!analyzer->CanProveEqual(target_reg, reg_val)) {
         continue;
       }
@@ -1616,8 +1653,7 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &T,
         args.push_back(IntImm(DataType::Int(32), meta.width * 32));
         args.push_back(IntImm(DataType::Int(32), effective_chunks));
         args.push_back(Bool(use_pack_unpack_modifier));
-        args.push_back(
-            BufferLoad(tmem_buf, {(int)logical_row_min, (int)logical_col_min}));
+        args.push_back(BufferLoad(tmem_buf, tmem_start_logical_indices));
         args.push_back(col_offset);
         args.push_back(reg_buf.access_ptr(/*access_mask=*/2, DataType::Handle(),
                                           /*content_lanes=*/1, /*offset=*/0,
@@ -1627,8 +1663,7 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &T,
         args.push_back(IntImm(DataType::Int(32), meta.width * 32));
         args.push_back(IntImm(DataType::Int(32), effective_chunks));
         args.push_back(Bool(use_pack_unpack_modifier));
-        args.push_back(
-            BufferLoad(tmem_buf, {(int)logical_row_min, (int)logical_col_min}));
+        args.push_back(BufferLoad(tmem_buf, tmem_start_logical_indices));
         args.push_back(col_offset);
         args.push_back(reg_buf.access_ptr(/*access_mask=*/1, DataType::Handle(),
                                           /*content_lanes=*/1, /*offset=*/0,
@@ -1969,7 +2004,9 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
       mbar_handle = Downcast<PrimExpr>(user_barrier.value());
       barrier_base_id = 0;
       if (auto bl = mbar_handle.as<BufferLoadNode>()) {
-        is_cluster_barrier = bl->buffer.scope() == "shared.cluster_barrier";
+        auto scope = bl->buffer.scope();
+        is_cluster_barrier = scope == "shared.cluster_barrier" ||
+                             scope == "shared.raw_cluster_barrier";
       }
     } else if (GetIsTmaCopy(op)) {
       LOG(FATAL) << "T.tma_copy() requires a barrier argument. "
@@ -1998,6 +2035,13 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   if (is_cluster_barrier && TargetIsSm100(T.target) && is_load) {
     tma_ann.Set("use_2cta", IntImm(DataType::Int(32), 1));
   }
+  // shared::cta TMA requires rank-matched descriptors. TileLang supports this
+  // path via tma_load_2sm_cta, but the current NUMA schedule is slower than
+  // shared::cluster, so keep shared::cluster as the default.
+  // if (GetNoElect(op) && is_cluster_barrier && TargetIsSm100(T.target) &&
+  //     is_load) {
+  //   tma_ann.Set("use_cta_smem", IntImm(DataType::Int(32), 1));
+  // }
   if (IsRemotePE(remote_pe)) {
     ICHECK(!use_multicast)
         << "Remote descriptor TMA copy does not support cluster multicast.";
@@ -2127,7 +2171,21 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     Stmt barrier_before_tma_stmt;
     Optional<Stmt> barrier_after_tma_stmt = std::nullopt;
     if (GetIsTmaCopy(op)) {
-      if (is_cluster_barrier) {
+      if (GetNoElect(op)) {
+        // Per-thread TMA: every active thread issues its own transaction, so
+        // arrive+expect_tx must also run per thread. For cluster barriers this
+        // clears the peer bit (bit 24) for cluster-wide arrive signaling.
+        if (is_cluster_barrier) {
+          barrier_before_tma_stmt = Evaluate(
+              Call(DataType::Handle(), builtin::call_extern(),
+                   {StringImm("tl::mbarrier_arrive_expect_tx_cluster"),
+                    mbar_handle, total_bytes, IntImm(DataType::Int(32), 0)}));
+        } else {
+          barrier_before_tma_stmt = Evaluate(
+              Call(DataType::Handle(), builtin::ptx_arrive_barrier_expect_tx(),
+                   {mbar_handle, total_bytes}));
+        }
+      } else if (is_cluster_barrier) {
         PrimExpr cluster_total_bytes =
             total_bytes * IntImm(DataType::Int(32), T.cluster_size);
         Stmt expect_stmt =
@@ -2161,9 +2219,14 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
       producer_seq.push_back(barrier_after_tma_stmt.value());
     }
 
-    Stmt producer =
-        IfThenElse(MakeTmaLeaderCondition(GetTmaLeaderThreadExtent(op, T)),
-                   SeqStmt(producer_seq));
+    Stmt producer;
+    if (GetNoElect(op)) {
+      producer = SeqStmt(producer_seq);
+    } else {
+      producer =
+          IfThenElse(MakeTmaLeaderCondition(GetTmaLeaderThreadExtent(op, T)),
+                     SeqStmt(producer_seq));
+    }
 
     if (GetIsTmaCopy(op)) {
       return producer;
@@ -2469,9 +2532,14 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
       producer_seq.push_back(barrier_after_tma_stmt.value());
     }
 
-    Stmt producer =
-        IfThenElse(MakeTmaLeaderCondition(GetTmaLeaderThreadExtent(op, T)),
-                   SeqStmt(producer_seq));
+    Stmt producer;
+    if (GetNoElect(op)) {
+      producer = SeqStmt(producer_seq);
+    } else {
+      producer =
+          IfThenElse(MakeTmaLeaderCondition(GetTmaLeaderThreadExtent(op, T)),
+                     SeqStmt(producer_seq));
+    }
 
     if (GetIsTmaCopy(op)) {
       return producer;

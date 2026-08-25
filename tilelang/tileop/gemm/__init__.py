@@ -6,6 +6,7 @@ from tvm.ir import Range
 from tvm.runtime import Scriptable
 import tvm_ffi
 from .registry import resolve_gemm_impl
+from tilelang.language.scale import SCALE_CTX_NAME_KEY, SCALE_CTX_PATH_KEY
 from tilelang import _ffi_api
 
 
@@ -171,4 +172,52 @@ class Gemm(Node, Scriptable):
             NotImplementedError: If the instruction key is not supported
             ValueError: If the instruction key is unknown
         """
-        return resolve_gemm_impl(gemm_inst, target)
+        return resolve_gemm_impl(gemm_inst, target, scale_scope=self._scale_scope(),
+                                 scale_path=self._scale_path())
+
+    # Annotation keys stamped by T.gemm under a ``with T.scale(...)`` context
+    # (see tilelang/language/scale.py merge_scale_context_annotations).
+    _SCALE_CTX_NAME_KEY = SCALE_CTX_NAME_KEY
+    _SCALE_CTX_PATH_KEY = SCALE_CTX_PATH_KEY
+
+    def _scale_scope(self):
+        """Return the innermost ``tl.scale_ctx.name`` (str) for this GEMM, or None.
+
+        Reads the reflected ``annotations`` map. Tolerates StringImm / str values
+        and a missing key. This is metadata only -- it is never emitted into the
+        generated CUDA source.
+        """
+        annotations = getattr(self, "annotations", None)
+        if not annotations:
+            return None
+        value = annotations.get(self._SCALE_CTX_NAME_KEY, None)
+        if value is None:
+            return None
+        # StringImm exposes `.value`; a plain Python str passes through.
+        return value.value if hasattr(value, "value") else str(value)
+
+    def _scale_path(self):
+        """Return the full scale path (outer -> inner) as a tuple of str, or None.
+
+        Reads ``tl.scale_ctx.path`` from the reflected ``annotations`` map.
+        Tolerates:
+          - a TVM Array / list / tuple of StringImm / str -> tuple(str, ...)
+          - a single StringImm / str -> (str,)
+          - a missing key -> None
+        Metadata only -- never emitted into the generated CUDA source.
+        """
+        annotations = getattr(self, "annotations", None)
+        if not annotations:
+            return None
+        value = annotations.get(self._SCALE_CTX_PATH_KEY, None)
+        if value is None:
+            return None
+
+        def _as_str(v):
+            return v.value if hasattr(v, "value") else str(v)
+
+        # A bare StringImm / str is a single-element path, not an iterable of
+        # characters; do not iterate it.
+        if isinstance(value, str) or hasattr(value, "value"):
+            return (_as_str(value),)
+        return tuple(_as_str(v) for v in value)

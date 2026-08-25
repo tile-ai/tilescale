@@ -46,19 +46,19 @@ TL_DEVICE void tmem_deallocate(uint32_t *tmem_ptr, int num_columns) {
 }
 
 TL_DEVICE void tcgen05_before_thread_sync() {
-  asm volatile("tcgen05.fence::before_thread_sync;");
+  asm volatile("tcgen05.fence::before_thread_sync;" ::: "memory");
 }
 
 TL_DEVICE void tcgen05_after_thread_sync() {
-  asm volatile("tcgen05.fence::after_thread_sync;");
+  asm volatile("tcgen05.fence::after_thread_sync;" ::: "memory");
 }
 
 TL_DEVICE void fence_view_async_tmem_load() {
-  asm volatile("tcgen05.wait::ld.sync.aligned; " ::);
+  asm volatile("tcgen05.wait::ld.sync.aligned;" ::: "memory");
 }
 
 TL_DEVICE void fence_view_async_tmem_store() {
-  asm volatile("tcgen05.wait::st.sync.aligned; " ::);
+  asm volatile("tcgen05.wait::st.sync.aligned;" ::: "memory");
 }
 
 // Wrapper for CUTLASS umma_arrive: elect one lane, then arrive the mbarrier
@@ -80,8 +80,7 @@ TL_DEVICE void tcgen05_mma_arrive(void const *smem_ptr,
     }
   } else {
     if (cute::elect_one_sync()) {
-      asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::"
-                   "cluster.b64 [%0];"
+      asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.b64 [%0];"
                    :
                    : "r"(bar_intptr));
     }

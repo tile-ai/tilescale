@@ -117,13 +117,17 @@ expandTcgen05Layout(const Tcgen05Meta &meta, int tmem_phy_col_extent,
 
   IterVar iter_row = make_itervar("row", row_dom);
   IterVar iter_col = make_itervar("col", col_dom);
+  // Per-warpgroup chunk math is relative to the start of the slice, not the
+  // absolute physical column index; a subrange copy (col_dom.min > 0) must
+  // not shift the thread mapping into a nonexistent warpgroup.
+  PrimExpr rel_col = iter_col->var - col_dom->min;
   PrimExpr thread_idx =
-      meta.frag->ForwardThread({iter_row, FloorMod(iter_col, meta.width)},
+      meta.frag->ForwardThread(Array<PrimExpr>{iter_row->var, FloorMod(rel_col, meta.width)},
                                std::nullopt) +
-      FloorDiv(iter_col, num_cols_each_wg) * WARPGROUP_SIZE;
+      FloorDiv(rel_col, num_cols_each_wg) * WARPGROUP_SIZE;
   PrimExpr val_idx =
-      meta.frag->Forward({iter_row, FloorMod(iter_col, meta.width)})[0] +
-      FloorDiv(FloorMod(iter_col, num_cols_each_wg), meta.width) *
+      meta.frag->Forward(Array<PrimExpr>{iter_row->var, FloorMod(rel_col, meta.width)})[0] +
+      FloorDiv(FloorMod(rel_col, num_cols_each_wg), meta.width) *
           num_elems_each_thread_in_one_chunk;
 
   return {true,

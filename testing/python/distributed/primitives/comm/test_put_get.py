@@ -212,6 +212,78 @@ def test_put_accepts_constant_size():
     assert "tl::cp_warp<128," in source
 
 
+def _kernel_put_warp_small(n):
+    @T.prim_func
+    def main(dst: T.Tensor((n,), "float32"), src: T.Tensor((n,), "float32")):
+        with T.Kernel(1, threads=32):
+            rank = T.alloc_local((1,), "uint64")
+            rank[0] = T.get_rank()
+            T.put_warp(T.address_of(src[0]), T.address_of(dst[0]), n, dst_pe=rank[0] ^ 1)
+
+    return main
+
+
+def _kernel_get_warp_small(n):
+    @T.prim_func
+    def main(dst: T.Tensor((n,), "float32"), src: T.Tensor((n,), "float32")):
+        with T.Kernel(1, threads=32):
+            rank = T.alloc_local((1,), "uint64")
+            rank[0] = T.get_rank()
+            T.get_warp(T.address_of(src[0]), T.address_of(dst[0]), n, src_pe=rank[0] ^ 1)
+
+    return main
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@distributed_test(nprocs=2)
+def test_put_get_warp_small_size(local_rank: int, num_ranks: int):
+    """`cp_warp`'s bulk loop only ever moves whole 16-byte (`int4`) units.
+
+    `n=1..3` (`float32`, so 4-12 bytes total) used to hit `N_int4 == 0`: both
+    the unrolled and the drain loop run zero iterations, so the whole transfer
+    -- not just a misaligned tail -- silently copied nothing. `n=5` (20 bytes)
+    exercises the more general form of the same bug: one full `int4` copied,
+    the trailing element dropped. This is the exact shape deepep_v2's FP8
+    per-token scale (`scale_dim=1`, a single `float32`) hit: `recv_x_scales`
+    came back all zero, silently, with no error anywhere.
+    """
+    from tilelang.distributed.host import init_dist
+
+    rank, num_ranks, group = init_dist(local_rank, num_ranks)
+    allocator = tilelang.get_allocator(
+        size=2**20,
+        device="cuda",
+        is_distributed=True,
+        local_rank=local_rank,
+        num_local_ranks=num_ranks,
+        group=group,
+    )
+
+    for n in (1, 2, 3, 5):
+        for name, kernel_fn in [("put_warp", _kernel_put_warp_small), ("get_warp", _kernel_get_warp_small)]:
+            kernel = tilelang.compile(kernel_fn(n), compile_once=True, compile_group=group)
+            kernel.initialize(allocator=allocator)
+
+            src = tilelang.tensor((n,), torch.float32, allocator=allocator).uniform_(1.0, 2.0)
+            dst = tilelang.tensor((n,), torch.float32, allocator=allocator).zero_()
+
+            torch.cuda.synchronize()
+            dist.barrier(group)
+            kernel(dst, src)
+            torch.cuda.synchronize()
+            dist.barrier(group)
+
+            dst_refs = [torch.empty_like(src) for _ in range(num_ranks)]
+            dist.all_gather(dst_refs, src, group)
+            expected = dst_refs[local_rank ^ 1]
+            assert torch.allclose(expected, dst, atol=1e-6, rtol=1e-6), (
+                f"rank {local_rank}: {name} n={n} mismatch, got {dst.tolist()}, expected {expected.tolist()}"
+            )
+
+    allocator.close()
+    dist.destroy_process_group()
+
+
 def _peer_none_kernel():
     @T.prim_func
     def main(A: T.Tensor((16,), "float32"), B: T.Tensor((16,), "float32"), flag: T.Tensor((1,), "uint32")):

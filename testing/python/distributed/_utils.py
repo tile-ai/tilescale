@@ -83,7 +83,7 @@ def _skip_if_no_fabric():
 
 
 def _skip_if_no_multicast():
-    from tilelang.distributed.shared_memory import _supports_multicast
+    from tilelang.distributed.shared_memory import _supports_multicast, _supports_multicast_posix
 
-    if not _supports_multicast():
+    if not (_supports_multicast() or _supports_multicast_posix()):
         pytest.skip("NVSwitch multicast unavailable; check GPU, driver, fabric, and IMEX configuration")

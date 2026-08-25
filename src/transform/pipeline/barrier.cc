@@ -123,7 +123,8 @@ public:
 private:
   void VisitExpr_(const BufferLoadNode *op) final {
     if (op->buffer.scope() == "shared.barrier" ||
-        op->buffer.scope() == "shared.cluster_barrier") {
+        op->buffer.scope() == "shared.cluster_barrier" ||
+        op->buffer.scope() == "shared.raw_cluster_barrier") {
       if (!seen_.count(op->buffer)) {
         seen_.insert(op->buffer);
         barriers_.push_back(op->buffer);
@@ -134,7 +135,8 @@ private:
 
   void VisitStmt_(const BufferStoreNode *op) final {
     if (op->buffer.scope() == "shared.barrier" ||
-        op->buffer.scope() == "shared.cluster_barrier") {
+        op->buffer.scope() == "shared.cluster_barrier" ||
+        op->buffer.scope() == "shared.raw_cluster_barrier") {
       if (!seen_.count(op->buffer)) {
         seen_.insert(op->buffer);
         barriers_.push_back(op->buffer);
@@ -148,7 +150,8 @@ private:
     for (const auto &[key, val] : op->annotations) {
       if (auto load = val.as<BufferLoadNode>()) {
         if (load->buffer.scope() == "shared.barrier" ||
-            load->buffer.scope() == "shared.cluster_barrier") {
+            load->buffer.scope() == "shared.cluster_barrier" ||
+            load->buffer.scope() == "shared.raw_cluster_barrier") {
           if (!seen_.count(load->buffer)) {
             seen_.insert(load->buffer);
             barriers_.push_back(load->buffer);
@@ -289,7 +292,8 @@ Map<Buffer, Buffer> ExpandPipelineBarriers(
   BufferSet local_barrier_set;
   for (const Buffer &buf : block_local_allocs) {
     if (buf.scope() == "shared.barrier" ||
-        buf.scope() == "shared.cluster_barrier")
+        buf.scope() == "shared.cluster_barrier" ||
+        buf.scope() == "shared.raw_cluster_barrier")
       local_barrier_set.insert(buf);
   }
 

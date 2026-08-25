@@ -128,7 +128,9 @@ def _normalize_cluster_dims(
     else:
         raise ValueError("cluster_dims must be a list or tuple of integers")
 
-    return None if cluster_dims == [1, 1, 1] else cluster_dims
+    # Keep an explicit [1,1,1]: a kernel may rely on a real cluster(1) launch
+    # (e.g. cluster mbarrier intrinsics in the SM100 1-CTA attention path).
+    return cluster_dims
 
 
 @register_object("tl.KernelLaunchFrame")

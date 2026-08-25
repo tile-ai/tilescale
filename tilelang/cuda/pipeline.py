@@ -41,6 +41,16 @@ def module_has_tma(mod: IRModule) -> bool:
 
 def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     mod = tirx.transform.BindTarget(target)(mod)
+    # Top-down scale expansion: expand any non-leaf scale segment into the next
+    # smaller scale via its registered ScaleExpansionTemplate, producing a clean
+    # direct scale tree (e.g. a device-scope T.gemm expands into a generated
+    # block/thread kernel; a block-scope cooperative T.copy expands into the
+    # inner thread scale). Runs before LowerScaleLaunch, which stays the strict
+    # final gate for any interleaving no template expanded.
+    mod = tilelang.transform.NormalizeScaleExpansion()(mod)
+    # Lower frontend launch-scale axes before any analysis pass sees them as
+    # ordinary serial loops.
+    mod = tilelang.transform.LowerScaleLaunch()(mod)
     if should_force_let_inline():
         # Force-let inline whenever the pass config requests it.
         mod = tilelang.transform.LetInline()(mod)

@@ -29,6 +29,8 @@ _EXPORTS = {
     "_close_vmm_handle": (".shared_memory", "_close_vmm_handle"),
     "_sync_vmm_handles": (".shared_memory", "_sync_vmm_handles"),
     "_supports_multicast": (".shared_memory", "_supports_multicast"),
+    "_supports_vmm_posix": (".shared_memory", "_supports_vmm_posix"),
+    "_supports_multicast_posix": (".shared_memory", "_supports_multicast_posix"),
 }
 
 __all__ = list(_EXPORTS)

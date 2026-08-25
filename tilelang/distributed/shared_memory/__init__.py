@@ -65,6 +65,21 @@ _mc_release_handle = _get_required_global_func("tl.shared_memory.mc_release_hand
 _mc_unmap = _get_required_global_func("tl.shared_memory.mc_unmap")
 _mc_get_aligned_size = _get_required_global_func("tl.shared_memory.mc_get_aligned_size")
 
+# POSIX-FD flavors (Linux single-node without IMEX; handles travel over
+# SCM_RIGHTS Unix sockets instead of fabric handle bytes)
+_supports_vmm_posix = _get_capability_global_func("tl.shared_memory.supports_vmm_posix")
+_supports_multicast_posix = _get_capability_global_func("tl.shared_memory.supports_multicast_posix")
+_vmm_alloc_size = _get_required_global_func("tl.shared_memory.vmm_alloc_size")
+_vmm_malloc_posix = _get_required_global_func("tl.shared_memory.vmm_malloc_posix")
+_vmm_export_posix_fd = _get_required_global_func("tl.shared_memory.vmm_export_posix_fd")
+_vmm_import_posix_fd = _get_required_global_func("tl.shared_memory.vmm_import_posix_fd")
+_mc_create_posix = _get_required_global_func("tl.shared_memory.mc_create_posix")
+_mc_export_posix_fd = _get_required_global_func("tl.shared_memory.mc_export_posix_fd")
+_mc_import_posix_fd = _get_required_global_func("tl.shared_memory.mc_import_posix_fd")
+_mc_map_posix = _get_required_global_func("tl.shared_memory.mc_map_posix")
+_mc_unmap_posix = _get_required_global_func("tl.shared_memory.mc_unmap_posix")
+_mc_get_aligned_size_posix = _get_required_global_func("tl.shared_memory.mc_get_aligned_size_posix")
+
 
 # ---------- tensor_from_ptr (pure Python, no C++ torch dependency) ----------
 
@@ -87,6 +102,8 @@ _dtype_str_to_torch = {
     "bool": torch.bool,
     "uint32": torch.uint32,
     "uint64": torch.uint64,
+    "float8_e4m3fn": torch.float8_e4m3fn,
+    "float8_e5m2": torch.float8_e5m2,
 }
 
 # __cuda_array_interface__ typestr mapping
@@ -161,7 +178,10 @@ def tensor_from_ptr(
     else:
         # bfloat16 / uint32 / uint64: create as matching-size int type, then view
         element_size = torch.empty((), dtype=dtype).element_size()
-        if element_size == 2:
+        if element_size == 1:
+            # fp8 flavors: view through a 1-byte int proxy
+            proxy_typestr = "<i1"
+        elif element_size == 2:
             # proxy_dtype = torch.int16
             proxy_typestr = "<i2"
         elif element_size == 4:
@@ -293,4 +313,16 @@ __all__ = [
     "_close_vmm_handle",
     "_sync_vmm_handles",
     "_supports_multicast",
+    "_supports_vmm_posix",
+    "_supports_multicast_posix",
+    "_vmm_alloc_size",
+    "_vmm_malloc_posix",
+    "_vmm_export_posix_fd",
+    "_vmm_import_posix_fd",
+    "_mc_create_posix",
+    "_mc_export_posix_fd",
+    "_mc_import_posix_fd",
+    "_mc_map_posix",
+    "_mc_unmap_posix",
+    "_mc_get_aligned_size_posix",
 ]

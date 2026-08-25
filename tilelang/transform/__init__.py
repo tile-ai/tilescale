@@ -7,6 +7,18 @@ from .pass_config import PassConfigKey  # noqa: F401
 from tilelang import tvm as tvm  # noqa: F401
 from tvm.ir.transform import PassContext  # noqa: F401
 from .add_bufstore_wrapper import AddWrapperForSingleBufStore  # noqa: F401
+from .prepare_device_scale import (  # noqa: F401
+    PrepareScaleTileOps,
+    PrepareDeviceScaleTileOps,
+    PrepareDeviceScaleGemm,
+)
+from .prepare_device_scale_gemm import build_device_gemm_template  # noqa: F401
+from .normalize_scale_expansion import (  # noqa: F401
+    NormalizeScaleExpansion,
+    build_region_tree,
+    find_expandable_segments,
+    plan_region_expansions,
+)
 from .hoist_broadcast_values import HoistBroadcastValues  # noqa: F401
 from .decouple_type_cast import DecoupleTypeCast  # noqa: F401
 
@@ -63,6 +75,17 @@ def LayoutInference():
         The result pass
     """
     return _ffi_api.LayoutInference()  # type: ignore
+
+
+def LowerScaleLaunch():
+    """Lower frontend T.Scale launch axes to standard launch bindings.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.LowerScaleLaunch()  # type: ignore
 
 
 def LowerTileOp():

@@ -15,6 +15,14 @@ TL_DEVICE void mbarrier_init(uint64_t &smem_barrier, uint32_t arrive_count) {
                : "r"(arrive_count), "r"(smem_int_ptr));
 }
 
+TL_DEVICE void mbarrier_init_cluster(uint64_t &smem_barrier,
+                                     uint32_t arrive_count) {
+  uint32_t smem_int_ptr = smem_ptr_to_uint(&smem_barrier);
+  asm volatile("mbarrier.init.shared::cta.b64 [%1], %0;"
+               :
+               : "r"(arrive_count), "r"(smem_int_ptr));
+}
+
 TL_DEVICE uint32_t mbarrier_try_wait(uint64_t &smem_barrier, int phase_bit) {
 
   uint32_t smem_int_ptr = smem_ptr_to_uint(&smem_barrier);
@@ -98,6 +106,64 @@ TL_DEVICE void mbarrier_arrive_expect_tx(uint64_t &smem_barrier,
   asm volatile("mbarrier.arrive.expect_tx.shared.b64 _, [%1], %0;"
                :
                : "r"(transaction_bytes), "r"(smem_int_ptr));
+}
+
+TL_DEVICE void mbarrier_arrive_expect_tx_cluster(Barrier &bar,
+                                                 uint32_t transaction_bytes,
+                                                 uint32_t /*cta_id*/) {
+  uint32_t smem_int_ptr = smem_ptr_to_uint(reinterpret_cast<uint64_t *>(&bar));
+  smem_int_ptr &= 0xFEFFFFFF; // Clear peer bit (bit 24) → target CTA 0's barrier
+  asm volatile(
+      "mbarrier.arrive.expect_tx.release.cta.shared::cluster.b64 _, [%1], %0;"
+      :
+      : "r"(transaction_bytes), "r"(smem_int_ptr));
+}
+
+// uint64_t overload for raw barriers
+TL_DEVICE void mbarrier_arrive_expect_tx_cluster(uint64_t &bar,
+                                                 uint32_t transaction_bytes,
+                                                 uint32_t /*cta_id*/) {
+  uint32_t smem_int_ptr = smem_ptr_to_uint(&bar);
+  smem_int_ptr &= 0xFEFFFFFF;
+  asm volatile(
+      "mbarrier.arrive.expect_tx.release.cta.shared::cluster.b64 _, [%1], %0;"
+      :
+      : "r"(transaction_bytes), "r"(smem_int_ptr));
+}
+
+// CTA-scope wait: lighter fence than cutlass .acquire.cluster, matching
+// the CUDA NUMA reference's barrier protocol for better performance.
+TL_DEVICE void mbarrier_wait_parity_cta(Barrier &bar, uint32_t phase) {
+  uint32_t addr = smem_ptr_to_uint(reinterpret_cast<uint64_t *>(&bar));
+  uint32_t ticks = 0x989680;
+  asm volatile(
+      "{\n"
+      ".reg .pred p;\n"
+      "MWAIT_%=:\n"
+      "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 p, [%0], %1, %2;\n"
+      "@p bra MDONE_%=;\n"
+      "bra MWAIT_%=;\n"
+      "MDONE_%=:\n"
+      "}\n"
+      :
+      : "r"(addr), "r"(phase), "r"(ticks));
+}
+
+// uint64_t overload for raw barriers
+TL_DEVICE void mbarrier_wait_parity_cta(uint64_t &bar, uint32_t phase) {
+  uint32_t addr = smem_ptr_to_uint(&bar);
+  uint32_t ticks = 0x989680;
+  asm volatile(
+      "{\n"
+      ".reg .pred p;\n"
+      "MWAIT_%=:\n"
+      "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 p, [%0], %1, %2;\n"
+      "@p bra MDONE_%=;\n"
+      "bra MWAIT_%=;\n"
+      "MDONE_%=:\n"
+      "}\n"
+      :
+      : "r"(addr), "r"(phase), "r"(ticks));
 }
 
 template <typename BarrierType = uint64_t>
