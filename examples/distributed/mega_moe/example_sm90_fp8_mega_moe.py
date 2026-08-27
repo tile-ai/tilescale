@@ -883,7 +883,9 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             assert requested > 0 and num_experts_per_rank % requested == 0
             config["num_experts_per_wave"] = requested
     l2_scatter = getattr(args, "l2_scatter", "auto")
-    use_put_warp_scatter = l2_scatter == "warp" or (l2_scatter == "auto" and num_tokens >= 256)
+    # Crossover measured on Flash (4x H200): direct wins by 4.0%/3.5%/0.6% at
+    # M=128/256/512, put_warp by 2.4%/10.1% at M=1024/2048.
+    use_put_warp_scatter = l2_scatter == "warp" or (l2_scatter == "auto" and num_tokens >= 1024)
     kernel_specs = [
         fused_l1_swiglu_manual_warp_kernel(
             num_tokens, hidden, 2 * intermediate_hidden, num_experts, num_topk, num_ranks, capacity, num_sms,
