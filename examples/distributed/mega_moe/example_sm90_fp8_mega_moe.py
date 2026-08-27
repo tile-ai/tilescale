@@ -234,7 +234,7 @@ def fused_l1_swiglu_manual_warp_kernel(
         m_tasks: T.Tensor((num_experts_per_rank * num_m_blocks,), T.int32),
         num_m_tasks: T.Tensor((1,), T.int32),
         recv_x: T.Tensor((num_experts_per_rank, capacity, hidden), T.float8_e4m3fn),
-        recv_x_sf: T.Tensor((num_experts_per_rank, num_scale_groups, capacity), T.float32),
+        recv_x_sf: T.Tensor((num_experts_per_rank, capacity, num_scale_groups), T.float32),
         recv_weights: T.Tensor((num_experts_per_rank, capacity), T.float32),
         src_ranks: T.Tensor((num_experts_per_rank, capacity), T.int32),
         src_tokens: T.Tensor((num_experts_per_rank, capacity), T.int32),
@@ -242,7 +242,7 @@ def fused_l1_swiglu_manual_warp_kernel(
         l1_weight: T.Tensor((num_experts_per_rank, l1_n, hidden), T.float8_e4m3fn),
         l1_weight_sf: T.Tensor((num_experts_per_rank, l1_n // SCALE_GRANULARITY, hidden // SCALE_GRANULARITY), T.float32),
         l2_x: T.Tensor((num_experts_per_rank, capacity, l1_n // 2), T.float8_e4m3fn),
-        l2_x_sf: T.Tensor((num_experts_per_rank, l1_n // (2 * SCALE_GRANULARITY), capacity), T.float32),
+        l2_x_sf: T.Tensor((num_experts_per_rank, capacity, l1_n // (2 * SCALE_GRANULARITY)), T.float32),
         barrier: T.Tensor((num_ranks,), T.int32),
     ):
         T.annotate_pass_configs({tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True})
@@ -263,7 +263,6 @@ def fused_l1_swiglu_manual_warp_kernel(
             # access. The producer issues its load before the TMAs so the
             # latency hides behind TMA issue rather than delaying the arrive.
             act_sf_shared = T.alloc_shared((pipeline_stages, block_m), T.float32)
-            pull_sf_shared = T.alloc_shared((dispatch_warps, num_scale_groups), T.float32)
             stage_barriers = T.alloc_barrier([producer_threads] * pipeline_stages + [num_math_threads] * pipeline_stages)
 
             # Routing runs on the math warpgroups, which hold the large budget.
@@ -356,12 +355,7 @@ def fused_l1_swiglu_manual_warp_kernel(
                             pull_rank = src_ranks[pull_expert, pull_slot]
                             pull_token = src_tokens[pull_expert, pull_slot]
                             T.get_warp(T.address_of(x[pull_token, 0]), T.address_of(recv_x[pull_expert, pull_slot, 0]), hidden, src_pe=pull_rank, unroll_factor=8)
-                            # Keep the remote read contiguous, then scatter into the scale-group
-                            # major pool so the producer can read a block_m column contiguously.
-                            T.get_warp(T.address_of(x_sf[pull_token, 0]), T.address_of(pull_sf_shared[dispatch_warp, 0]), num_scale_groups, src_pe=pull_rank, unroll_factor=8)
-                            T.sync_warp()
-                            for pull_sf_group in T.serial(dispatch_lane, num_scale_groups, warp_size):
-                                recv_x_sf[pull_expert, pull_sf_group, pull_slot] = pull_sf_shared[dispatch_warp, pull_sf_group]
+                            T.get_warp(T.address_of(x_sf[pull_token, 0]), T.address_of(recv_x_sf[pull_expert, pull_slot, 0]), num_scale_groups, src_pe=pull_rank, unroll_factor=8)
                             T.sync_warp()
                             if dispatch_lane == dispatch_leader_lane:
                                 T.atom_add(arrivals[pull_expert, pull_slot // block_m], 1, scope="gpu", sem="release")
@@ -385,7 +379,7 @@ def fused_l1_swiglu_manual_warp_kernel(
                                     T.mbarrier_wait_parity(stage_barriers[pipeline_stages + producer_stage], producer_phase ^ 1)
                                     producer_sf = T.alloc_local((1,), T.float32)
                                     producer_sf[0] = recv_x_sf[
-                                        producer_expert, producer_k, producer_m * block_m + tx - producer_begin]
+                                        producer_expert, producer_m * block_m + tx - producer_begin, producer_k]
                                     for producer_ks in T.unroll(num_k_sub):
                                         producer_sf_k = producer_k * num_k_sub + producer_ks
                                         T.tma_copy(
@@ -488,8 +482,8 @@ def fused_l1_swiglu_manual_warp_kernel(
                                 scale[i, scale_group] = T.max(amax[i, scale_group], 1e-4) / FP8_MAX
                                 l2_x_sf[
                                     consumer_expert,
-                                    consumer_n * num_output_scale_groups + scale_group,
                                     consumer_m * block_m + i,
+                                    consumer_n * num_output_scale_groups + scale_group,
                                 ] = scale[i, scale_group]
                             for i, j in T.Parallel(block_m, block_n // 2):
                                 gate[i, j] = T.clamp(gate[i, j] / scale[i, j // SCALE_GRANULARITY], -FP8_MAX, FP8_MAX)
@@ -559,7 +553,7 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
     def main(
         a: T.Tensor((num_experts_per_rank, capacity, intermediate_hidden), T.float8_e4m3fn),
         b: T.Tensor((num_experts_per_rank, hidden, intermediate_hidden), T.float8_e4m3fn),
-        a_sf: T.Tensor((num_experts_per_rank, intermediate_hidden // SCALE_GRANULARITY, capacity), T.float32),
+        a_sf: T.Tensor((num_experts_per_rank, capacity, intermediate_hidden // SCALE_GRANULARITY), T.float32),
         b_sf: T.Tensor((num_experts_per_rank, hidden // SCALE_GRANULARITY, intermediate_hidden // SCALE_GRANULARITY), T.float32),
         recv_counts: T.Tensor((num_experts_per_rank,), T.int32),
         m_tasks: T.Tensor((num_experts_per_rank * num_m_blocks,), T.int32),
@@ -589,7 +583,6 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
             if tx >= producer_begin and tx < producer_end:
                 # WG0 warps 2-3 keep the L2 TMA stages filled.
                 producer_step = T.alloc_var(T.int32, init=0)
-                producer_sf = T.alloc_local((1,), T.float32)
                 for producer_task in T.serial(bid, num_m_tasks[0] * num_n_blocks, num_sms):
                     producer_n = producer_task % num_n_blocks
                     producer_m_task = m_tasks[producer_task // num_n_blocks]
@@ -604,9 +597,6 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                                 producer_stage = (producer_step + producer_k) % pipeline_stages
                                 producer_phase = ((producer_step + producer_k) // pipeline_stages) & 1
                                 T.mbarrier_wait_parity(stage_barriers[pipeline_stages + producer_stage], producer_phase ^ 1)
-                                # Issue the scale read before the TMAs so its latency hides behind TMA
-                                # issue rather than delaying the arrive (measured both ways on L1).
-                                producer_sf[0] = a_sf[producer_expert, producer_k, producer_m * block_m + tx - producer_begin]
                                 T.tma_copy(
                                     a[
                                         producer_expert,
@@ -625,7 +615,7 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                                     b_shared[producer_stage, :, :],
                                     barrier=stage_barriers[producer_stage],
                                 )
-                                a_sf_shared[producer_stage, tx - producer_begin] = producer_sf[0]
+                                a_sf_shared[producer_stage, tx - producer_begin] = a_sf[producer_expert, producer_m * block_m + tx - producer_begin, producer_k]
                                 T.mbarrier_arrive(stage_barriers[producer_stage])
                             producer_step += num_k_blocks
 
@@ -945,7 +935,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     route_counts = allocator_tensor((num_ranks, num_experts), torch.int32, allocator=allocator)
     recv_counts = allocator_tensor((num_experts_per_rank,), torch.int32, allocator=allocator)
     recv_x = allocator_tensor((num_experts_per_rank, capacity, hidden), torch.float8_e4m3fn, allocator=allocator)
-    recv_x_sf = allocator_tensor((num_experts_per_rank, hidden // SCALE_GRANULARITY, capacity), torch.float32, allocator=allocator)
+    recv_x_sf = allocator_tensor((num_experts_per_rank, capacity, hidden // SCALE_GRANULARITY), torch.float32, allocator=allocator)
     recv_weights = allocator_tensor((num_experts_per_rank, capacity), torch.float32, allocator=allocator)
     src_ranks = allocator_tensor((num_experts_per_rank, capacity), torch.int32, allocator=allocator)
     src_tokens = allocator_tensor((num_experts_per_rank, capacity), torch.int32, allocator=allocator)
@@ -955,7 +945,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     m_tasks = allocator_tensor((num_experts_per_rank * ((capacity + 63) // 64),), torch.int32, allocator=allocator)
     num_m_tasks = allocator_tensor((1,), torch.int32, allocator=allocator)
     l2_x = allocator_tensor((num_experts_per_rank, capacity, intermediate_hidden), torch.float8_e4m3fn, allocator=allocator)
-    l2_x_sf = allocator_tensor((num_experts_per_rank, intermediate_hidden // SCALE_GRANULARITY, capacity), torch.float32, allocator=allocator)
+    l2_x_sf = allocator_tensor((num_experts_per_rank, capacity, intermediate_hidden // SCALE_GRANULARITY), torch.float32, allocator=allocator)
     combine = allocator_tensor((num_tokens, num_topk, hidden), torch.bfloat16, allocator=allocator)
     out = allocator_tensor((num_tokens, hidden), torch.bfloat16, allocator=allocator)
 
