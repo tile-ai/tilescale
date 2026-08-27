@@ -257,6 +257,12 @@ def fused_l1_swiglu_manual_warp_kernel(
             a_shared = T.alloc_shared((pipeline_stages, num_k_sub, block_m, SCALE_GRANULARITY), T.float8_e4m3fn)
             b_shared = T.alloc_shared((pipeline_stages, num_k_sub, block_n, SCALE_GRANULARITY), T.float8_e4m3fn)
             out_shared = T.alloc_shared((block_m, block_n // 2), T.float8_e4m3fn)
+            # Stage the per-token activation scales in shared memory: read from
+            # global in the math warpgroups, they cost an 8x-redundant,
+            # 128-byte-strided LDG that ncu flags as the dominant uncoalesced
+            # access. The producer issues its load before the TMAs so the
+            # latency hides behind TMA issue rather than delaying the arrive.
+            act_sf_shared = T.alloc_shared((pipeline_stages, block_m), T.float32)
             stage_barriers = T.alloc_barrier([producer_threads] * pipeline_stages + [num_math_threads] * pipeline_stages)
 
             # Routing runs on the math warpgroups, which hold the large budget.
@@ -371,6 +377,9 @@ def fused_l1_swiglu_manual_warp_kernel(
                                     producer_stage = (producer_step + producer_k) % pipeline_stages
                                     producer_phase = ((producer_step + producer_k) // pipeline_stages) & 1
                                     T.mbarrier_wait_parity(stage_barriers[pipeline_stages + producer_stage], producer_phase ^ 1)
+                                    producer_sf = T.alloc_local((1,), T.float32)
+                                    producer_sf[0] = recv_x_sf[
+                                        producer_expert, producer_m * block_m + tx - producer_begin, producer_k]
                                     for producer_ks in T.unroll(num_k_sub):
                                         producer_sf_k = producer_k * num_k_sub + producer_ks
                                         T.tma_copy(
@@ -400,6 +409,7 @@ def fused_l1_swiglu_manual_warp_kernel(
                                                 ],
                                                 barrier=stage_barriers[producer_stage],
                                             )
+                                    act_sf_shared[producer_stage, tx - producer_begin] = producer_sf[0]
                                     T.mbarrier_arrive(stage_barriers[producer_stage])
                                 producer_step += num_k_blocks
 
@@ -439,7 +449,7 @@ def fused_l1_swiglu_manual_warp_kernel(
                                         weight_scale[2 * scale_group] = l1_weight_sf[consumer_expert, consumer_n * num_output_scale_groups + scale_group, consumer_sf_k]
                                         weight_scale[2 * scale_group + 1] = l1_weight_sf[consumer_expert, num_l1_scale_groups + consumer_n * num_output_scale_groups + scale_group, consumer_sf_k]
                                     for i in T.Parallel(block_m):
-                                        act_scale[i] = recv_x_sf[consumer_expert, consumer_m * block_m + i, consumer_sf_k]
+                                        act_scale[i] = act_sf_shared[consumer_stage, i]
                                     T.gemm(
                                         a_shared[consumer_stage, consumer_ks, :, :],
                                         b_shared[consumer_stage, consumer_ks, :, :],
