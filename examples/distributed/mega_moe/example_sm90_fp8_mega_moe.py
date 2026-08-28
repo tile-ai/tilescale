@@ -35,6 +35,7 @@ MODEL_CONFIGS = {
 FP8_MAX = 448.0
 SCALE_GRANULARITY = 128
 
+
 def fused_l1_swiglu_manual_warp_kernel(
     num_tokens: int,
     hidden: int,
@@ -147,7 +148,9 @@ def fused_l1_swiglu_manual_warp_kernel(
                         assign_topk = assign_route % num_topk
                         assign_expert = topk_idx[assign_token, assign_topk]
                         if assign_expert >= 0 and assign_expert < num_experts:
-                            route_slots[assign_token, assign_topk] = T.atomic_add(route_counts[src_rank[0], assign_expert], 1, memory_order="relaxed", return_prev=True)
+                            route_slots[assign_token, assign_topk] = T.atomic_add(
+                                route_counts[src_rank[0], assign_expert], 1, memory_order="relaxed", return_prev=True
+                            )
                         else:
                             route_slots[assign_token, assign_topk] = -1
                     T.sync_threads(7, route_threads)
@@ -155,7 +158,13 @@ def fused_l1_swiglu_manual_warp_kernel(
                     publish_warp = route_tid // warp_size
                     for publish_rank in T.serial(publish_warp, num_ranks, route_threads // warp_size):
                         if publish_rank != src_rank[0]:
-                            T.put_warp(T.address_of(route_counts[src_rank[0], 0]), T.address_of(route_counts[src_rank[0], 0]), num_experts, dst_pe=publish_rank, unroll_factor=8)
+                            T.put_warp(
+                                T.address_of(route_counts[src_rank[0], 0]),
+                                T.address_of(route_counts[src_rank[0], 0]),
+                                num_experts,
+                                dst_pe=publish_rank,
+                                unroll_factor=8,
+                            )
 
                 T.barrier_blocks(barrier[0])
 
@@ -208,10 +217,20 @@ def fused_l1_swiglu_manual_warp_kernel(
                         if metadata_expert >= 0 and metadata_slot >= 0 and metadata_slot < capacity:
                             metadata_rank = metadata_expert // num_experts_per_rank
                             metadata_local_expert = metadata_expert % num_experts_per_rank
-                            T.st(recv_weights[metadata_local_expert, metadata_slot], topk_weights[metadata_token, metadata_topk], dst_pe=metadata_rank)
+                            T.st(
+                                recv_weights[metadata_local_expert, metadata_slot],
+                                topk_weights[metadata_token, metadata_topk],
+                                dst_pe=metadata_rank,
+                            )
                             T.st(src_tokens[metadata_local_expert, metadata_slot], metadata_token, dst_pe=metadata_rank)
                             T.st(src_topk[metadata_local_expert, metadata_slot], metadata_topk, dst_pe=metadata_rank)
-                            T.st(src_ranks[metadata_local_expert, metadata_slot], src_rank[0], scope="sys", sem="release", dst_pe=metadata_rank)
+                            T.st(
+                                src_ranks[metadata_local_expert, metadata_slot],
+                                src_rank[0],
+                                scope="sys",
+                                sem="release",
+                                dst_pe=metadata_rank,
+                            )
 
                     for pull_idx in T.serial(bid * dispatch_warps + dispatch_warp, num_m_tasks[0] * block_m, num_sms * dispatch_warps):
                         pull_m_task = m_tasks[pull_idx // block_m]
@@ -223,8 +242,20 @@ def fused_l1_swiglu_manual_warp_kernel(
                             T.sync_warp()
                             pull_rank = src_ranks[pull_expert, pull_slot]
                             pull_token = src_tokens[pull_expert, pull_slot]
-                            T.get_warp(T.address_of(x[pull_token, 0]), T.address_of(recv_x[pull_expert, pull_slot, 0]), hidden, src_pe=pull_rank, unroll_factor=8)
-                            T.get_warp(T.address_of(x_sf[pull_token, 0]), T.address_of(recv_x_sf[pull_expert, pull_slot, 0]), num_scale_groups, src_pe=pull_rank, unroll_factor=8)
+                            T.get_warp(
+                                T.address_of(x[pull_token, 0]),
+                                T.address_of(recv_x[pull_expert, pull_slot, 0]),
+                                hidden,
+                                src_pe=pull_rank,
+                                unroll_factor=8,
+                            )
+                            T.get_warp(
+                                T.address_of(x_sf[pull_token, 0]),
+                                T.address_of(recv_x_sf[pull_expert, pull_slot, 0]),
+                                num_scale_groups,
+                                src_pe=pull_rank,
+                                unroll_factor=8,
+                            )
                             T.sync_warp()
                             if dispatch_lane == dispatch_leader_lane:
                                 T.atom_add(arrivals[pull_expert, pull_slot // block_m], 1, scope="gpu", sem="release")
@@ -238,49 +269,51 @@ def fused_l1_swiglu_manual_warp_kernel(
                         producer_m = producer_m_task % num_m_blocks
                         producer_expert = producer_m_task // num_m_blocks
                         if producer_n * block_n < l1_n:
-                                producer_arrivals = T.min(block_m, recv_counts[producer_expert] - producer_m * block_m)
-                                if tx == producer_begin:
-                                    T.wait_ge(arrivals[producer_expert, producer_m], producer_arrivals, scope=T.WaitScope.GPU, semantics=T.WaitSemantics.ACQUIRE)
-                                T.sync_threads(5, producer_threads)
-                                for producer_k in T.serial(num_k_blocks):
-                                    producer_stage = (producer_step + producer_k) % pipeline_stages
-                                    producer_phase = ((producer_step + producer_k) // pipeline_stages) & 1
-                                    T.mbarrier_wait_parity(stage_barriers[pipeline_stages + producer_stage], producer_phase ^ 1)
-                                    producer_sf = T.alloc_local((1,), T.float32)
-                                    producer_sf[0] = recv_x_sf[
-                                        producer_expert, producer_m * block_m + tx - producer_begin, producer_k]
-                                    for producer_ks in T.unroll(num_k_sub):
-                                        producer_sf_k = producer_k * num_k_sub + producer_ks
+                            producer_arrivals = T.min(block_m, recv_counts[producer_expert] - producer_m * block_m)
+                            if tx == producer_begin:
+                                T.wait_ge(
+                                    arrivals[producer_expert, producer_m],
+                                    producer_arrivals,
+                                    scope=T.WaitScope.GPU,
+                                    semantics=T.WaitSemantics.ACQUIRE,
+                                )
+                            T.sync_threads(5, producer_threads)
+                            for producer_k in T.serial(num_k_blocks):
+                                producer_stage = (producer_step + producer_k) % pipeline_stages
+                                producer_phase = ((producer_step + producer_k) // pipeline_stages) & 1
+                                T.mbarrier_wait_parity(stage_barriers[pipeline_stages + producer_stage], producer_phase ^ 1)
+                                producer_sf = T.alloc_local((1,), T.float32)
+                                producer_sf[0] = recv_x_sf[producer_expert, producer_m * block_m + tx - producer_begin, producer_k]
+                                for producer_ks in T.unroll(num_k_sub):
+                                    producer_sf_k = producer_k * num_k_sub + producer_ks
+                                    T.tma_copy(
+                                        recv_x[
+                                            producer_expert,
+                                            producer_m * block_m : (producer_m + 1) * block_m,
+                                            producer_sf_k * SCALE_GRANULARITY : (producer_sf_k + 1) * SCALE_GRANULARITY,
+                                        ],
+                                        a_shared[producer_stage, producer_ks, :, :],
+                                        barrier=stage_barriers[producer_stage],
+                                    )
+                                    for producer_n_block in T.serial(num_tma_n_blocks):
                                         T.tma_copy(
-                                            recv_x[
+                                            l1_weight[
                                                 producer_expert,
-                                                producer_m * block_m : (producer_m + 1) * block_m,
+                                                producer_n * block_n + producer_n_block * tma_block_n : producer_n * block_n
+                                                + (producer_n_block + 1) * tma_block_n,
                                                 producer_sf_k * SCALE_GRANULARITY : (producer_sf_k + 1) * SCALE_GRANULARITY,
                                             ],
-                                            a_shared[producer_stage, producer_ks, :, :],
+                                            b_shared[
+                                                producer_stage,
+                                                producer_ks,
+                                                producer_n_block * tma_block_n : (producer_n_block + 1) * tma_block_n,
+                                                :,
+                                            ],
                                             barrier=stage_barriers[producer_stage],
                                         )
-                                        for producer_n_block in T.serial(num_tma_n_blocks):
-                                            T.tma_copy(
-                                                l1_weight[
-                                                    producer_expert,
-                                                    producer_n * block_n
-                                                    + producer_n_block * tma_block_n : producer_n * block_n
-                                                    + (producer_n_block + 1) * tma_block_n,
-                                                    producer_sf_k * SCALE_GRANULARITY : (producer_sf_k + 1) * SCALE_GRANULARITY,
-                                                ],
-                                                b_shared[
-                                                    producer_stage,
-                                                    producer_ks,
-                                                    producer_n_block
-                                                    * tma_block_n : (producer_n_block + 1) * tma_block_n,
-                                                    :,
-                                                ],
-                                                barrier=stage_barriers[producer_stage],
-                                            )
-                                    act_sf_shared[producer_stage, tx - producer_begin] = producer_sf[0]
-                                    T.mbarrier_arrive(stage_barriers[producer_stage])
-                                producer_step += num_k_blocks
+                                act_sf_shared[producer_stage, tx - producer_begin] = producer_sf[0]
+                                T.mbarrier_arrive(stage_barriers[producer_stage])
+                            producer_step += num_k_blocks
 
             else:
                 T.inc_max_nreg(math_registers)
@@ -304,70 +337,79 @@ def fused_l1_swiglu_manual_warp_kernel(
                     consumer_m = consumer_m_task % num_m_blocks
                     consumer_expert = consumer_m_task // num_m_blocks
                     if consumer_n * block_n < l1_n:
-                            T.clear(partial)
-                            T.clear(accum)
-                            for consumer_k in T.serial(num_k_blocks):
-                                consumer_stage = (consumer_step + consumer_k) % pipeline_stages
-                                consumer_phase = ((consumer_step + consumer_k) // pipeline_stages) & 1
-                                T.mbarrier_wait_parity(stage_barriers[consumer_stage], consumer_phase)
-                                # One TMA stage spans num_k_sub scale groups; WGMMA and promotion
-                                # still run per SCALE_GRANULARITY so the per-128 scales stay exact.
-                                for consumer_ks in T.unroll(num_k_sub):
-                                    consumer_sf_k = consumer_k * num_k_sub + consumer_ks
-                                    for scale_group in T.serial(num_output_scale_groups):
-                                        weight_scale[2 * scale_group] = l1_weight_sf[consumer_expert, consumer_n * num_output_scale_groups + scale_group, consumer_sf_k]
-                                        weight_scale[2 * scale_group + 1] = l1_weight_sf[consumer_expert, num_l1_scale_groups + consumer_n * num_output_scale_groups + scale_group, consumer_sf_k]
-                                    for i in T.Parallel(block_m):
-                                        act_scale[i] = act_sf_shared[consumer_stage, i]
-                                    T.gemm(
-                                        a_shared[consumer_stage, consumer_ks, :, :],
-                                        b_shared[consumer_stage, consumer_ks, :, :],
-                                        partial, transpose_B=True, clear_accum=True)
-                                    for i, j in T.Parallel(block_m, block_n):
-                                        accum[i, j] = partial[i, j] * (
-                                            act_scale[i] * weight_scale[2 * (j // (2 * SCALE_GRANULARITY)) + (j % 16) // 8]
-                                        ) + accum[i, j]
-                                T.mbarrier_arrive(stage_barriers[pipeline_stages + consumer_stage])
-                            consumer_step += num_k_blocks
-                            for i, j in T.Parallel(block_m, block_n // 2):
-                                gate[i, j] = accum[i, (j // 8) * 16 + j % 8]
-                            for i, j in T.Parallel(block_m, block_n // 2):
-                                up[i, j] = accum[i, (j // 8) * 16 + j % 8 + 8]
-                            for i, j in T.Parallel(block_m, block_n // 2):
-                                gate[i, j] = (
-                                    T.min(gate[i, j], activation_clamp)
-                                    * T.sigmoid(T.min(gate[i, j], activation_clamp))
-                                    * T.max(
-                                        T.min(up[i, j], activation_clamp),
-                                        -activation_clamp,
-                                    )
-                                    * recv_weights[
-                                        consumer_expert,
-                                        consumer_m * block_m + i,
+                        T.clear(partial)
+                        T.clear(accum)
+                        for consumer_k in T.serial(num_k_blocks):
+                            consumer_stage = (consumer_step + consumer_k) % pipeline_stages
+                            consumer_phase = ((consumer_step + consumer_k) // pipeline_stages) & 1
+                            T.mbarrier_wait_parity(stage_barriers[consumer_stage], consumer_phase)
+                            # One TMA stage spans num_k_sub scale groups; WGMMA and promotion
+                            # still run per SCALE_GRANULARITY so the per-128 scales stay exact.
+                            for consumer_ks in T.unroll(num_k_sub):
+                                consumer_sf_k = consumer_k * num_k_sub + consumer_ks
+                                for scale_group in T.serial(num_output_scale_groups):
+                                    weight_scale[2 * scale_group] = l1_weight_sf[
+                                        consumer_expert, consumer_n * num_output_scale_groups + scale_group, consumer_sf_k
                                     ]
+                                    weight_scale[2 * scale_group + 1] = l1_weight_sf[
+                                        consumer_expert,
+                                        num_l1_scale_groups + consumer_n * num_output_scale_groups + scale_group,
+                                        consumer_sf_k,
+                                    ]
+                                for i in T.Parallel(block_m):
+                                    act_scale[i] = act_sf_shared[consumer_stage, i]
+                                T.gemm(
+                                    a_shared[consumer_stage, consumer_ks, :, :],
+                                    b_shared[consumer_stage, consumer_ks, :, :],
+                                    partial,
+                                    transpose_B=True,
+                                    clear_accum=True,
                                 )
-                            T.reduce_absmax(gate_grouped, amax, dim=2)
-                            for i, scale_group in T.Parallel(block_m, num_output_scale_groups):
-                                scale[i, scale_group] = T.max(amax[i, scale_group], 1e-4) / FP8_MAX
-                                l2_x_sf[
+                                for i, j in T.Parallel(block_m, block_n):
+                                    accum[i, j] = (
+                                        partial[i, j] * (act_scale[i] * weight_scale[2 * (j // (2 * SCALE_GRANULARITY)) + (j % 16) // 8])
+                                        + accum[i, j]
+                                    )
+                            T.mbarrier_arrive(stage_barriers[pipeline_stages + consumer_stage])
+                        consumer_step += num_k_blocks
+                        for i, j in T.Parallel(block_m, block_n // 2):
+                            gate[i, j] = accum[i, (j // 8) * 16 + j % 8]
+                        for i, j in T.Parallel(block_m, block_n // 2):
+                            up[i, j] = accum[i, (j // 8) * 16 + j % 8 + 8]
+                        for i, j in T.Parallel(block_m, block_n // 2):
+                            gate[i, j] = (
+                                T.min(gate[i, j], activation_clamp)
+                                * T.sigmoid(T.min(gate[i, j], activation_clamp))
+                                * T.max(
+                                    T.min(up[i, j], activation_clamp),
+                                    -activation_clamp,
+                                )
+                                * recv_weights[
                                     consumer_expert,
                                     consumer_m * block_m + i,
-                                    consumer_n * num_output_scale_groups + scale_group,
-                                ] = scale[i, scale_group]
-                            for i, j in T.Parallel(block_m, block_n // 2):
-                                gate[i, j] = T.clamp(gate[i, j] / scale[i, j // SCALE_GRANULARITY], -FP8_MAX, FP8_MAX)
-                            T.copy(gate, out_shared)
-                            T.copy(
-                                out_shared,
-                                l2_x[
-                                    consumer_expert,
-                                    consumer_m * block_m,
-                                    consumer_n * (block_n // 2),
-                                ],
+                                ]
                             )
+                        T.reduce_absmax(gate_grouped, amax, dim=2)
+                        for i, scale_group in T.Parallel(block_m, num_output_scale_groups):
+                            scale[i, scale_group] = T.max(amax[i, scale_group], 1e-4) / FP8_MAX
+                            l2_x_sf[
+                                consumer_expert,
+                                consumer_m * block_m + i,
+                                consumer_n * num_output_scale_groups + scale_group,
+                            ] = scale[i, scale_group]
+                        for i, j in T.Parallel(block_m, block_n // 2):
+                            gate[i, j] = T.clamp(gate[i, j] / scale[i, j // SCALE_GRANULARITY], -FP8_MAX, FP8_MAX)
+                        T.copy(gate, out_shared)
+                        T.copy(
+                            out_shared,
+                            l2_x[
+                                consumer_expert,
+                                consumer_m * block_m,
+                                consumer_n * (block_n // 2),
+                            ],
+                        )
 
     return main
-
 
 
 def fused_l2_scatter_reduce_manual_warp_kernel(
@@ -462,31 +504,33 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                         and producer_n * block_n < hidden
                         and num_k_blocks * block_k == intermediate_hidden
                     ):
-                            for producer_k in T.serial(num_k_blocks):
-                                producer_stage = (producer_step + producer_k) % pipeline_stages
-                                producer_phase = ((producer_step + producer_k) // pipeline_stages) & 1
-                                T.mbarrier_wait_parity(stage_barriers[pipeline_stages + producer_stage], producer_phase ^ 1)
-                                T.tma_copy(
-                                    a[
-                                        producer_expert,
-                                        producer_m * block_m : (producer_m + 1) * block_m,
-                                        producer_k * block_k : (producer_k + 1) * block_k,
-                                    ],
-                                    a_shared[producer_stage, :, :],
-                                    barrier=stage_barriers[producer_stage],
-                                )
-                                T.tma_copy(
-                                    b[
-                                        producer_expert,
-                                        producer_n * block_n : (producer_n + 1) * block_n,
-                                        producer_k * block_k : (producer_k + 1) * block_k,
-                                    ],
-                                    b_shared[producer_stage, :, :],
-                                    barrier=stage_barriers[producer_stage],
-                                )
-                                a_sf_shared[producer_stage, tx - producer_begin] = a_sf[producer_expert, producer_m * block_m + tx - producer_begin, producer_k]
-                                T.mbarrier_arrive(stage_barriers[producer_stage])
-                            producer_step += num_k_blocks
+                        for producer_k in T.serial(num_k_blocks):
+                            producer_stage = (producer_step + producer_k) % pipeline_stages
+                            producer_phase = ((producer_step + producer_k) // pipeline_stages) & 1
+                            T.mbarrier_wait_parity(stage_barriers[pipeline_stages + producer_stage], producer_phase ^ 1)
+                            T.tma_copy(
+                                a[
+                                    producer_expert,
+                                    producer_m * block_m : (producer_m + 1) * block_m,
+                                    producer_k * block_k : (producer_k + 1) * block_k,
+                                ],
+                                a_shared[producer_stage, :, :],
+                                barrier=stage_barriers[producer_stage],
+                            )
+                            T.tma_copy(
+                                b[
+                                    producer_expert,
+                                    producer_n * block_n : (producer_n + 1) * block_n,
+                                    producer_k * block_k : (producer_k + 1) * block_k,
+                                ],
+                                b_shared[producer_stage, :, :],
+                                barrier=stage_barriers[producer_stage],
+                            )
+                            a_sf_shared[producer_stage, tx - producer_begin] = a_sf[
+                                producer_expert, producer_m * block_m + tx - producer_begin, producer_k
+                            ]
+                            T.mbarrier_arrive(stage_barriers[producer_stage])
+                        producer_step += num_k_blocks
 
             elif tx >= math_begin:
                 # WG1-2 run WGMMA and scatter their BF16 column pairs remotely.
@@ -509,81 +553,96 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                         and consumer_n * block_n < hidden
                         and num_k_blocks * block_k == intermediate_hidden
                     ):
-                            T.clear(partial)
-                            T.clear(accum)
-                            for consumer_k in T.serial(num_k_blocks):
-                                consumer_stage = (consumer_step + consumer_k) % pipeline_stages
-                                consumer_phase = ((consumer_step + consumer_k) // pipeline_stages) & 1
-                                T.mbarrier_wait_parity(stage_barriers[consumer_stage], consumer_phase)
-                                T.gemm(a_shared[consumer_stage, :, :], b_shared[consumer_stage, :, :], partial, transpose_B=True, clear_accum=True)
-                                for i in T.Parallel(block_m):
-                                    act_scale[i] = a_sf_shared[consumer_stage, i]
-                                weight_scale[0] = b_sf[consumer_expert, consumer_n * 2, consumer_k]
-                                weight_scale[1] = b_sf[consumer_expert, consumer_n * 2 + 1, consumer_k]
-                                for i, j in T.Parallel(block_m, block_n):
-                                    accum[i, j] = partial[i, j] * act_scale[i] * weight_scale[j // 128] + accum[i, j]
-                                T.mbarrier_arrive(stage_barriers[pipeline_stages + consumer_stage])
-                            consumer_step += num_k_blocks
-                            if use_put_warp_scatter:
-                                # Stage the complete tile once, then let each math warp
-                                # scatter eight rows with aligned 16-byte remote stores.
-                                T.copy(accum, scatter_shared)
-                                T.sync_threads(4, num_math_threads)
-                                scatter_warp = (tx - math_begin) // warp_size
-                                for row_in_warp in T.serial(block_m // (num_math_threads // warp_size)):
-                                    row = scatter_warp * (block_m // (num_math_threads // warp_size)) + row_in_warp
-                                    pool_row = consumer_m * block_m + row
-                                    if pool_row < recv_counts[consumer_expert]:
-                                        if tx % warp_size == 0:
-                                            scatter_dst_rank = src_ranks[consumer_expert, pool_row]
-                                            scatter_dst_token = src_tokens[consumer_expert, pool_row]
-                                            scatter_dst_topk = src_topk[consumer_expert, pool_row]
-                                        dst_rank = T.shfl_sync(scatter_dst_rank, 0)
-                                        dst_token = T.shfl_sync(scatter_dst_token, 0)
-                                        dst_topk = T.shfl_sync(scatter_dst_topk, 0)
-                                        if (
-                                            dst_rank >= 0
-                                            and dst_rank < num_ranks
-                                            and dst_token >= 0
-                                            and dst_token < num_tokens
-                                            and dst_topk >= 0
-                                            and dst_topk < num_topk
-                                        ):
-                                            T.put_warp(
-                                                T.address_of(scatter_shared[row, 0]),
-                                                T.address_of(combine[dst_token, dst_topk, consumer_n * block_n]),
-                                                block_n,
-                                                dst_pe=dst_rank,
-                                                unroll_factor=1,
-                                            )
-                                T.sync_threads(4, num_math_threads)
-                            else:
-                                # Direct scatter maps fragment owners to packed BF16 stores.
-                                scatter_math_thread = tx - math_begin
-                                scatter_wg = scatter_math_thread // warpgroup_size
-                                scatter_warp_in_wg = (scatter_math_thread % warpgroup_size) // warp_size
-                                scatter_lane = scatter_math_thread % warp_size
-                                for scatter_row_half in T.serial(2):
-                                    row = scatter_warp_in_wg * 16 + scatter_row_half * 8 + scatter_lane // 4
-                                    pool_row = consumer_m * block_m + row
-                                    if pool_row < recv_counts[consumer_expert]:
+                        T.clear(partial)
+                        T.clear(accum)
+                        for consumer_k in T.serial(num_k_blocks):
+                            consumer_stage = (consumer_step + consumer_k) % pipeline_stages
+                            consumer_phase = ((consumer_step + consumer_k) // pipeline_stages) & 1
+                            T.mbarrier_wait_parity(stage_barriers[consumer_stage], consumer_phase)
+                            T.gemm(
+                                a_shared[consumer_stage, :, :], b_shared[consumer_stage, :, :], partial, transpose_B=True, clear_accum=True
+                            )
+                            for i in T.Parallel(block_m):
+                                act_scale[i] = a_sf_shared[consumer_stage, i]
+                            weight_scale[0] = b_sf[consumer_expert, consumer_n * 2, consumer_k]
+                            weight_scale[1] = b_sf[consumer_expert, consumer_n * 2 + 1, consumer_k]
+                            for i, j in T.Parallel(block_m, block_n):
+                                accum[i, j] = partial[i, j] * act_scale[i] * weight_scale[j // 128] + accum[i, j]
+                            T.mbarrier_arrive(stage_barriers[pipeline_stages + consumer_stage])
+                        consumer_step += num_k_blocks
+                        if use_put_warp_scatter:
+                            # Stage the complete tile once, then let each math warp
+                            # scatter eight rows with aligned 16-byte remote stores.
+                            T.copy(accum, scatter_shared)
+                            T.sync_threads(4, num_math_threads)
+                            scatter_warp = (tx - math_begin) // warp_size
+                            for row_in_warp in T.serial(block_m // (num_math_threads // warp_size)):
+                                row = scatter_warp * (block_m // (num_math_threads // warp_size)) + row_in_warp
+                                pool_row = consumer_m * block_m + row
+                                if pool_row < recv_counts[consumer_expert]:
+                                    if tx % warp_size == 0:
                                         scatter_dst_rank = src_ranks[consumer_expert, pool_row]
                                         scatter_dst_token = src_tokens[consumer_expert, pool_row]
                                         scatter_dst_topk = src_topk[consumer_expert, pool_row]
-                                        if (
-                                            scatter_dst_rank >= 0
-                                            and scatter_dst_rank < num_ranks
-                                            and scatter_dst_token >= 0
-                                            and scatter_dst_token < num_tokens
-                                            and scatter_dst_topk >= 0
-                                            and scatter_dst_topk < num_topk
-                                        ):
-                                            for scatter_col_chunk in T.serial(block_n // math_warpgroups // 8):
-                                                scatter_col = scatter_wg * (block_n // math_warpgroups) + scatter_col_chunk * 8 + (scatter_lane % 4) * 2
-                                                scatter_value_lo = T.alloc_var(T.uint16, init=T.reinterpret(T.cast(accum[row, scatter_col], T.bfloat16), T.uint16))
-                                                scatter_value_hi = T.alloc_var(T.uint16, init=T.reinterpret(T.cast(accum[row, scatter_col + 1], T.bfloat16), T.uint16))
-                                                scatter_value = T.alloc_var(T.uint32, init=T.cast(scatter_value_lo, T.uint32) | (T.cast(scatter_value_hi, T.uint32) << 16))
-                                                T.st(combine[scatter_dst_token, scatter_dst_topk, consumer_n * block_n + scatter_col], scatter_value, dst_pe=scatter_dst_rank)
+                                    dst_rank = T.shfl_sync(scatter_dst_rank, 0)
+                                    dst_token = T.shfl_sync(scatter_dst_token, 0)
+                                    dst_topk = T.shfl_sync(scatter_dst_topk, 0)
+                                    if (
+                                        dst_rank >= 0
+                                        and dst_rank < num_ranks
+                                        and dst_token >= 0
+                                        and dst_token < num_tokens
+                                        and dst_topk >= 0
+                                        and dst_topk < num_topk
+                                    ):
+                                        T.put_warp(
+                                            T.address_of(scatter_shared[row, 0]),
+                                            T.address_of(combine[dst_token, dst_topk, consumer_n * block_n]),
+                                            block_n,
+                                            dst_pe=dst_rank,
+                                            unroll_factor=1,
+                                        )
+                            T.sync_threads(4, num_math_threads)
+                        else:
+                            # Direct scatter maps fragment owners to packed BF16 stores.
+                            scatter_math_thread = tx - math_begin
+                            scatter_wg = scatter_math_thread // warpgroup_size
+                            scatter_warp_in_wg = (scatter_math_thread % warpgroup_size) // warp_size
+                            scatter_lane = scatter_math_thread % warp_size
+                            for scatter_row_half in T.serial(2):
+                                row = scatter_warp_in_wg * 16 + scatter_row_half * 8 + scatter_lane // 4
+                                pool_row = consumer_m * block_m + row
+                                if pool_row < recv_counts[consumer_expert]:
+                                    scatter_dst_rank = src_ranks[consumer_expert, pool_row]
+                                    scatter_dst_token = src_tokens[consumer_expert, pool_row]
+                                    scatter_dst_topk = src_topk[consumer_expert, pool_row]
+                                    if (
+                                        scatter_dst_rank >= 0
+                                        and scatter_dst_rank < num_ranks
+                                        and scatter_dst_token >= 0
+                                        and scatter_dst_token < num_tokens
+                                        and scatter_dst_topk >= 0
+                                        and scatter_dst_topk < num_topk
+                                    ):
+                                        for scatter_col_chunk in T.serial(block_n // math_warpgroups // 8):
+                                            scatter_col = (
+                                                scatter_wg * (block_n // math_warpgroups) + scatter_col_chunk * 8 + (scatter_lane % 4) * 2
+                                            )
+                                            scatter_value_lo = T.alloc_var(
+                                                T.uint16, init=T.reinterpret(T.cast(accum[row, scatter_col], T.bfloat16), T.uint16)
+                                            )
+                                            scatter_value_hi = T.alloc_var(
+                                                T.uint16, init=T.reinterpret(T.cast(accum[row, scatter_col + 1], T.bfloat16), T.uint16)
+                                            )
+                                            scatter_value = T.alloc_var(
+                                                T.uint32,
+                                                init=T.cast(scatter_value_lo, T.uint32) | (T.cast(scatter_value_hi, T.uint32) << 16),
+                                            )
+                                            T.st(
+                                                combine[scatter_dst_token, scatter_dst_topk, consumer_n * block_n + scatter_col],
+                                                scatter_value,
+                                                dst_pe=scatter_dst_rank,
+                                            )
 
             T.fence_sys()
             T.sync_grid()
@@ -610,8 +669,8 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                             reduce_n * reduce_block_h,
                         ],
                     )
-    return main
 
+    return main
 
 
 def _allocator_size_bytes(
@@ -627,27 +686,17 @@ def _allocator_size_bytes(
     fp32 = 4
     i32 = 4
     weight_bytes = num_experts_per_rank * (2 * intermediate_hidden * hidden * fp8 + hidden * intermediate_hidden * fp8)
-    weight_scale_bytes = num_experts_per_rank * ((2 * intermediate_hidden // 128) * (hidden // 128) + (hidden // 128) * (intermediate_hidden // 128)) * fp32
+    weight_scale_bytes = (
+        num_experts_per_rank * ((2 * intermediate_hidden // 128) * (hidden // 128) + (hidden // 128) * (intermediate_hidden // 128)) * fp32
+    )
     pool_bytes = (
         num_experts_per_rank
         * capacity
-        * (
-            hidden * fp8
-            + (hidden // 128) * fp32
-            + 4 * i32
-            + intermediate_hidden * fp8
-            + (intermediate_hidden // 128) * fp32
-        )
+        * (hidden * fp8 + (hidden // 128) * fp32 + 4 * i32 + intermediate_hidden * fp8 + (intermediate_hidden // 128) * fp32)
     )
-    input_bytes = num_tokens * (
-        hidden * fp8
-        + (hidden // 128) * fp32
-        + num_topk * (3 * i32 + fp32)
-        + (num_topk + 1) * hidden * bf16
-    )
+    input_bytes = num_tokens * (hidden * fp8 + (hidden // 128) * fp32 + num_topk * (3 * i32 + fp32) + (num_topk + 1) * hidden * bf16)
     total_bytes = weight_bytes + weight_scale_bytes + pool_bytes + input_bytes + 2**27
     return (total_bytes + 2**20 - 1) // 2**20 * 2**20
-
 
 
 def torch_reference(
@@ -666,14 +715,13 @@ def torch_reference(
         gathered = [torch.empty_like(tensor) for _ in range(dist.get_world_size(group))]
         dist.all_gather(gathered, tensor, group=group)
         return torch.cat(gathered, dim=0)
+
     l1_all = _gather_cat(l1_fp8, group)
     l1_sf_all = _gather_cat(l1_sf, group)
     l2_all = _gather_cat(l2_fp8, group)
     l2_sf_all = _gather_cat(l2_sf, group)
     x_m, x_k = x_fp8.shape
-    x = (
-        x_fp8.float().view(x_m, x_k // SCALE_GRANULARITY, SCALE_GRANULARITY) * x_sf.unsqueeze(-1)
-    ).view(x_m, x_k)
+    x = (x_fp8.float().view(x_m, x_k // SCALE_GRANULARITY, SCALE_GRANULARITY) * x_sf.unsqueeze(-1)).view(x_m, x_k)
     result = torch.zeros((x.size(0), l2_all.size(1)), dtype=torch.float32, device=x.device)
 
     for expert_idx in range(l1_all.size(0)):
@@ -688,9 +736,7 @@ def torch_reference(
         l1_weight_view = l1_weight_fp8.float().view(
             groups, l1_n // SCALE_GRANULARITY, SCALE_GRANULARITY, l1_k // SCALE_GRANULARITY, SCALE_GRANULARITY
         )
-        l1_weight = (
-            l1_weight_view * l1_weight_sf.unsqueeze(-1).unsqueeze(-3)
-        ).view(groups, l1_n, l1_k)[0]
+        l1_weight = (l1_weight_view * l1_weight_sf.unsqueeze(-1).unsqueeze(-3)).view(groups, l1_n, l1_k)[0]
         gate_up = x[token_indices] @ l1_weight.T
         gate, up = gate_up.chunk(2, dim=-1)
         gate = gate.clamp(max=activation_clamp)
@@ -698,28 +744,21 @@ def torch_reference(
         activated = torch.nn.functional.silu(gate) * up
         activated *= topk_weights[token_indices, topk_slots].unsqueeze(-1)
         activated_m, activated_k = activated.shape
-        activated_view = activated.float().view(
-            activated_m, activated_k // SCALE_GRANULARITY, SCALE_GRANULARITY
-        )
+        activated_view = activated.float().view(activated_m, activated_k // SCALE_GRANULARITY, SCALE_GRANULARITY)
         activated_sf = activated_view.abs().amax(dim=-1).clamp(1e-4) / FP8_MAX
         activated_fp8 = (activated_view / activated_sf.unsqueeze(-1)).to(torch.float8_e4m3fn)
-        activated_dequant = (
-            activated_fp8.float() * activated_sf.unsqueeze(-1)
-        ).view(activated_m, activated_k)
+        activated_dequant = (activated_fp8.float() * activated_sf.unsqueeze(-1)).view(activated_m, activated_k)
         l2_weight_fp8 = l2_all[expert_idx : expert_idx + 1]
         l2_weight_sf = l2_sf_all[expert_idx : expert_idx + 1]
         groups, l2_n, l2_k = l2_weight_fp8.shape
         l2_weight_view = l2_weight_fp8.float().view(
             groups, l2_n // SCALE_GRANULARITY, SCALE_GRANULARITY, l2_k // SCALE_GRANULARITY, SCALE_GRANULARITY
         )
-        l2_weight = (
-            l2_weight_view * l2_weight_sf.unsqueeze(-1).unsqueeze(-3)
-        ).view(groups, l2_n, l2_k)[0]
+        l2_weight = (l2_weight_view * l2_weight_sf.unsqueeze(-1).unsqueeze(-3)).view(groups, l2_n, l2_k)[0]
         contribution = (activated_dequant @ l2_weight.T).to(torch.bfloat16).float()
         result.index_add_(0, token_indices, contribution)
 
     return result.to(torch.bfloat16)
-
 
 
 def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
@@ -770,12 +809,14 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         l1_stages = 3
         l2_stages = 3
         generic_experts_per_wave = num_experts_per_rank
+
         def normalize_experts_per_wave(num_experts: int, requested: int) -> int:
             requested = min(max(requested, 1), num_experts)
             for candidate in range(requested, num_experts + 1):
                 if num_experts % candidate == 0:
                     return candidate
             return num_experts
+
         if num_experts_per_rank <= routed_tokens <= 4 * num_experts_per_rank:
             expected_tokens = (routed_tokens + num_experts_per_rank - 1) // num_experts_per_rank
             num_m_blocks = (expected_tokens + 63) // 64
@@ -849,16 +890,34 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         use_vmm=True,
     )
 
-    shape_family, l1_config, l2_config = select_manual_warp_configs(hidden, intermediate_hidden, num_tokens, num_topk, num_experts_per_rank, num_sms)
+    shape_family, l1_config, l2_config = select_manual_warp_configs(
+        hidden, intermediate_hidden, num_tokens, num_topk, num_experts_per_rank, num_sms
+    )
     # Packed warp scatter amortizes its shared-memory staging for larger token batches.
     use_put_warp_scatter = num_tokens >= 1024
     kernel_specs = [
         fused_l1_swiglu_manual_warp_kernel(
-            num_tokens, hidden, 2 * intermediate_hidden, num_experts, num_topk, num_ranks, capacity, num_sms,
-            activation_clamp=activation_clamp, **l1_config,
+            num_tokens,
+            hidden,
+            2 * intermediate_hidden,
+            num_experts,
+            num_topk,
+            num_ranks,
+            capacity,
+            num_sms,
+            activation_clamp=activation_clamp,
+            **l1_config,
         ),
         fused_l2_scatter_reduce_manual_warp_kernel(
-            num_tokens, hidden, intermediate_hidden, num_experts_per_rank, num_topk, num_ranks, capacity, num_sms, **l2_config,
+            num_tokens,
+            hidden,
+            intermediate_hidden,
+            num_experts_per_rank,
+            num_topk,
+            num_ranks,
+            capacity,
+            num_sms,
+            **l2_config,
             use_put_warp_scatter=use_put_warp_scatter,
         ),
     ]
@@ -920,7 +979,9 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     m_tasks = allocator_tensor((num_experts_per_rank * ((capacity + 63) // 64),), torch.int32, allocator=allocator)
     num_m_tasks = allocator_tensor((1,), torch.int32, allocator=allocator)
     l2_x = allocator_tensor((num_experts_per_rank, capacity, intermediate_hidden), torch.float8_e4m3fn, allocator=allocator)
-    l2_x_sf = allocator_tensor((num_experts_per_rank, capacity, intermediate_hidden // SCALE_GRANULARITY), torch.float32, allocator=allocator)
+    l2_x_sf = allocator_tensor(
+        (num_experts_per_rank, capacity, intermediate_hidden // SCALE_GRANULARITY), torch.float32, allocator=allocator
+    )
     combine = allocator_tensor((num_tokens, num_topk, hidden), torch.bfloat16, allocator=allocator)
     out = allocator_tensor((num_tokens, hidden), torch.bfloat16, allocator=allocator)
 
@@ -939,17 +1000,46 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     def run_pipeline(check_capacity: bool = False):
         fused_l1(
-            x, x_sf, topk_idx, topk_weights, route_counts, recv_counts, route_slots, arrivals,
-            m_tasks, num_m_tasks, recv_x, recv_x_sf, recv_weights, src_ranks, src_tokens, src_topk,
-            l1_fp8, l1_sf, l2_x, l2_x_sf, barrier,
+            x,
+            x_sf,
+            topk_idx,
+            topk_weights,
+            route_counts,
+            recv_counts,
+            route_slots,
+            arrivals,
+            m_tasks,
+            num_m_tasks,
+            recv_x,
+            recv_x_sf,
+            recv_weights,
+            src_ranks,
+            src_tokens,
+            src_topk,
+            l1_fp8,
+            l1_sf,
+            l2_x,
+            l2_x_sf,
+            barrier,
         )
         if check_capacity:
             local_max = recv_counts.max()
             dist.all_reduce(local_max, op=dist.ReduceOp.MAX, group=group)
             assert local_max.item() <= capacity, f"expert capacity {capacity} is smaller than received routes {local_max.item()}"
         fused_l2(
-            l2_x, l2_fp8, l2_x_sf, l2_sf, recv_counts, m_tasks, num_m_tasks, src_ranks,
-            src_tokens, src_topk, combine, barrier, out,
+            l2_x,
+            l2_fp8,
+            l2_x_sf,
+            l2_sf,
+            recv_counts,
+            m_tasks,
+            num_m_tasks,
+            src_ranks,
+            src_tokens,
+            src_topk,
+            combine,
+            barrier,
+            out,
         )
         return out
 
@@ -965,8 +1055,16 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             return (1 - 2 * (x * y).sum() / (x.square() + y.square()).sum()).item()
 
         expected = torch_reference(
-            x_fp8_src, x_sf_src, topk_idx_src, topk_weights_src, l1_fp8_src,
-            l1_sf_src, l2_fp8_src, l2_sf_src, group, activation_clamp,
+            x_fp8_src,
+            x_sf_src,
+            topk_idx_src,
+            topk_weights_src,
+            l1_fp8_src,
+            l1_sf_src,
+            l2_fp8_src,
+            l2_sf_src,
+            group,
+            activation_clamp,
         )
         diff = calc_diff(actual, expected)
         assert diff < args.diff_tol, f"rank {local_rank}: diff={diff} exceeds {args.diff_tol}"
