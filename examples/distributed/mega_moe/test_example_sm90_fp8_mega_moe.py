@@ -39,7 +39,7 @@ def test_custom_model_config_and_schedule():
         "block_n": 256,
         "block_k": 128,
         "threads": 384,
-        "pipeline_stages": 5,
+        "pipeline_stages": 3,
         "num_experts_per_wave": 16,
     }
     assert l2 == {**l1, "pipeline_stages": 3}

@@ -35,132 +35,6 @@ MODEL_CONFIGS = {
 FP8_MAX = 448.0
 SCALE_GRANULARITY = 128
 
-
-def resolve_model_config(args: argparse.Namespace) -> Tuple[str, dict[str, int]]:
-    model = MODEL_CONFIGS[args.model_config].copy()
-    overrides = {
-        "hidden": getattr(args, "hidden", None),
-        "intermediate_hidden": getattr(args, "intermediate_hidden", None),
-        "num_experts": getattr(args, "num_experts", None),
-        "num_topk": getattr(args, "num_topk", None),
-    }
-    is_custom = any(value is not None for value in overrides.values())
-    model.update({key: value for key, value in overrides.items() if value is not None})
-    return ("custom" if is_custom else args.model_config), model
-
-
-def normalize_experts_per_wave(num_experts: int, requested: int) -> int:
-    requested = min(max(requested, 1), num_experts)
-    for candidate in range(requested, num_experts + 1):
-        if num_experts % candidate == 0:
-            return candidate
-    return num_experts
-
-
-def select_manual_warp_configs(
-    hidden: int,
-    intermediate_hidden: int,
-    num_tokens: int,
-    num_topk: int,
-    num_experts_per_rank: int,
-    num_sms: int,
-) -> Tuple[str, dict[str, int], dict[str, int]]:
-    """Select the TileScale counterpart of DeepGEMM SM90 schedule families."""
-    if 3072 <= hidden < 5120 and 1536 <= intermediate_hidden < 2560:
-        shape_family = "compact"
-    elif 5120 <= hidden <= 8192 and 2560 <= intermediate_hidden <= 4096:
-        shape_family = "wide"
-    else:
-        shape_family = "generic"
-
-    routed_tokens = num_tokens * num_topk
-    high_sm = num_sms >= 100
-
-    # Measured on Flash (4x H200): three stages ties five at M<=512 and wins
-    # 0.6%/2.1% at M=2048/8192, so the deeper default is not worth its
-    # shared memory.
-    l1_stages = 3
-    l2_stages = 3
-    generic_experts_per_wave = num_experts_per_rank
-    if num_experts_per_rank <= routed_tokens <= 4 * num_experts_per_rank:
-        expected_tokens = (routed_tokens + num_experts_per_rank - 1) // num_experts_per_rank
-        num_m_blocks = (expected_tokens + 63) // 64
-        blocks_per_expert = num_m_blocks * (2 * intermediate_hidden // 256)
-        requested = min(num_experts_per_rank, (2 * num_sms + blocks_per_expert - 1) // blocks_per_expert)
-        if blocks_per_expert < num_sms:
-            max_candidate = min(num_experts_per_rank, 2 * requested)
-            requested = max(
-                range(requested, max_candidate + 1),
-                key=lambda candidate: 1.0 if num_experts_per_rank % candidate == 0 else (num_experts_per_rank % candidate) / candidate,
-            )
-        generic_experts_per_wave = normalize_experts_per_wave(num_experts_per_rank, requested)
-    l1_experts_per_wave = l2_experts_per_wave = generic_experts_per_wave
-    if high_sm and shape_family == "compact":
-        if routed_tokens <= 32 * num_experts_per_rank:
-            l1_stages = l2_stages = 3
-            l1_experts_per_wave = l2_experts_per_wave = normalize_experts_per_wave(num_experts_per_rank, 4)
-        elif 128 * num_experts_per_rank < routed_tokens <= 256 * num_experts_per_rank or routed_tokens > 1024 * num_experts_per_rank:
-            l1_stages = l2_stages = 4
-            l1_experts_per_wave = l2_experts_per_wave = normalize_experts_per_wave(num_experts_per_rank, 32)
-    elif high_sm and shape_family == "wide":
-        # BN512/BK256 are profitable in the CUDA kernel, but the manually
-        # tuned TileScale BN256/BK128 path is faster for the current WGMMA
-        # lowering and remains the generic Wide schedule.
-        l1_stages = 4
-        if routed_tokens <= 24 * num_experts_per_rank:
-            # CUDA selects 16 experts here, while TileScale's direct TIR
-            # scheduler is faster with a shorter four-expert scan on H200.
-            l1_experts_per_wave = l2_experts_per_wave = normalize_experts_per_wave(num_experts_per_rank, 4)
-        elif 24 * num_experts_per_rank < routed_tokens <= 48 * num_experts_per_rank:
-            l1_experts_per_wave = normalize_experts_per_wave(num_experts_per_rank, 8)
-            l2_experts_per_wave = normalize_experts_per_wave(num_experts_per_rank, 48)
-        elif routed_tokens > 48 * num_experts_per_rank:
-            l1_experts_per_wave = l2_experts_per_wave = normalize_experts_per_wave(num_experts_per_rank, 16)
-
-    common = {"block_m": 64, "block_n": 256, "block_k": 128, "threads": 384}
-    return (
-        shape_family,
-        {**common, "pipeline_stages": l1_stages, "num_experts_per_wave": l1_experts_per_wave},
-        {**common, "pipeline_stages": l2_stages, "num_experts_per_wave": l2_experts_per_wave},
-    )
-
-
-def per_token_cast_to_fp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    m, k = x.shape
-    x_view = x.float().view(m, k // SCALE_GRANULARITY, SCALE_GRANULARITY)
-    amax = x_view.abs().amax(dim=-1).clamp(1e-4)
-    scale = amax / FP8_MAX
-    x_fp8 = (x_view / scale.unsqueeze(-1)).to(torch.float8_e4m3fn)
-    return x_fp8.view(m, k).contiguous(), scale.contiguous()
-
-
-def block_cast_to_fp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    groups, n, k = x.shape
-    x_view = x.float().view(groups, n // SCALE_GRANULARITY, SCALE_GRANULARITY, k // SCALE_GRANULARITY, SCALE_GRANULARITY)
-    amax = x_view.abs().amax(dim=(-1, -3)).clamp(1e-4)
-    scale = amax / FP8_MAX
-    x_fp8 = (x_view / scale.unsqueeze(-1).unsqueeze(-3)).to(torch.float8_e4m3fn)
-    return x_fp8.view(groups, n, k).contiguous(), scale.contiguous()
-
-
-def interleave_gate_up_weights(weight: torch.Tensor, granularity: int = 8) -> torch.Tensor:
-    groups, n, k = weight.shape
-    half = n // 2
-    gate = weight[:, :half].view(groups, half // granularity, granularity, k)
-    up = weight[:, half:].view(groups, half // granularity, granularity, k)
-    return torch.stack((gate, up), dim=2).reshape(groups, n, k).contiguous()
-
-
-def dequantize_per_token(x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-    m, k = x.shape
-    return (x.float().view(m, k // SCALE_GRANULARITY, SCALE_GRANULARITY) * scale.unsqueeze(-1)).view(m, k)
-
-
-def dequantize_block(x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-    groups, n, k = x.shape
-    x_view = x.float().view(groups, n // SCALE_GRANULARITY, SCALE_GRANULARITY, k // SCALE_GRANULARITY, SCALE_GRANULARITY)
-    return (x_view * scale.unsqueeze(-1).unsqueeze(-3)).view(groups, n, k)
-
 def fused_l1_swiglu_manual_warp_kernel(
     num_tokens: int,
     hidden: int,
@@ -177,8 +51,6 @@ def fused_l1_swiglu_manual_warp_kernel(
     threads: int = 384,
     pipeline_stages: int = 5,
     num_experts_per_wave: int | None = None,
-    frontend_regs_override: int | None = None,
-    math_regs_override: int | None = None,
 ):
     num_experts_per_rank = num_experts // num_ranks
     num_experts_per_wave = num_experts_per_wave or num_experts_per_rank
@@ -211,12 +83,9 @@ def fused_l1_swiglu_manual_warp_kernel(
     num_l1_scale_groups = l1_n // (2 * SCALE_GRANULARITY)
     tma_block_n = min(block_n, 256)
     num_tma_n_blocks = block_n // tma_block_n
-    # Budgets must leave the CTA register pool some slack: 128*fe + 256*math
-    # exactly at 65536 (e.g. 32/240) compiles but deadlocks at run time.
-    # Spilling tracks the frontend budget, not the math one -- 40/48/56 give
-    # 72/16/0 bytes of spill -- so keep the frontend at 64 for a spill-free build.
-    frontend_registers = frontend_regs_override or (32 if num_math_threads == 512 else 64)
-    math_registers = math_regs_override or (112 if num_math_threads == 512 else 192)
+    # Leave enough register-pool slack for the frontend and math warpgroups.
+    frontend_registers = 32 if num_math_threads == 512 else 64
+    math_registers = 112 if num_math_threads == 512 else 192
     dispatch_leader_lane = 0
     route_threads = num_math_threads
     assert route_threads % warp_size == 0
@@ -622,7 +491,7 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
             elif tx >= math_begin:
                 # WG1-2 run WGMMA and scatter their BF16 column pairs remotely.
                 partial = T.alloc_fragment((block_m, block_n), T.float32)
-                accum = T.alloc_fragment((block_m, block_n), T.bfloat16)
+                accum = T.alloc_fragment((block_m, block_n), T.float32)
                 act_scale = T.alloc_fragment((block_m,), T.float32)
                 weight_scale = T.alloc_local((2,), T.float32)
                 consumer_step = T.alloc_var(T.int32, init=0)
@@ -652,9 +521,7 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                                 weight_scale[0] = b_sf[consumer_expert, consumer_n * 2, consumer_k]
                                 weight_scale[1] = b_sf[consumer_expert, consumer_n * 2 + 1, consumer_k]
                                 for i, j in T.Parallel(block_m, block_n):
-                                    accum[i, j] = T.cast(partial[i, j], T.bfloat16) * T.cast(
-                                        act_scale[i] * weight_scale[j // 128], T.bfloat16
-                                    ) + accum[i, j]
+                                    accum[i, j] = partial[i, j] * act_scale[i] * weight_scale[j // 128] + accum[i, j]
                                 T.mbarrier_arrive(stage_barriers[pipeline_stages + consumer_stage])
                             consumer_step += num_k_blocks
                             if use_put_warp_scatter:
@@ -713,8 +580,8 @@ def fused_l2_scatter_reduce_manual_warp_kernel(
                                         ):
                                             for scatter_col_chunk in T.serial(block_n // math_warpgroups // 8):
                                                 scatter_col = scatter_wg * (block_n // math_warpgroups) + scatter_col_chunk * 8 + (scatter_lane % 4) * 2
-                                                scatter_value_lo = T.alloc_var(T.uint16, init=T.reinterpret(accum[row, scatter_col], T.uint16))
-                                                scatter_value_hi = T.alloc_var(T.uint16, init=T.reinterpret(accum[row, scatter_col + 1], T.uint16))
+                                                scatter_value_lo = T.alloc_var(T.uint16, init=T.reinterpret(T.cast(accum[row, scatter_col], T.bfloat16), T.uint16))
+                                                scatter_value_hi = T.alloc_var(T.uint16, init=T.reinterpret(T.cast(accum[row, scatter_col + 1], T.bfloat16), T.uint16))
                                                 scatter_value = T.alloc_var(T.uint32, init=T.cast(scatter_value_lo, T.uint32) | (T.cast(scatter_value_hi, T.uint32) << 16))
                                                 T.st(combine[scatter_dst_token, scatter_dst_topk, consumer_n * block_n + scatter_col], scatter_value, dst_pe=scatter_dst_rank)
 
@@ -804,7 +671,10 @@ def torch_reference(
     l1_sf_all = _gather_cat(l1_sf, group)
     l2_all = _gather_cat(l2_fp8, group)
     l2_sf_all = _gather_cat(l2_sf, group)
-    x = dequantize_per_token(x_fp8, x_sf)
+    x_m, x_k = x_fp8.shape
+    x = (
+        x_fp8.float().view(x_m, x_k // SCALE_GRANULARITY, SCALE_GRANULARITY) * x_sf.unsqueeze(-1)
+    ).view(x_m, x_k)
     result = torch.zeros((x.size(0), l2_all.size(1)), dtype=torch.float32, device=x.device)
 
     for expert_idx in range(l1_all.size(0)):
@@ -813,16 +683,39 @@ def torch_reference(
             continue
         token_indices = positions[:, 0]
         topk_slots = positions[:, 1]
-        l1_weight = dequantize_block(l1_all[expert_idx : expert_idx + 1], l1_sf_all[expert_idx : expert_idx + 1])[0]
+        l1_weight_fp8 = l1_all[expert_idx : expert_idx + 1]
+        l1_weight_sf = l1_sf_all[expert_idx : expert_idx + 1]
+        groups, l1_n, l1_k = l1_weight_fp8.shape
+        l1_weight_view = l1_weight_fp8.float().view(
+            groups, l1_n // SCALE_GRANULARITY, SCALE_GRANULARITY, l1_k // SCALE_GRANULARITY, SCALE_GRANULARITY
+        )
+        l1_weight = (
+            l1_weight_view * l1_weight_sf.unsqueeze(-1).unsqueeze(-3)
+        ).view(groups, l1_n, l1_k)[0]
         gate_up = x[token_indices] @ l1_weight.T
         gate, up = gate_up.chunk(2, dim=-1)
         gate = gate.clamp(max=activation_clamp)
         up = up.clamp(min=-activation_clamp, max=activation_clamp)
         activated = torch.nn.functional.silu(gate) * up
         activated *= topk_weights[token_indices, topk_slots].unsqueeze(-1)
-        activated_fp8, activated_sf = per_token_cast_to_fp8(activated)
-        activated_dequant = dequantize_per_token(activated_fp8, activated_sf)
-        l2_weight = dequantize_block(l2_all[expert_idx : expert_idx + 1], l2_sf_all[expert_idx : expert_idx + 1])[0]
+        activated_m, activated_k = activated.shape
+        activated_view = activated.float().view(
+            activated_m, activated_k // SCALE_GRANULARITY, SCALE_GRANULARITY
+        )
+        activated_sf = activated_view.abs().amax(dim=-1).clamp(1e-4) / FP8_MAX
+        activated_fp8 = (activated_view / activated_sf.unsqueeze(-1)).to(torch.float8_e4m3fn)
+        activated_dequant = (
+            activated_fp8.float() * activated_sf.unsqueeze(-1)
+        ).view(activated_m, activated_k)
+        l2_weight_fp8 = l2_all[expert_idx : expert_idx + 1]
+        l2_weight_sf = l2_sf_all[expert_idx : expert_idx + 1]
+        groups, l2_n, l2_k = l2_weight_fp8.shape
+        l2_weight_view = l2_weight_fp8.float().view(
+            groups, l2_n // SCALE_GRANULARITY, SCALE_GRANULARITY, l2_k // SCALE_GRANULARITY, SCALE_GRANULARITY
+        )
+        l2_weight = (
+            l2_weight_view * l2_weight_sf.unsqueeze(-1).unsqueeze(-3)
+        ).view(groups, l2_n, l2_k)[0]
         contribution = (activated_dequant @ l2_weight.T).to(torch.bfloat16).float()
         result.index_add_(0, token_indices, contribution)
 
@@ -841,6 +734,101 @@ def allocator_tensor(shape, dtype, allocator):
 
 
 def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
+    def per_token_cast_to_fp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        m, k = x.shape
+        x_view = x.float().view(m, k // SCALE_GRANULARITY, SCALE_GRANULARITY)
+        scale = x_view.abs().amax(dim=-1).clamp(1e-4) / FP8_MAX
+        return (x_view / scale.unsqueeze(-1)).to(torch.float8_e4m3fn).view(m, k).contiguous(), scale.contiguous()
+
+    def block_cast_to_fp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        groups, n, k = x.shape
+        x_view = x.float().view(groups, n // SCALE_GRANULARITY, SCALE_GRANULARITY, k // SCALE_GRANULARITY, SCALE_GRANULARITY)
+        scale = x_view.abs().amax(dim=(-1, -3)).clamp(1e-4) / FP8_MAX
+        return (x_view / scale.unsqueeze(-1).unsqueeze(-3)).to(torch.float8_e4m3fn).view(groups, n, k).contiguous(), scale.contiguous()
+
+    def resolve_model_config(args: argparse.Namespace) -> Tuple[str, dict[str, int]]:
+        model = MODEL_CONFIGS[args.model_config].copy()
+        overrides = {
+            "hidden": getattr(args, "hidden", None),
+            "intermediate_hidden": getattr(args, "intermediate_hidden", None),
+            "num_experts": getattr(args, "num_experts", None),
+            "num_topk": getattr(args, "num_topk", None),
+        }
+        is_custom = any(value is not None for value in overrides.values())
+        model.update({key: value for key, value in overrides.items() if value is not None})
+        return ("custom" if is_custom else args.model_config), model
+
+    def select_manual_warp_configs(
+        hidden: int,
+        intermediate_hidden: int,
+        num_tokens: int,
+        num_topk: int,
+        num_experts_per_rank: int,
+        num_sms: int,
+    ) -> Tuple[str, dict[str, int], dict[str, int]]:
+        """Select the TileScale counterpart of DeepGEMM SM90 schedule families."""
+        if 3072 <= hidden < 5120 and 1536 <= intermediate_hidden < 2560:
+            shape_family = "compact"
+        elif 5120 <= hidden <= 8192 and 2560 <= intermediate_hidden <= 4096:
+            shape_family = "wide"
+        else:
+            shape_family = "generic"
+
+        routed_tokens = num_tokens * num_topk
+        high_sm = num_sms >= 100
+
+        # Three stages balance pipeline depth and shared-memory use for the default path.
+        l1_stages = 3
+        l2_stages = 3
+        generic_experts_per_wave = num_experts_per_rank
+        def normalize_experts_per_wave(num_experts: int, requested: int) -> int:
+            requested = min(max(requested, 1), num_experts)
+            for candidate in range(requested, num_experts + 1):
+                if num_experts % candidate == 0:
+                    return candidate
+            return num_experts
+        if num_experts_per_rank <= routed_tokens <= 4 * num_experts_per_rank:
+            expected_tokens = (routed_tokens + num_experts_per_rank - 1) // num_experts_per_rank
+            num_m_blocks = (expected_tokens + 63) // 64
+            blocks_per_expert = num_m_blocks * (2 * intermediate_hidden // 256)
+            requested = min(num_experts_per_rank, (2 * num_sms + blocks_per_expert - 1) // blocks_per_expert)
+            if blocks_per_expert < num_sms:
+                max_candidate = min(num_experts_per_rank, 2 * requested)
+                requested = max(
+                    range(requested, max_candidate + 1),
+                    key=lambda candidate: 1.0 if num_experts_per_rank % candidate == 0 else (num_experts_per_rank % candidate) / candidate,
+                )
+            generic_experts_per_wave = normalize_experts_per_wave(num_experts_per_rank, requested)
+        l1_experts_per_wave = l2_experts_per_wave = generic_experts_per_wave
+        if high_sm and shape_family == "compact":
+            if routed_tokens <= 32 * num_experts_per_rank:
+                l1_stages = l2_stages = 3
+                l1_experts_per_wave = l2_experts_per_wave = normalize_experts_per_wave(num_experts_per_rank, 4)
+            elif 128 * num_experts_per_rank < routed_tokens <= 256 * num_experts_per_rank or routed_tokens > 1024 * num_experts_per_rank:
+                l1_stages = l2_stages = 4
+                l1_experts_per_wave = l2_experts_per_wave = normalize_experts_per_wave(num_experts_per_rank, 32)
+        elif high_sm and shape_family == "wide":
+            # BN512/BK256 are profitable in the CUDA kernel, but the manually
+            # tuned TileScale BN256/BK128 path is faster for the current WGMMA
+            # lowering and remains the generic Wide schedule.
+            l1_stages = 4
+            if routed_tokens <= 24 * num_experts_per_rank:
+                # CUDA selects 16 experts here, while TileScale's direct TIR
+                # scheduler is faster with a shorter four-expert scan on H200.
+                l1_experts_per_wave = l2_experts_per_wave = normalize_experts_per_wave(num_experts_per_rank, 4)
+            elif 24 * num_experts_per_rank < routed_tokens <= 48 * num_experts_per_rank:
+                l1_experts_per_wave = normalize_experts_per_wave(num_experts_per_rank, 8)
+                l2_experts_per_wave = normalize_experts_per_wave(num_experts_per_rank, 48)
+            elif routed_tokens > 48 * num_experts_per_rank:
+                l1_experts_per_wave = l2_experts_per_wave = normalize_experts_per_wave(num_experts_per_rank, 16)
+
+        common = {"block_m": 64, "block_n": 256, "block_k": 128, "threads": 384}
+        return (
+            shape_family,
+            {**common, "pipeline_stages": l1_stages, "num_experts_per_wave": l1_experts_per_wave},
+            {**common, "pipeline_stages": l2_stages, "num_experts_per_wave": l2_experts_per_wave},
+        )
+
     model_name, model = resolve_model_config(args)
     hidden = model["hidden"]
     intermediate_hidden = model["intermediate_hidden"]
@@ -861,7 +849,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
     assert rank == local_rank and num_ranks == num_local_ranks
-    num_sms = args.num_sms or torch.cuda.get_device_properties(local_rank).multi_processor_count
+    num_sms = torch.cuda.get_device_properties(local_rank).multi_processor_count
     allocator = get_allocator(
         size=_allocator_size_bytes(num_tokens, hidden, intermediate_hidden, num_experts_per_rank, num_topk, capacity),
         device=f"cuda:{local_rank}",
@@ -873,25 +861,12 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     )
 
     shape_family, l1_config, l2_config = select_manual_warp_configs(hidden, intermediate_hidden, num_tokens, num_topk, num_experts_per_rank, num_sms)
-    if args.l1_block_k is not None:
-        l1_config["block_k"] = args.l1_block_k
-    if args.l1_stages is not None:
-        l1_config["pipeline_stages"] = args.l1_stages
-    for phase, config in (("l1", l1_config), ("l2", l2_config)):
-        requested = getattr(args, f"{phase}_experts_per_wave", None)
-        if requested is not None:
-            assert requested > 0 and num_experts_per_rank % requested == 0
-            config["num_experts_per_wave"] = requested
-    l2_scatter = getattr(args, "l2_scatter", "auto")
-    # Crossover measured on Flash (4x H200): direct wins by 4.0%/3.5%/0.6% at
-    # M=128/256/512, put_warp by 2.4%/10.1% at M=1024/2048.
-    use_put_warp_scatter = l2_scatter == "warp" or (l2_scatter == "auto" and num_tokens >= 1024)
+    # Packed warp scatter amortizes its shared-memory staging for larger token batches.
+    use_put_warp_scatter = num_tokens >= 1024
     kernel_specs = [
         fused_l1_swiglu_manual_warp_kernel(
             num_tokens, hidden, 2 * intermediate_hidden, num_experts, num_topk, num_ranks, capacity, num_sms,
-            activation_clamp=activation_clamp,
-            frontend_regs_override=args.l1_frontend_regs,
-            math_regs_override=args.l1_math_regs, **l1_config,
+            activation_clamp=activation_clamp, **l1_config,
         ),
         fused_l2_scatter_reduce_manual_warp_kernel(
             num_tokens, hidden, intermediate_hidden, num_experts_per_rank, num_topk, num_ranks, capacity, num_sms, **l2_config,
@@ -927,7 +902,11 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     x_sf = allocator_tensor(x_sf_src.shape, x_sf_src.dtype, allocator=allocator).copy_(x_sf_src)
     topk_idx = allocator_tensor(topk_idx_src.shape, topk_idx_src.dtype, allocator=allocator).copy_(topk_idx_src)
     topk_weights = allocator_tensor(topk_weights_src.shape, topk_weights_src.dtype, allocator=allocator).copy_(topk_weights_src)
-    l1_fp8_kernel = interleave_gate_up_weights(l1_fp8_src)
+    groups, l1_n, l1_k = l1_fp8_src.shape
+    half = l1_n // 2
+    gate = l1_fp8_src[:, :half].view(groups, half // 8, 8, l1_k)
+    up = l1_fp8_src[:, half:].view(groups, half // 8, 8, l1_k)
+    l1_fp8_kernel = torch.stack((gate, up), dim=2).reshape(groups, l1_n, l1_k).contiguous()
     l1_fp8 = allocator_tensor(l1_fp8_kernel.shape, l1_fp8_kernel.dtype, allocator=allocator).copy_(l1_fp8_kernel)
     del l1_fp8_kernel
     l1_sf = allocator_tensor(l1_sf_src.shape, l1_sf_src.dtype, allocator=allocator).copy_(l1_sf_src)
@@ -1011,55 +990,6 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                 f"latency={latency * 1000:.1f} us"
             )
 
-    if args.profile_phases > 0:
-        reset_state()
-        for _ in range(args.warmup):
-            run_pipeline()
-            reset_state()
-
-        samples = []
-        for _ in range(args.profile_phases):
-            dist.barrier(group=group)
-            events = [torch.cuda.Event(enable_timing=True) for _ in range(3)]
-            events[0].record()
-            fused_l1(
-                x, x_sf, topk_idx, topk_weights, route_counts, recv_counts, route_slots, arrivals,
-                m_tasks, num_m_tasks, recv_x, recv_x_sf, recv_weights, src_ranks, src_tokens, src_topk,
-                l1_fp8, l1_sf, l2_x, l2_x_sf, barrier,
-            )
-            events[1].record()
-            fused_l2(
-                l2_x, l2_fp8, l2_x_sf, l2_sf, recv_counts, m_tasks, num_m_tasks, src_ranks,
-                src_tokens, src_topk, combine, barrier, out,
-            )
-            events[2].record()
-            events[2].synchronize()
-            local = torch.tensor(
-                [events[0].elapsed_time(events[1]), events[1].elapsed_time(events[2])],
-                dtype=torch.float32,
-                device="cuda",
-            )
-            gathered = [torch.empty_like(local) for _ in range(num_ranks)]
-            dist.all_gather(gathered, local, group=group)
-            if local_rank == 0:
-                samples.append(torch.stack(gathered).cpu())
-            reset_state()
-
-        if local_rank == 0:
-            stacked = torch.stack(samples)
-            max_rank_median = stacked.max(dim=1).values.median(dim=0).values * 1000
-            rank_medians = stacked.median(dim=0).values * 1000
-            print(
-                f"phase profile: samples={args.profile_phases} max-rank median "
-                f"l1={max_rank_median[0]:.1f} us l2={max_rank_median[1]:.1f} us "
-                f"total={max_rank_median[0] + max_rank_median[1]:.1f} us"
-            )
-            for phase_idx, phase_name in enumerate(("l1", "l2")):
-                rank_values = ", ".join(
-                    f"r{r}={rank_medians[r, phase_idx]:.1f}" for r in range(num_ranks)
-                )
-                print(f"phase profile {phase_name} rank medians (us): {rank_values}")
-
     allocator.close()
     dist.destroy_process_group()
 
@@ -1074,20 +1004,11 @@ if __name__ == "__main__":
     parser.add_argument("--num-topk", type=int, default=None)
     parser.add_argument("--num-tokens", type=int, default=64)
     parser.add_argument("--capacity", type=int, default=None)
-    parser.add_argument("--l1-experts-per-wave", type=int, default=None)
-    parser.add_argument("--l2-experts-per-wave", type=int, default=None)
-    parser.add_argument("--l2-scatter", choices=("auto", "direct", "warp"), default="auto")
     parser.add_argument("--activation-clamp", type=float, default=10.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--diff-tol", type=float, default=0.01)
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--rep", type=int, default=1)
-    parser.add_argument("--profile-phases", type=int, default=0)
-    parser.add_argument("--num-sms", type=int, default=None)
-    parser.add_argument("--l1-block-k", type=int, default=None)
-    parser.add_argument("--l1-frontend-regs", type=int, default=None)
-    parser.add_argument("--l1-math-regs", type=int, default=None)
-    parser.add_argument("--l1-stages", type=int, default=None)
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--print-source", action="store_true")
     args = parser.parse_args()
