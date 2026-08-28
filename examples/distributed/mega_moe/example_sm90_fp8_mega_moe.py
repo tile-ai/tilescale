@@ -649,11 +649,6 @@ def _allocator_size_bytes(
     return (total_bytes + 2**20 - 1) // 2**20 * 2**20
 
 
-def _gather_cat(tensor: torch.Tensor, group: dist.ProcessGroup) -> torch.Tensor:
-    gathered = [torch.empty_like(tensor) for _ in range(dist.get_world_size(group))]
-    dist.all_gather(gathered, tensor, group=group)
-    return torch.cat(gathered, dim=0)
-
 
 def torch_reference(
     x_fp8: torch.Tensor,
@@ -667,6 +662,10 @@ def torch_reference(
     group: dist.ProcessGroup,
     activation_clamp: float,
 ) -> torch.Tensor:
+    def _gather_cat(tensor: torch.Tensor, group: dist.ProcessGroup) -> torch.Tensor:
+        gathered = [torch.empty_like(tensor) for _ in range(dist.get_world_size(group))]
+        dist.all_gather(gathered, tensor, group=group)
+        return torch.cat(gathered, dim=0)
     l1_all = _gather_cat(l1_fp8, group)
     l1_sf_all = _gather_cat(l1_sf, group)
     l2_all = _gather_cat(l2_fp8, group)
@@ -721,16 +720,6 @@ def torch_reference(
 
     return result.to(torch.bfloat16)
 
-
-def calc_diff(x: torch.Tensor, y: torch.Tensor) -> float:
-    x, y = x.double(), y.double()
-    return (1 - 2 * (x * y).sum() / (x.square() + y.square()).sum()).item()
-
-
-def allocator_tensor(shape, dtype, allocator):
-    if dtype == torch.float8_e4m3fn:
-        return tilelang.tensor(shape, torch.uint8, allocator=allocator).view(dtype)
-    return tilelang.tensor(shape, dtype, allocator=allocator)
 
 
 def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
@@ -897,6 +886,11 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     # barrier_blocks currently lowers its byte offset as int32, so keep this
     # allocation before the multi-gigabyte Pro-model weights.
+    def allocator_tensor(shape, dtype, allocator):
+        if dtype == torch.float8_e4m3fn:
+            return tilelang.tensor(shape, torch.uint8, allocator=allocator).view(dtype)
+        return tilelang.tensor(shape, dtype, allocator=allocator)
+
     barrier = allocator_tensor((num_ranks,), torch.int32, allocator=allocator)
     x = allocator_tensor(x_fp8_src.shape, x_fp8_src.dtype, allocator=allocator).copy_(x_fp8_src)
     x_sf = allocator_tensor(x_sf_src.shape, x_sf_src.dtype, allocator=allocator).copy_(x_sf_src)
@@ -965,6 +959,11 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     dist.barrier(group=group)
 
     if args.check:
+
+        def calc_diff(x: torch.Tensor, y: torch.Tensor) -> float:
+            x, y = x.double(), y.double()
+            return (1 - 2 * (x * y).sum() / (x.square() + y.square()).sum()).item()
+
         expected = torch_reference(
             x_fp8_src, x_sf_src, topk_idx_src, topk_weights_src, l1_fp8_src,
             l1_sf_src, l2_fp8_src, l2_sf_src, group, activation_clamp,
